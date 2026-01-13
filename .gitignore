@@ -1,0 +1,54 @@
+# --- Python & Bytecode ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Distribution & Virtual Environments ---
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Dependency Management (uv) ---
+# It is recommended to commit uv.lock for reproducibility
+# If you prefer not to, uncomment the line below:
+# uv.lock
+
+# --- IDEs & macOS ---
+.DS_Store
+.vscode/
+.idea/
+
+# --- ENVIRONMENT VARIABLES & SECRETS (CRITICAL) ---
+.env
+.env.prod
+.env.test
+
+# --- DATA LAKE & MODELS (DO NOT COMMIT) ---
+data/raw/*
+data/processed/*
+data/models/*
+data/temp/*
+
+# Exception: Keep empty folder structure
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/models/.gitkeep
+
+# --- Local Databases & Files ---
+*.duckdb
+*.db
+*.sqlite3
+*.parquet
+*.csv
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- Testing & Coverage ---
+.coverage
+htmlcov/
+.pytest_cache/
