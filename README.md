@@ -29,18 +29,18 @@ The project follows a simplified Hexagonal Architecture (Src Layout) to decouple
 
 1. **Clone the repository:**
 
-       ```git clone <your-gitea-url>/backend-core.git```
-       ```cd backend-core```
+       git clone <your-gitea-url>/backend-core.git
+       cd backend-core
 
 2. **Install dependencies:**
    This project uses uv for dependency management.
 
-       ```uv sync```
+       uv sync
 
 3. **Environment Variables:**
    Create a .env file in the root directory based on the example:
 
-       ```cp .env.example .env```
+       cp .env.example .env
 
 ## Data Management (Local Data Lake)
 
@@ -53,13 +53,13 @@ The expected local structure is:
 
 To run the ETL pipeline (raw -> parquet conversion):
 
-    ```uv run python -m src.tesis_core.interface.cli.etl --input data/raw --output data/processed```
+    uv run python -m src.tesis_core.interface.cli.etl --input data/raw --output data/processed
 
 ## Running the Server
 
 To start the API in development mode:
 
-    ```uv run fastapi dev src/tesis_core/interface/api/main.py```
+    uv run fastapi dev src/tesis_core/interface/api/main.py
 
 Interactive documentation will be available at: http://localhost:8000/docs
 
@@ -67,4 +67,4 @@ Interactive documentation will be available at: http://localhost:8000/docs
 
 To execute unit and integration tests:
 
-    ```uv run pytest```
+    uv run pytest
