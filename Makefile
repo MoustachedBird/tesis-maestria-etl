@@ -2,7 +2,7 @@
 #  Tesis Backend Core - Makefile (Linux & macOS Compatible)
 # ==============================================================================
 
-.PHONY: help install api etl-download etl-retry etl-process docker-build docker-download docker-process clean check-os
+.PHONY: help install api etl-download etl-retry etl-process etl-harmonize docker-build docker-download docker-process docker-harmonize clean check-os
 
 # ------------------------------------------------------------------------------
 #  Global Configuration
@@ -60,6 +60,10 @@ etl-process: ## Step 2: Process ZIPs to Parquet (Polars). Usage: make etl-proces
 	@echo "⚙️  Processing DENUE data (High Performance Mode)..."
 	$(PYTHON) scripts/main.py process-denue --input-dir=$(RAW_DIR) --output-dir=$(PROCESSED_DIR)
 
+etl-harmonize: ## Step 3: Create Master Catalog (Identity Resolution). Usage: make etl-harmonize
+	@echo "🔗 Running Identity Resolution..."
+	$(PYTHON) scripts/main.py harmonize
+
 # ------------------------------------------------------------------------------
 #  4. Docker ETL Execution (The "Pro" Way)
 # ------------------------------------------------------------------------------
@@ -75,6 +79,10 @@ docker-download: ## Run Downloader inside Docker
 docker-process: ## Run Processor inside Docker
 	@echo "🐳 Running Processor in Docker..."
 	$(DOCKER_COMPOSE) run --rm etl process-denue
+
+docker-harmonize: ## Run Harmonizer inside Docker
+	@echo "🐳 Running Harmonizer in Docker..."
+	$(DOCKER_COMPOSE) run --rm etl harmonize
 
 # ------------------------------------------------------------------------------
 #  5. Maintenance

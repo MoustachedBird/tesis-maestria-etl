@@ -3,8 +3,9 @@ from pathlib import Path
 from rich.console import Console
 
 # Import orchestrators
-from scripts.sources.inegi import InegiDownloader
-from scripts.sources.denue import DenueProcessor
+from scripts.src.downloader import InegiDownloader
+from scripts.src.processor import DenueProcessor  # Updated to processors
+from scripts.src.harmonizer import harmonize_timeline  # New import
 
 # Help text explaining the CLI purpose
 app = typer.Typer(help="ETL Scripts Runner for the Thesis (Extract, Transform, Load)")
@@ -48,24 +49,32 @@ def retry_inegi(
 @app.command()
 def process_denue(
     input_dir: Path = typer.Option(DEFAULT_RAW_DIR, help="Folder containing downloaded ZIPs"),
-    output_dir: Path = typer.Option(DEFAULT_PROCESSED_DIR, help="Destination for Parquet files")
+    output_dir: Path = typer.Option(DEFAULT_PROCESSED_DIR, help="Destination for Parquet files"),
+    force: bool = typer.Option(False, "--force", "-f", help="Retry failed files in Manifest")
 ):
     """
-    Step 2: Process Raw ZIPs into Clean Parquet files (Processed Layer).
-    Uses Polars + Multiprocessing for high performance.
+    Step 2: Process Raw ZIPs -> Parquet.
+    Controlled by 'data/manifest_download.csv'.
     """
     console.print(f"[bold blue]⚙️ Starting DENUE Processor[/bold blue]")
-    console.print(f"📂 Input: {input_dir}")
-    console.print(f"📂 Output: {output_dir}")
     
-    # Validation
-    if not input_dir.exists():
-        console.print(f"[bold red]❌ Error: Input directory does not exist: {input_dir}[/bold red]")
-        raise typer.Exit(code=1)
-
-    # Instantiate and run processor
-    processor = DenueProcessor(input_dir=input_dir, output_dir=output_dir)
+    # Pasamos PROJECT_ROOT
+    processor = DenueProcessor(
+        input_dir=input_dir, 
+        output_dir=output_dir, 
+        project_root=PROJECT_ROOT, 
+        force_mode=force
+    )
     processor.process()
+
+@app.command()
+def harmonize():
+    """
+    Step 3: Identity Resolution (Gold Layer).
+    Generates the 'master_catalog.parquet' linking stores across time (2015-2024).
+    """
+    console.print(f"[bold magenta]🔗 Starting Identity Resolution[/bold magenta]")
+    harmonize_timeline()
 
 if __name__ == "__main__":
     app()

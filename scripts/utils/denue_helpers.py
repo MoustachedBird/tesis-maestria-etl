@@ -6,10 +6,9 @@ from datetime import datetime
 from typing import Tuple, Dict, List, Optional
 
 # --- CONSTANTS ---
-# Minimum columns required to determine folder structure (State/Municipality)
 REQUIRED_RAW_COLUMNS = ['entidad', 'municipio']
 
-# THE MASTER SCHEMA: Only these columns will be kept.
+# MASTER SCHEMA
 VALID_COLUMNS = [
     'id', 'clee', 'nom_estab', 'raz_social', 'codigo_act', 'nombre_act', 'per_ocu',
     'tipo_vial', 'nom_vial', 'tipo_v_e_1', 'nom_v_e_1', 'tipo_v_e_2', 
@@ -21,30 +20,33 @@ VALID_COLUMNS = [
     'latitud', 'longitud', 'fecha_alta'
 ]
 
-# Aliases to map older column names (e.g., 2015 data) to the standard schema
+# ALIASES FOR LEGACY DATA (2015-2016)
 COLUMN_ALIASES = {
     'nom_ent': 'entidad',
     'entidad_federativa': 'entidad',
+    'ent': 'entidad',
+    'desc_ent': 'entidad',
+    'nombre_ent': 'entidad',
+    'nombre_entidad': 'entidad',
+    
     'nom_mun': 'municipio',
-    'municipio_del_domicilio': 'municipio'
+    'municipio_del_domicilio': 'municipio',
+    'mun': 'municipio',
+    'desc_mun': 'municipio',
+    'nombre_mun': 'municipio',
+    'nombre_municipio': 'municipio'
 }
 
 def get_valid_columns_list() -> List[str]:
-    """Returns the sorted list of valid columns for the schema."""
     return sorted(VALID_COLUMNS)
 
 def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, target_columns: List[str]) -> Tuple[str, str, int, int]:
-    """
-    Processes the ZIP file applying Strict Schema Enforcement.
-    Returns: (Status, ChangeReport, TotalRows, ValidRows)
-    """
     warnings = [] 
 
     try:
-        # 1. READ ZIP (I/O Bound)
+        # 1. READ ZIP
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             files = zip_ref.namelist()
-            # Smart search for the data CSV
             csv_files = [f for f in files if f.endswith('.csv') and 'conjunto_de_datos' in f.lower()]
             if not csv_files: 
                 csv_files = [f for f in files if f.endswith('.csv')]
@@ -52,58 +54,45 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
             if not csv_files: 
                 return "SKIPPED", "No CSV found in ZIP", 0, 0
             
-            # Read bytes directly into memory
             csv_bytes = zip_ref.read(csv_files[0])
         
-        # 2. LOAD & FIX HEADERS (Handling duplicates before Polars reads)
+        # 2. LOAD & FIX HEADERS (Robust Encoding)
         try:
-            header_line = csv_bytes.split(b'\n')[0].decode('utf-8', errors='ignore').lower()
-            headers = [h.strip() for h in header_line.split(',')]
-        except Exception:
-            return "ERROR", "Could not decode CSV header", 0, 0
+            header_line = csv_bytes.split(b'\n')[0].decode('utf-8').lower()
+            encoding_used = 'utf8-lossy'
+        except UnicodeDecodeError:
+            header_line = csv_bytes.split(b'\n')[0].decode('latin-1').lower()
+            encoding_used = 'latin1'
+            warnings.append("Used Latin-1 encoding")
 
-        # Fix Duplicates (e.g., 'aguascalientes' appearing twice)
+        headers = [h.strip() for h in header_line.split(',')]
+
+        # Fix Duplicates
         if len(headers) != len(set(headers)):
             seen = {}
             new_headers = []
-            dupe_mappings = [] # To store "column -> column_dupe_1"
-            
+            dupe_mappings = []
             for h in headers:
                 if h in seen:
                     seen[h] += 1
                     new_name = f"{h}_dupe_{seen[h]}"
                     new_headers.append(new_name)
-                    # Log the explicit renaming
                     dupe_mappings.append(f"{h}->{new_name}")
                 else:
                     seen[h] = 0
                     new_headers.append(h)
             
             if dupe_mappings:
-                warnings.append(f"Renamed duplicates: {dupe_mappings}")
+                warnings.append(f"Renamed duplicates: {dupe_mappings[:3]}...") 
             
-            # Read CSV with the corrected header list
-            df = pl.read_csv(
-                csv_bytes, 
-                infer_schema_length=0, 
-                ignore_errors=True, 
-                encoding='utf8-lossy', 
-                has_header=True, 
-                new_columns=new_headers
-            )
+            df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding=encoding_used, has_header=True, new_columns=new_headers)
         else:
-            # Standard fast read
-            df = pl.read_csv(
-                csv_bytes, 
-                infer_schema_length=0, 
-                ignore_errors=True, 
-                encoding='utf8-lossy'
-            )
+            df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding=encoding_used)
 
-        # Normalize names to lowercase/stripped
+        # Normalize names
         df = df.rename({c: c.strip().lower() for c in df.columns})
 
-        # Apply Aliases (Fix 2015/Legacy columns)
+        # Apply Aliases
         renames = {}
         for old, new in COLUMN_ALIASES.items():
             if old in df.columns and new not in df.columns:
@@ -111,36 +100,22 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         
         if renames:
             df = df.rename(renames)
-            warnings.append(f"Applied aliases: {list(renames.keys())}")
+            warnings.append(f"Aliases applied: {list(renames.keys())}")
 
-        # Validate minimal requirements (Entidad/Municipio)
+        # Validate minimal requirements
         missing_req = [c for c in REQUIRED_RAW_COLUMNS if c not in df.columns]
-        if missing_req: 
-            return "ERROR", f"Missing critical columns: {missing_req}", 0, 0
+        if missing_req:
+            found_cols = df.columns[:10] 
+            return "ERROR", f"Missing {missing_req}. Found: {found_cols}", 0, 0
 
-        # ==============================================================================
-        # STEP 3: STRICT SCHEMA ENFORCEMENT
-        # ==============================================================================
-        
+        # 3. STRICT SCHEMA ENFORCEMENT
         current_cols = set(df.columns)
         target_set = set(target_columns)
         
-        # A. Detect extra columns (Outside schema)
-        extra_cols = list(current_cols - target_set)
-        if extra_cols:
-            extra_cols.sort()
-            # Log that we are ignoring/dropping these
-            warnings.append(f"Ignored columns: {extra_cols}")
-
-        # B. Detect missing columns (For informational purposes)
         missing_cols = list(target_set - current_cols)
-        if missing_cols:
-            missing_cols.sort()
-            # Log that we are filling these with nulls
-            warnings.append(f"Filled missing: {missing_cols}")
+        # Opcional: Loguear columnas faltantes si se desea
+        # if missing_cols: warnings.append(f"Filled missing: {len(missing_cols)}")
 
-        # C. Build Final Selector
-        # This creates the projection: Keep valid existing cols, Create nulls for missing ones.
         selection_exprs = []
         for col in target_columns:
             if col in df.columns:
@@ -148,27 +123,32 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
             else:
                 selection_exprs.append(pl.lit(None).alias(col))
         
-        # Apply strict filtering
         df = df.select(selection_exprs)
-        
-        # ==============================================================================
 
-        # 4. CLEANING (Rust Engine)
+        # 4. CLEANING & ID GENERATION
         df = df.with_columns(
             pl.col(pl.String).str.replace_all(r"[^a-zA-Z0-9\s_-]", "")
                              .str.replace_all(r"\s+", "_")
                              .str.strip_chars("_")
         )
+        
+        # --- NEW: ROW ID FOR HARMONIZATION ---
+        # Hash determinístico para rastrear la fila a través del tiempo
+        df = df.with_columns(
+            pl.concat_str(
+                [pl.col("entidad"), pl.col("municipio"), pl.col("nom_estab"), pl.lit(period)],
+                separator="_"
+            ).hash().cast(pl.UInt64).alias("row_id")
+        )
 
         total_rows = df.height
         valid_rows = 0
 
-        # 5. WRITE PARQUET (Partitioned)
+        # 5. WRITE PARQUET
         partitions = df.select(['entidad', 'municipio']).unique()
         
         for row in partitions.iter_rows():
             ent, mun = row
-            # Skip if keys are missing
             if not ent or not mun: continue
             
             ent_clean = str(ent).strip().replace(' ', '_')
@@ -183,11 +163,10 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
                 chunk.write_parquet(
                     save_path / "data.parquet", 
                     compression='snappy',
-                    use_pyarrow=True # Explicitly using PyArrow engine
+                    use_pyarrow=True
                 )
                 valid_rows += chunk.height
 
-        # Join warnings into a single string for the CSV report
         final_msg = "; ".join(warnings) if warnings else ""
         return "OK", final_msg, total_rows, valid_rows
 
@@ -196,9 +175,9 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
 
 def process_zip_worker(args: Tuple) -> Dict:
     """
-    Multiprocessing Worker Wrapper.
+    Worker que se ejecuta en paralelo.
+    Recibe ruta absoluta, pero retorna ruta relativa para el Manifiesto.
     """
-    # CRITICAL: Limit Polars to 1 thread per worker to avoid CPU contention.
     os.environ["POLARS_MAX_THREADS"] = "1"
     
     zip_path, period, target_columns, output_dir = args
@@ -206,12 +185,18 @@ def process_zip_worker(args: Tuple) -> Dict:
     
     status, msg, total, valid = extract_and_process_polars(zip_path, output_dir, period, target_columns)
     
+    # Calcular ruta relativa para que coincida con el ID en manifest_download.csv
+    try:
+        file_log = os.path.relpath(zip_path, os.getcwd())
+    except ValueError:
+        file_log = str(zip_path)
+
     return {
-        'file': zip_path.name,
+        'file': file_log, # ID para el manifiesto
         'period': period,
         'status': status,
         'total_rows': total,
         'valid_rows': valid,
-        'invalid_cols': msg, # This column will contain all the detailed logs
+        'invalid_cols': msg, 
         'time': (datetime.now() - start_time).total_seconds()
     }
