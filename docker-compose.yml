@@ -1,0 +1,21 @@
+services:
+  etl:
+    # Build the image using the specific ETL Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile.etl
+    image: tesis-etl:local
+    
+    # VOLUME MAPPING (Persistence)
+    # Left: Your local folder (Host)
+    # Right: The folder inside Docker
+    volumes:
+      - ./data:/app/data
+    
+    # SHARED MEMORY SIZE
+    # Critical: Chrome crashes in Docker without increased shared memory
+    shm_size: '2gb'
+    
+    # Environment Variables
+    environment:
+      - HEADLESS=true

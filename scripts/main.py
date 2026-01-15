@@ -1,7 +1,13 @@
-import typer
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+import typer
 from rich.console import Console
 from scripts.sources.inegi import InegiDownloader
+
 
 # Help text explaining the CLI purpose
 app = typer.Typer(help="ETL Scripts Runner for the Thesis (Extract, Transform, Load)")
