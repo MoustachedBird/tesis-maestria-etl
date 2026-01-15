@@ -39,19 +39,20 @@ def download_inegi(
 
 @app.command()
 def retry_inegi(
-    report: Path = typer.Argument(..., help="Path to the previous CSV report", exists=True),
-    output: Path = typer.Option(DEFAULT_DATA_DIR, help="Destination folder")
+    # We only need the directory now, because the filename is fixed (report_download.csv)
+    output: Path = typer.Option(DEFAULT_DATA_DIR, help="Directory containing the report to retry")
 ):
     """
-    Retries failed downloads based on a CSV report.
+    Retries failed downloads found in 'report_download.csv' inside the output directory.
     """
-    console.print(f"[bold yellow]🔄 Retrying from report: {report}[/bold yellow]")
+    console.print(f"[bold yellow]🔄 Starting Retry Process[/bold yellow]")
+    console.print(f"📂 Target Directory: {output}")
     
-    # Instantiate the class (usually headless for retries)
+    # Instantiate the class (Headless is typically fine for retries)
     downloader = InegiDownloader(output_dir=output, headless=True)
     
-    # Execute the retry logic
-    downloader.retry(report_csv=report)
+    # Execute the retry logic (No arguments needed now)
+    downloader.retry()
 
 if __name__ == "__main__":
     app()

@@ -7,14 +7,13 @@
 # ------------------------------------------------------------------------------
 #  Global Configuration
 # ------------------------------------------------------------------------------
-# Force Bash to ensure consistent behavior across MacOS (zsh default) and Linux
 SHELL := /bin/bash
 
-# Command definitions
-PYTHON := uv run python
+# PYTHONPATH=. ensures Python finds the 'scripts' module locally
+PYTHON := PYTHONPATH=. uv run python
 DOCKER_COMPOSE := docker compose
 
-# Default arguments (can be overridden: make etl-download HEADLESS=false)
+# Default arguments
 HEADLESS ?= true
 OUTPUT ?= data/raw/denue
 
@@ -50,13 +49,11 @@ api: ## Run FastAPI server in development mode
 
 etl-download: ## Run ETL Download locally. Usage: make etl-download HEADLESS=false
 	@echo "🕷️  Running Inegi Downloader locally..."
-	@# Usamos lógica de Make: Si HEADLESS es "true", usa --headless, si no, usa --no-headless
 	$(PYTHON) scripts/main.py download-inegi $(if $(filter true,$(HEADLESS)),--headless,--no-headless) --output=$(OUTPUT)
 
-etl-retry: ## Retry failed downloads. Usage: make etl-retry REPORT=path/to/report.csv
-	@if [ -z "$(REPORT)" ]; then echo "❌ Error: REPORT argument is missing. Use make etl-retry REPORT=..."; exit 1; fi
-	@echo "🔄 Retrying downloads from report..."
-	$(PYTHON) scripts/main.py retry-inegi $(REPORT)
+etl-retry: ## Retry failed downloads from 'report_download.csv'. Usage: make etl-retry
+	@echo "🔄 Retrying downloads from report in $(OUTPUT)..."
+	$(PYTHON) scripts/main.py retry-inegi --output=$(OUTPUT)
 
 # ------------------------------------------------------------------------------
 #  4. Docker ETL Execution (The "Pro" Way)
