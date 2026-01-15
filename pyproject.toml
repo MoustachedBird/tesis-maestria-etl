@@ -10,7 +10,8 @@ dependencies = [
     "pydantic-settings",
     "duckdb",
     "polars",
-    "python-dotenv"
+    "python-dotenv",
+    "pyarrow>=22.0.0",
 ]
 
 [dependency-groups]

@@ -2,7 +2,7 @@
 #  Tesis Backend Core - Makefile (Linux & macOS Compatible)
 # ==============================================================================
 
-.PHONY: help install api etl-download etl-retry docker-build docker-download clean check-os
+.PHONY: help install api etl-download etl-retry etl-process docker-build docker-download docker-process clean check-os
 
 # ------------------------------------------------------------------------------
 #  Global Configuration
@@ -15,7 +15,8 @@ DOCKER_COMPOSE := docker compose
 
 # Default arguments
 HEADLESS ?= true
-OUTPUT ?= data/raw/denue
+RAW_DIR ?= data/raw/denue
+PROCESSED_DIR ?= data/processed/denue
 
 # ------------------------------------------------------------------------------
 #  1. Help & Utilities
@@ -31,7 +32,7 @@ check-os: ## Print detected OS information
 	@echo "🖥️  Detected OS: $$(uname -s)"
 	@echo "🐚 Shell: $(SHELL)"
 
-install: ## Install dependencies with uv (including ETL group)
+install: ## Install dependencies with uv
 	@echo "📦 Installing dependencies..."
 	uv sync --all-groups
 
@@ -47,30 +48,33 @@ api: ## Run FastAPI server in development mode
 #  3. Local ETL Execution (Runs on your machine)
 # ------------------------------------------------------------------------------
 
-etl-download: ## Run ETL Download locally. Usage: make etl-download HEADLESS=false
-	@echo "🕷️  Running Inegi Downloader locally..."
-	$(PYTHON) scripts/main.py download-inegi $(if $(filter true,$(HEADLESS)),--headless,--no-headless) --output=$(OUTPUT)
+etl-download: ## Step 1: Download Raw Data. Usage: make etl-download HEADLESS=false
+	@echo "🕷️  Running Inegi Downloader..."
+	$(PYTHON) scripts/main.py download-inegi $(if $(filter true,$(HEADLESS)),--headless,--no-headless) --output=$(RAW_DIR)
 
-etl-retry: ## Retry failed downloads from 'report_download.csv'. Usage: make etl-retry
-	@echo "🔄 Retrying downloads from report in $(OUTPUT)..."
-	$(PYTHON) scripts/main.py retry-inegi --output=$(OUTPUT)
+etl-retry: ## Step 1.5: Retry failed downloads. Usage: make etl-retry
+	@echo "🔄 Retrying downloads in $(RAW_DIR)..."
+	$(PYTHON) scripts/main.py retry-inegi --output=$(RAW_DIR)
+
+etl-process: ## Step 2: Process ZIPs to Parquet (Polars). Usage: make etl-process
+	@echo "⚙️  Processing DENUE data (High Performance Mode)..."
+	$(PYTHON) scripts/main.py process-denue --input-dir=$(RAW_DIR) --output-dir=$(PROCESSED_DIR)
 
 # ------------------------------------------------------------------------------
 #  4. Docker ETL Execution (The "Pro" Way)
 # ------------------------------------------------------------------------------
 
-docker-build: ## Build the Docker ETL image
+docker-build: ## Re-build the Docker ETL image (Run this after adding libs)
 	@echo "🔨 Building Docker image..."
 	$(DOCKER_COMPOSE) build
 
-docker-download: ## Run ETL inside Docker. Usage: make docker-download
-	@echo "🐳 Running Downloader inside Docker..."
+docker-download: ## Run Downloader inside Docker
+	@echo "🐳 Running Downloader in Docker..."
 	$(DOCKER_COMPOSE) run --rm etl download-inegi
 
-docker-debug: ## Run ETL inside Docker showing the browser (No-Headless)
-	@echo "🐳 Running Downloader inside Docker (Visible Mode)..."
-	@echo "⚠️  Note: This requires X11/Display configuration on macOS/Linux to be visible."
-	$(DOCKER_COMPOSE) run --rm etl download-inegi --no-headless
+docker-process: ## Run Processor inside Docker
+	@echo "🐳 Running Processor in Docker..."
+	$(DOCKER_COMPOSE) run --rm etl process-denue
 
 # ------------------------------------------------------------------------------
 #  5. Maintenance
