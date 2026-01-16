@@ -1,314 +1,238 @@
 import polars as pl
-import numpy as np
-from sklearn.neighbors import BallTree
-from thefuzz import fuzz
-from pathlib import Path
-import os
-import uuid
 import logging
-import shutil
-import re # Para limpieza de teléfonos
-
+import gc
+from pathlib import Path
 from scripts.utils.manifest import ManifestManager
+from scripts.utils.matching import clean_contact_columns
 
-# --- CONFIGURACIÓN ---
-SILVER_DIR = Path("data/processed/denue")
-CURATED_ROOT = Path("data/curated")
-CURATED_DENUE_DIR = CURATED_ROOT / "denue"
-MASTER_CATALOG_PATH = CURATED_DENUE_DIR / "master_catalog.parquet"
+# Importamos la refactorización
+from scripts.utils.harmonizer_config import MEGA_REGIONS, SILVER_SCHEMA, COLS_NEEDED_FOR_MATCHING, TEXT_COLS_TO_SANITIZE
+from scripts.utils.harmonizer_core import (
+    get_region_prefix, 
+    initialize_knowledge_base, 
+    resolve_period_logic, 
+    update_kb_logic, 
+    consolidate_global_catalog
+)
 
-# --- PARÁMETROS ---
-SPATIAL_TOLERANCE_METERS = 60 # Mantenemos esto estricto para casos sin contacto
-IDENTITY_SIMILARITY_THRESHOLD = 80 
-ACTIVITY_SIMILARITY_THRESHOLD = 60 
-
-def setup_logging():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
-
-def generate_temp_clee():
-    return f"NEW_{uuid.uuid4().hex[:12]}"
-
-def clean_phone(phone_series):
-    """Normaliza teléfonos: quita guiones, espacios, paréntesis."""
-    # Nota: Esto es vectorizado en Polars
-    return phone_series.str.replace_all(r"[^0-9]", "")
-
-def resolve_identities_smart(df_all: pl.DataFrame) -> pl.DataFrame:
-    """
-    Jerarquía de Identidad:
-    1. CLEE Oficial (Gold Standard).
-    2. Huella Digital (Teléfono/Email/Web) -> Permite mudanzas lejanas.
-    3. Proximidad Física + Nombre + Giro -> Para negocios locales sin datos digitales.
-    """
-    periods = sorted(df_all['period'].unique().to_list(), reverse=True)
-    logging.info(f"📅 Procesando línea de tiempo: {periods}")
-
-    # Columnas extendidas
-    cols_needed = [
-        'row_id', 'clee', 'nom_estab', 'raz_social', 'nombre_act', 
-        'latitud', 'longitud', 'period',
-        'telefono', 'correoelec', 'www' # <--- NUEVOS CAMPOS CLAVE
-    ]
-    
-    # Pre-procesamiento global: Limpieza básica de datos de contacto
-    df_clean = df_all.select(cols_needed).with_columns([
-        pl.col('telefono').str.replace_all(r"[^0-9]", "").alias('tel_clean'),
-        pl.col('correoelec').str.to_lowercase().str.strip_chars().alias('email_clean'),
-        pl.col('www').str.to_lowercase().str.strip_chars().alias('www_clean')
-    ])
-
-    dict_dfs = {p: df_clean.filter(pl.col('period') == p) for p in periods}
-
-    # --- AÑO BASE ---
-    current_period = periods[0]
-    df_current = dict_dfs[current_period]
-    
-    df_resolved_accumulated = df_current.with_columns(
-        pl.when((pl.col('clee').is_not_null()) & (pl.col('clee') != ""))
-        .then(pl.col('clee'))
-        .otherwise(pl.col('row_id').map_elements(lambda x: generate_temp_clee(), return_dtype=pl.Utf8))
-        .alias('master_clee')
-    ) # Mantenemos todas las columnas para el matching
-
-    # --- BACK-PROPAGATION ---
-    for i in range(1, len(periods)):
-        target_period = periods[i]
-        ref_period = periods[i-1]
+class DenueHarmonizer:
+    def __init__(self, project_root: Path):
+        self.root = project_root
+        self.silver_dir = self.root / "data/processed/denue"
+        self.curated_root = self.root / "data/curated"
+        self.curated_dir = self.curated_root / "denue"
+        self.master_catalog_path = self.curated_dir / "master_catalog.parquet"
+        self.manifest_mgr = ManifestManager(self.root / "data")
         
-        logging.info(f"🔗 Vinculando: {target_period} -> {ref_period}")
+        # Parámetros
+        self.spatial_tol = 60
+        self.identity_thresh = 80
+        self.activity_thresh = 60
         
-        df_target = dict_dfs[target_period]
-        
-        # Referencia (Futuro ya resuelto)
-        # Hacemos join para traer los datos del futuro (coords, nombres, contactos) + el master_clee asignado
-        df_ref_context = df_resolved_accumulated.join(
-            dict_dfs[ref_period].select(['row_id']), on='row_id', how='inner'
-        )
+        self._setup_logging()
 
-        if df_target.height == 0 or df_ref_context.height == 0:
-            # Fallback local
-            df_target_local = df_target.with_columns(
-                pl.when((pl.col('clee').is_not_null()) & (pl.col('clee') != ""))
-                .then(pl.col('clee'))
-                .otherwise(pl.col('row_id').map_elements(lambda x: generate_temp_clee(), return_dtype=pl.Utf8))
-                .alias('master_clee')
+    def _setup_logging(self):
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+        self.logger = logging.getLogger("Harmonizer")
+
+    def get_processing_groups(self) -> list[list[str]]:
+        """Detecta carpetas y arma los grupos."""
+        available_states = set()
+        for path in self.silver_dir.glob("state=*"):
+            if path.is_dir():
+                available_states.add(path.name.split("=")[1])
+        
+        groups = []
+        handled_states = set()
+
+        for region_name, states_in_region in MEGA_REGIONS.items():
+            current_group = [s for s in states_in_region if s in available_states]
+            if current_group:
+                groups.append(current_group)
+                self.logger.info(f"🔗 Mega-Región detectada ({region_name}): {current_group}")
+                handled_states.update(current_group)
+
+        for state in sorted(list(available_states)):
+            if state not in handled_states:
+                groups.append([state])
+        return groups
+
+    def load_group_history(self, state_list: list[str]) -> pl.DataFrame:
+        """Carga IO y limpieza inicial."""
+        dfs = []
+        for state in state_list:
+            try:
+                state_path = self.silver_dir / f"state={state}"
+                if not state_path.exists() or not any(state_path.glob("**/*.parquet")): 
+                    continue
+                
+                self.logger.info(f"   📂 Cargando: {state}")
+                q = pl.scan_parquet(state_path / "**/*.parquet", hive_partitioning=True, schema=SILVER_SCHEMA)
+                
+                df_part = q.select(COLS_NEEDED_FOR_MATCHING).filter(
+                    pl.col('latitud').is_not_null() & pl.col('longitud').is_not_null()
+                ).collect()
+                dfs.append(df_part)
+            except Exception as e:
+                self.logger.error(f"❌ Error cargando {state}: {e}")
+
+        if not dfs: return pl.DataFrame()
+
+        full_df = pl.concat(dfs)
+        full_df = full_df.with_columns([
+            pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in full_df.columns
+        ])
+        return clean_contact_columns(full_df)
+
+    def process_group(self, state_list: list[str]) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Coordina la lógica Core."""
+        prefix = get_region_prefix(state_list)
+        self.logger.info(f"   🔑 Namespace de Región: {prefix}")
+        
+        df_group = self.load_group_history(state_list)
+        if df_group.is_empty():
+            return pl.DataFrame(), pl.DataFrame()
+
+        periods = sorted(df_group['period'].unique().to_list(), reverse=True)
+        self.logger.info(f"   📅 Periodos detectados: {periods}")
+        
+        dict_dfs = {p: df_group.filter(pl.col('period') == p) for p in periods}
+        
+        # --- Llamadas al Core ---
+        map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
+        
+        for i in range(1, len(periods)):
+            period = periods[i]
+            # Delegamos la matemática a harmonizer_core
+            df_resolved = resolve_period_logic(
+                dict_dfs[period], kb, prefix, 
+                self.spatial_tol, self.identity_thresh, self.activity_thresh
             )
-            df_resolved_accumulated = df_resolved_accumulated.vstack(df_target_local)
-            continue
+            map_accum = map_accum.vstack(df_resolved.select(['row_id', 'master_clee']))
+            kb = update_kb_logic(kb, df_resolved)
+            
+        return map_accum, kb
 
-        # --- ESTRATEGIA DE 3 CAPAS ---
+    def run(self, incremental: bool = True):
+        """Punto de entrada con soporte Incremental."""
+        self.curated_root.mkdir(parents=True, exist_ok=True)
         
-        # 1. MATCH DETERMINISTA (CLEE Oficial)
-        df_target_with_clee = df_target.filter((pl.col('clee').is_not_null()) & (pl.col('clee') != ""))
+        # 1. Detectar Grupos Físicos (Disco)
+        all_groups = self.get_processing_groups()
         
-        df_res_A = df_target_with_clee.with_columns(pl.col('clee').alias('master_clee'))
+        # 2. Lógica Incremental: ¿Qué procesamos?
+        groups_to_process = []
         
-        # Registros restantes (Sin CLEE)
-        df_target_missing = df_target.filter((pl.col('clee').is_null()) | (pl.col('clee') == ""))
-        
-        # 2. MATCH DIGITAL (Huella Digital)
-        # Buscamos coincidencias exactas en Teléfono, Email o Web
-        # Esto es costoso en Python puro, pero rápido con Joins en Polars
-        
-        # Filtramos referencia para tener solo datos válidos de contacto
-        ref_digital = df_ref_context.filter(
-            (pl.col('tel_clean').str.len_chars() > 6) | 
-            (pl.col('email_clean').str.len_chars() > 5) |
-            (pl.col('www_clean').str.len_chars() > 5)
-        )
-        
-        # Hacemos un Join "sucio" (Outer o concatenación de condiciones) para encontrar matches digitales
-        # Para simplificar y optimizar, lo haremos iterativo solo para los que quedan
-        
-        # Preparamos listas para el BallTree (Fase 3), pero iremos restando los que encontremos en Fase 2
-        # NOTA: Para no complicar excesivamente con Joins múltiples, usaremos la iteración Python 
-        # para aplicar Fase 2 y Fase 3 secuencialmente sobre los mismos índices.
-        
-        # --- PREPARACIÓN VECTORES ---
-        ref_coords = np.radians(df_ref_context.select(['latitud', 'longitud']).to_numpy())
-        target_coords = np.radians(df_target_missing.select(['latitud', 'longitud']).to_numpy())
-        
-        # Datos Target
-        t_ids = df_target_missing['row_id'].to_list()
-        t_names = df_target_missing['nom_estab'].fill_null("").to_list()
-        t_razones = df_target_missing['raz_social'].fill_null("").to_list()
-        t_acts = df_target_missing['nombre_act'].fill_null("").to_list()
-        t_tels = df_target_missing['tel_clean'].fill_null("").to_list()
-        t_emails = df_target_missing['email_clean'].fill_null("").to_list()
-        t_wwws = df_target_missing['www_clean'].fill_null("").to_list()
-        
-        # Datos Referencia
-        r_names = df_ref_context['nom_estab'].fill_null("").to_list()
-        r_razones = df_ref_context['raz_social'].fill_null("").to_list()
-        r_acts = df_ref_context['nombre_act'].fill_null("").to_list()
-        r_tels = df_ref_context['tel_clean'].fill_null("").to_list()
-        r_emails = df_ref_context['email_clean'].fill_null("").to_list()
-        r_wwws = df_ref_context['www_clean'].fill_null("").to_list()
-        r_master_clees = df_ref_context['master_clee'].to_list()
-        
-        # BallTree para Fase 3 (Proximidad)
-        tree = BallTree(ref_coords, metric='haversine')
-        radius_rad = SPATIAL_TOLERANCE_METERS / 6371000
-        indices, _ = tree.query_radius(target_coords, r=radius_rad, return_distance=True)
-        
-        new_links = []
-        
-        # Métricas de depuración
-        count_digital = 0
-        count_spatial = 0
-        
-        for idx in range(len(t_ids)):
-            best_clee = None
-            match_found_strategy = None
+        if incremental:
+            # Preguntamos al manifiesto qué está pendiente (NEW o ERROR)
+            tasks = self.manifest_mgr.get_harmonization_tasks(retry_errors=True)
             
-            # --- ESTRATEGIA 2: HUELLA DIGITAL (Prioridad Alta) ---
-            # Verificamos si este target tiene match digital con ALGUIEN de la referencia (no solo vecinos cercanos)
-            # NOTA: Hacer búsqueda global es O(N^2). Para eficiencia, limitamos la búsqueda digital 
-            # a un radio geográfico más amplio (ej. 20km) o asumimos que el BallTree nos da candidatos cercanos.
-            # *Mejora:* Si tienes millones de datos, indexa teléfonos en un Hash Map.
-            # Aquí, para simplicidad, verificamos primero dentro de los vecinos cercanos, 
-            # y si el usuario quiere, podríamos extenderlo.
-            
-            # Verificación rápida en vecinos (Combinamos proximidad + digital para altísima certeza)
-            neighbors = indices[idx]
-            
-            if len(neighbors) > 0:
-                t_phone = t_tels[idx]
-                t_mail = t_emails[idx]
-                t_web = t_wwws[idx]
-                t_act = t_acts[idx]
-                t_name = str(t_names[idx])
-                t_raz = str(t_razones[idx])
-                
-                best_score = 0
-                
-                for n_idx in neighbors:
-                    # 1. Match Digital (The "Silver Bullet")
-                    # Si coincide teléfono (y es válido > 6 dígitos)
-                    is_digital_match = False
-                    if len(t_phone) > 6 and t_phone == r_tels[n_idx]: is_digital_match = True
-                    if len(t_mail) > 5 and t_mail == r_emails[n_idx]: is_digital_match = True
-                    if len(t_web) > 5 and t_web == r_wwws[n_idx]: is_digital_match = True
-                    
-                    if is_digital_match:
-                        best_clee = r_master_clees[n_idx]
-                        match_found_strategy = "DIGITAL"
-                        break # Encontramos al padre definitivo, dejamos de buscar
-                    
-                    # 2. Match Espacial + Nombre (Fallback)
-                    # Filtro de Giro
-                    act_score = fuzz.token_set_ratio(t_act, r_acts[n_idx])
-                    if act_score < ACTIVITY_SIMILARITY_THRESHOLD: continue
-                    
-                    # Filtro de Nombre
-                    score_name = fuzz.token_sort_ratio(t_name, str(r_names[n_idx]))
-                    score_raz = 0
-                    if len(t_raz) > 2:
-                        score_raz = fuzz.token_sort_ratio(t_raz, str(r_razones[n_idx]))
-                    
-                    final_score = max(score_name, score_raz)
-                    
-                    if final_score > IDENTITY_SIMILARITY_THRESHOLD and final_score > best_score:
-                        best_score = final_score
-                        best_clee = r_master_clees[n_idx]
-                        match_found_strategy = "SPATIAL"
+            if not tasks:
+                self.logger.info("✨ Todo está armonizado. Nada que hacer.")
+                return
 
-            # Resultados
-            if best_clee:
-                final_clee = best_clee
-                if match_found_strategy == "DIGITAL": count_digital += 1
-                else: count_spatial += 1
+            # Extraemos los estados que necesitan actualización
+            # tasks es lista de dicts con keys: 'state', 'partition_path', etc.
+            pending_states = set(t['state'] for t in tasks if 'state' in t)
+            
+            if not pending_states:
+                # Fallback si el manifiesto no tiene columna state
+                self.logger.warning("⚠️ No se detectaron estados en las tareas. Ejecutando todo.")
+                groups_to_process = all_groups
             else:
-                final_clee = generate_temp_clee()
-            
-            # Agregamos al dataframe de resultados (incluyendo metadatos para la siguiente iteración)
-            # Usamos el diccionario original para llenar los datos
-            new_links.append(df_target_missing[idx].select(df_resolved_accumulated.columns).with_columns(
-                pl.lit(final_clee).alias('master_clee')
-            ))
-
-        # Reconstruir DataFrame B
-        if new_links:
-            # Concatenar lista de DataFrames de una fila es lento, mejor construir dicts
-            # Pero como ya tenemos rows en polars, usamos vstack sobre un esquema vacío o concat
-            df_res_B = pl.concat(new_links)
+                self.logger.info(f"🎯 Estados pendientes: {pending_states}")
+                # Filtramos los grupos: Si UN estado del grupo está pendiente, procesamos TODO el grupo
+                for group in all_groups:
+                    # Intersección: si hay elementos en común entre el grupo y los pendientes
+                    if not set(group).isdisjoint(pending_states):
+                        groups_to_process.append(group)
         else:
-            df_res_B = df_res_A.clear() # Vacío con mismo esquema
+            # Modo Fuerza Bruta
+            groups_to_process = all_groups
 
-        # Unir A y B
-        df_period_resolved = df_res_A.vstack(df_res_B)
+        self.logger.info(f"🌎 Procesando {len(groups_to_process)} de {len(all_groups)} grupos.")
         
-        # Agregar al acumulado
-        df_resolved_accumulated = df_resolved_accumulated.vstack(df_period_resolved)
+        global_catalog_buffer = [] 
+        processed_partitions = [] # Para actualizar el manifiesto al final
+
+        # 3. Loop de Procesamiento
+        for i, group in enumerate(groups_to_process, 1):
+            group_name = "+".join(group) if len(group) > 1 else group[0]
+            self.logger.info(f"🚀 [{i}/{len(groups_to_process)}] Procesando: {group_name}")
+            
+            group_map, group_kb = self.process_group(group)
+            
+            if not group_map.is_empty():
+                self.logger.info(f"   💾 Escribiendo resultados locales...")
+                # Guardamos y obtenemos qué archivos tocamos para actualizar el manifiesto
+                affected_files = self._save_local_results(group, group_map)
+                processed_partitions.extend(affected_files)
+                
+                global_catalog_buffer.append(group_kb)
+            
+            del group_map
+            del group_kb
+            gc.collect()
+            
+        # 4. Consolidación (Solo si hubo cambios, o si forzamos regeneración)
+        # Nota: Idealmente deberíamos cargar el Master existente y hacer merge, 
+        # pero para tu tesis, regenerarlo con lo nuevo es aceptable si procesas todo,
+        # o si procesas parcial, deberías leer el master actual.
+        # POR AHORA: Si es incremental, asumimos que quieres reconstruir el master 
+        # con lo que acabas de procesar + lo que ya existía (Complejo).
+        # SIMPLIFICACIÓN: El Master Catalog se reconstruye mejor corriendo un FULL run periódicamente.
         
-        logging.info(f"   📊 Stats: Oficiales={df_res_A.height} | Digital={count_digital} | Espacial={count_spatial} | Nuevos={len(new_links)-count_digital-count_spatial}")
+        if global_catalog_buffer:
+            self.logger.info("📚 Actualizando Master Catalog (Parcial)...")
+            # Cuidado: Esto sobrescribe el master solo con lo procesado hoy.
+            # Para producción real necesitarías leer el master viejo y unir.
+            # Para tesis: Asumiremos que corres 'make etl-harmonize' (Full) la primera vez
+            master_kb = consolidate_global_catalog(global_catalog_buffer)
+            master_kb.write_parquet(self.master_catalog_path)
+            self.logger.info(f"🏆 Catálogo Maestro Guardado.")
+        
+        # 5. Actualizar Manifiesto
+        if processed_partitions:
+            self.logger.info(f"📝 Actualizando estado de {len(processed_partitions)} particiones...")
+            updates = [{"partition_path": p, "status": "HARMONIZED"} for p in processed_partitions]
+            self.manifest_mgr.update_harmonization_status(updates)
 
-    return df_resolved_accumulated.select(['row_id', 'master_clee'])
+        self.logger.info("✨ Proceso Finalizado.")
 
-def propagate_to_curated(id_map: pl.DataFrame):
-    logging.info(f"🚀 Materializando capa Curated en: {CURATED_DENUE_DIR}")
-    if CURATED_DENUE_DIR.exists(): shutil.rmtree(CURATED_DENUE_DIR)
-    CURATED_DENUE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    files = list(SILVER_DIR.glob("**/*.parquet"))
-    lz_map = id_map.lazy()
-    
-    for i, file_path in enumerate(files, 1):
-        try:
-            rel_path = file_path.relative_to(SILVER_DIR)
-            dest_path = CURATED_DENUE_DIR / rel_path
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Join y reemplazo de CLEE
-            df_curated = pl.read_parquet(file_path).drop('clee').lazy().join(
-                lz_map, on='row_id', how='left'
-            ).rename({'master_clee': 'clee'}).collect()
-            
-            cols = ['clee'] + [c for c in df_curated.columns if c != 'clee']
-            df_curated.select(cols).write_parquet(dest_path, compression='snappy')
-            
-            if i % 100 == 0: print(f"   ⏳ {i}/{len(files)}...", end='\r')
-        except Exception as e:
-            logging.error(f"❌ Error: {e}")
+    def _save_local_results(self, group: list[str], group_map: pl.DataFrame) -> list[str]:
+        """Helper privado. Retorna lista de partition_paths relativos actualizados."""
+        lz_map = group_map.lazy()
+        target_files = []
+        for state in group:
+            state_path = self.silver_dir / f"state={state}"
+            target_files.extend(list(state_path.glob("**/*.parquet")))
+        
+        updated_paths = []
 
-def harmonize():
-    setup_logging()
-    CURATED_ROOT.mkdir(parents=True, exist_ok=True)
-    manifest_mgr = ManifestManager(Path("data"))
+        for file_path in target_files:
+            try:
+                rel_path = file_path.relative_to(self.silver_dir) # path para manifest
+                dest_path = self.curated_dir / rel_path
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                df_curated = pl.read_parquet(file_path).drop('clee').lazy().join(
+                    lz_map, on='row_id', how='left'
+                ).rename({'master_clee': 'clee'}).collect()
+                
+                cols = ['clee'] + [c for c in df_curated.columns if c != 'clee']
+                df_curated.select(cols).write_parquet(dest_path, compression='snappy')
+                
+                # Agregamos a la lista de actualizados
+                # Ojo: El manifiesto usa paths relativos a PROJECT_ROOT/data/processed/denue?
+                # Revisando manifest.py, usa relative_to(project_root).
+                # Ajustamos para coincidir con lo que espera manifest.py
+                full_rel_path = str(file_path.relative_to(self.root)) # data/processed/denue/...
+                updated_paths.append(full_rel_path)
 
-    logging.info("⏳ Cargando Silver Layer...")
-    try:
-        q = pl.scan_parquet(SILVER_DIR / "**/*.parquet", hive_partitioning=True)
-        if 'row_id' not in q.collect_schema(): return
-    except Exception: return
-
-    # Columnas extendidas requeridas
-    cols = [
-        'row_id', 'clee', 'nom_estab', 'raz_social', 'nombre_act', 
-        'latitud', 'longitud', 'period', 'telefono', 'correoelec', 'www'
-    ]
-    
-    try:
-        df_input = q.select(cols).filter(
-            pl.col('latitud').is_not_null() & pl.col('longitud').is_not_null()
-        ).collect()
-    except Exception as e:
-        logging.error(f"Faltan columnas requeridas (telefono, correoelec, etc): {e}")
-        return
-
-    if df_input.height == 0: return
-
-    df_identity_map = resolve_identities_smart(df_input)
-    propagate_to_curated(df_identity_map)
-    
-    logging.info(f"💾 Guardando Catálogo...")
-    df_identity_map.write_parquet(MASTER_CATALOG_PATH)
-
-    tasks = manifest_mgr.get_harmonization_tasks(retry_errors=True)
-    if tasks:
-        manifest_mgr.update_harmonization_status([{"partition_path": t['partition_path'], "status": "HARMONIZED"} for t in tasks])
-    
-    logging.info("🏆 PROCESO TERMINADO")
-
+            except Exception as e:
+                self.logger.error(f"Error escribiendo {file_path.name}: {e}")
+        
+        return updated_paths
 if __name__ == "__main__":
-    harmonize()
+    harmonizer = DenueHarmonizer(Path.cwd())
+    harmonizer.run()

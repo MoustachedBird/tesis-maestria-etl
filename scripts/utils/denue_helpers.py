@@ -1,9 +1,10 @@
 import os
 import zipfile
 import polars as pl
+import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, Dict, List
 
 # --- CONSTANTS ---
 REQUIRED_RAW_COLUMNS = ['entidad', 'municipio']
@@ -20,21 +21,52 @@ VALID_COLUMNS = [
     'latitud', 'longitud', 'fecha_alta'
 ]
 
-# ALIASES FOR LEGACY DATA (2015-2016)
+# ALIASES (Expandido pero seguro)
 COLUMN_ALIASES = {
+    # Entidad
     'nom_ent': 'entidad',
     'entidad_federativa': 'entidad',
     'ent': 'entidad',
     'desc_ent': 'entidad',
     'nombre_ent': 'entidad',
     'nombre_entidad': 'entidad',
+    'cve_ent': 'entidad', 
     
+    # Municipio
     'nom_mun': 'municipio',
     'municipio_del_domicilio': 'municipio',
     'mun': 'municipio',
     'desc_mun': 'municipio',
     'nombre_mun': 'municipio',
-    'nombre_municipio': 'municipio'
+    'nombre_municipio': 'municipio',
+    'municipio_delegacion': 'municipio',
+    'municipio_o_delegacion': 'municipio',
+    'cve_mun': 'municipio',
+
+    # Localidad
+    'nom_loc': 'localidad',
+    'loc': 'localidad',
+    
+    # CP
+    'cod_post': 'cod_postal',
+    'cp': 'cod_postal',
+    'codigo_postal': 'cod_postal',
+    
+    # Fecha
+    'fecha_alta_base': 'fecha_alta'
+}
+
+# --- NUEVO: NORMALIZACIÓN DE VALORES DE ENTIDAD ---
+ENTITY_VALUE_NORMALIZATION = {
+    "DISTRITO FEDERAL": "CIUDAD DE MÉXICO",
+    "DISTRITO_FEDERAL": "CIUDAD DE MÉXICO",
+    "DF": "CIUDAD DE MÉXICO",
+    "COAHUILA DE ZARAGOZA": "COAHUILA DE ZARAGOZA", 
+    "MICHOACÁN DE OCAMPO": "MICHOACÁN DE OCAMPO",
+    "VERACRUZ DE IGNACIO DE LA LLAVE": "VERACRUZ DE IGNACIO DE LA LLAVE",
+    "MÉXICO": "ESTADO DE MÉXICO",
+    "MEXICO": "ESTADO DE MÉXICO",
+    "EDO. DE MÉXICO": "ESTADO DE MÉXICO",
 }
 
 def get_valid_columns_list() -> List[str]:
@@ -56,43 +88,39 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
             
             csv_bytes = zip_ref.read(csv_files[0])
         
-        # 2. LOAD & FIX HEADERS (Robust Encoding)
+        # 2. DETECT ENCODING
         try:
             header_line = csv_bytes.split(b'\n')[0].decode('utf-8').lower()
-            encoding_used = 'utf8-lossy'
+            encoding_used = 'utf8' 
         except UnicodeDecodeError:
-            header_line = csv_bytes.split(b'\n')[0].decode('latin-1').lower()
-            encoding_used = 'latin1'
-            warnings.append("Encoding: Latin-1")
+            encoding_used = 'latin1' 
+            warnings.append("Enc:Latin1")
 
-        headers = [h.strip() for h in header_line.split(',')]
-
-        # Fix Duplicates
-        if len(headers) != len(set(headers)):
-            seen = {}
-            new_headers = []
-            dupe_mappings = []
-            for h in headers:
-                if h in seen:
-                    seen[h] += 1
-                    new_name = f"{h}_dupe_{seen[h]}"
-                    new_headers.append(new_name)
-                    dupe_mappings.append(f"{h}->{new_name}")
-                else:
-                    seen[h] = 0
-                    new_headers.append(h)
-            
-            if dupe_mappings:
-                warnings.append(f"Deduped: {len(dupe_mappings)} cols") 
-            
-            df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding=encoding_used, has_header=True, new_columns=new_headers)
-        else:
+        # 3. LOAD CSV
+        try:
             df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding=encoding_used)
+        except Exception:
+            df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding='latin1')
+            warnings.append("Force:Latin1")
 
-        # Normalize names
-        df = df.rename({c: c.strip().lower() for c in df.columns})
+        # 4. NORMALIZE HEADERS
+        df = df.rename({c: c.lower().strip().replace('\ufeff', '') for c in df.columns})
 
-        # Apply Aliases
+        # 5. FIX DUPLICATE HEADERS
+        if len(df.columns) != len(set(df.columns)):
+            new_cols = []
+            seen = {}
+            for c in df.columns:
+                if c in seen:
+                    seen[c] += 1
+                    new_cols.append(f"{c}_dupe_{seen[c]}")
+                else:
+                    seen[c] = 0
+                    new_cols.append(c)
+            df.columns = new_cols
+            warnings.append("DedupedCols")
+
+        # 6. APPLY ALIASES
         renames = {}
         for old, new in COLUMN_ALIASES.items():
             if old in df.columns and new not in df.columns:
@@ -100,30 +128,25 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         
         if renames:
             df = df.rename(renames)
-            warnings.append(f"Aliased: {list(renames.keys())}")
 
-        # Validate minimal requirements
+        # 7. VALIDATE REQUIREMENTS
         missing_req = [c for c in REQUIRED_RAW_COLUMNS if c not in df.columns]
         if missing_req:
-            found_cols = df.columns[:10] 
-            return "ERROR", f"Missing critical {missing_req}. Found: {found_cols}...", 0, 0
+            return "ERROR", f"Missing {missing_req}. Found: {df.columns[:5]}...", 0, 0
 
-        # 3. STRICT SCHEMA ENFORCEMENT & REPORTING (NUEVO)
+        # 8. SCHEMA REPORTING & FILL
         current_cols = set(df.columns)
         target_set = set(target_columns)
         
-        # A. Detectar columnas faltantes (que se llenarán con NULL)
         missing_cols = list(target_set - current_cols)
         if missing_cols:
             missing_cols.sort()
-            # Mostramos las primeras 3 para no ensuciar el log
-            detail = f"({', '.join(missing_cols[:3])}...)" if len(missing_cols) > 3 else f"({', '.join(missing_cols)})"
+            detail = f"({', '.join(missing_cols[:2])}...)" if len(missing_cols) > 2 else f"({', '.join(missing_cols)})"
             warnings.append(f"Filled: {len(missing_cols)} {detail}")
 
-        # B. Detectar columnas ignoradas (extras en el CSV)
         ignored_cols = list(current_cols - target_set)
         if ignored_cols:
-            warnings.append(f"Ignored: {len(ignored_cols)} extra cols")
+            warnings.append(f"Ignored: {len(ignored_cols)}")
 
         selection_exprs = []
         for col in target_columns:
@@ -134,46 +157,72 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         
         df = df.select(selection_exprs)
 
-        # 4. CLEANING & ID GENERATION
-        df = df.with_columns(
-            pl.col(pl.String).str.replace_all(r"[^a-zA-Z0-9\s_-]", "")
-                             .str.replace_all(r"\s+", "_")
-                             .str.strip_chars("_")
-        )
-        
-        # Row ID
+        # 9. CLEANING & CASTING
+        df = df.unique()
+
+        # --- APLICAMOS NORMALIZACIÓN DE VALORES AQUÍ (ANTES DE PARTICIONAR) ---
+        df = df.with_columns([
+            pl.col('latitud').cast(pl.Float64, strict=False),
+            pl.col('longitud').cast(pl.Float64, strict=False),
+            # Normalización de Entidad: UpperCase + Reemplazo DF->CDMX
+            pl.col('entidad')
+              .cast(pl.Utf8)
+              .fill_null("DESCONOCIDO")
+              .str.to_uppercase()
+              .replace(ENTITY_VALUE_NORMALIZATION, default=pl.col('entidad').str.to_uppercase()),
+            
+            pl.col('municipio').cast(pl.Utf8).fill_null("DESCONOCIDO").str.to_uppercase(),
+            pl.lit(period).alias('period')
+        ])
+        # ----------------------------------------------------------------------
+
+        # 10. ROW ID GENERATION
         df = df.with_columns(
             pl.concat_str(
-                [pl.col("entidad"), pl.col("municipio"), pl.col("nom_estab"), pl.lit(period)],
-                separator="_"
-            ).hash().cast(pl.UInt64).alias("row_id")
+                [
+                    pl.col('id').fill_null('NOID'), 
+                    pl.col('nom_estab').fill_null('NONAME'), 
+                    pl.col('latitud').fill_null(0).cast(pl.Utf8),
+                    pl.col('longitud').fill_null(0).cast(pl.Utf8),
+                    pl.col('period')
+                ],
+                separator="|"
+            )
+            .hash(seed=42)
+            .cast(pl.Utf8)
+            .alias("row_id")
         )
 
         total_rows = df.height
         valid_rows = 0
 
-        # 5. WRITE PARQUET
+        # 11. ATOMIC WRITE
         partitions = df.select(['entidad', 'municipio']).unique()
         
         for row in partitions.iter_rows():
             ent, mun = row
             if not ent or not mun: continue
             
-            ent_clean = str(ent).strip().replace(' ', '_')
-            mun_clean = str(mun).strip().replace(' ', '_')
+            ent_clean = str(ent).strip().replace(' ', '_').replace('/', '-').replace('.', '')
+            mun_clean = str(mun).strip().replace(' ', '_').replace('/', '-').replace('.', '')
             
+            # Ahora ent_clean será CIUDAD_DE_MÉXICO incluso para datos viejos del DF
             save_path = output_dir / f"state={ent_clean}" / f"municipality={mun_clean}" / f"period={period}"
             save_path.mkdir(parents=True, exist_ok=True)
             
             chunk = df.filter((pl.col('entidad') == ent) & (pl.col('municipio') == mun))
             
             if chunk.height > 0:
-                chunk.write_parquet(
-                    save_path / "data.parquet", 
-                    compression='snappy',
-                    use_pyarrow=True
-                )
-                valid_rows += chunk.height
+                final_file = save_path / "data.parquet"
+                temp_file = save_path / f"temp_{uuid.uuid4().hex}.parquet"
+                
+                try:
+                    chunk.write_parquet(temp_file, compression='snappy', use_pyarrow=True)
+                    temp_file.replace(final_file)
+                    valid_rows += chunk.height
+                except Exception as e:
+                    if temp_file.exists(): temp_file.unlink()
+                    raise e
 
         final_msg = "; ".join(warnings) if warnings else "Clean Schema"
         return "OK", final_msg, total_rows, valid_rows

@@ -1,11 +1,12 @@
 import typer
 from pathlib import Path
 from rich.console import Console
+from rich.markup import escape
 
 # Import orchestrators
 from scripts.src.downloader import InegiDownloader
 from scripts.src.processor import DenueProcessor  # Updated to processors
-from scripts.src.harmonizer import harmonize_timeline  # New import
+from scripts.src.harmonizer import DenueHarmonizer
 
 # Help text explaining the CLI purpose
 app = typer.Typer(help="ETL Scripts Runner for the Thesis (Extract, Transform, Load)")
@@ -73,8 +74,22 @@ def harmonize():
     Step 3: Identity Resolution (Gold Layer).
     Generates the 'master_catalog.parquet' linking stores across time (2015-2024).
     """
-    console.print(f"[bold magenta]🔗 Starting Identity Resolution[/bold magenta]")
-    harmonize_timeline()
+    console.print(f"[bold magenta]🔗 Starting Identity Resolution (Gold Layer)[/bold magenta]")
+    
+    try:
+        # 1. Instanciar la clase pasándole la raíz del proyecto
+        harmonizer = DenueHarmonizer(project_root=PROJECT_ROOT)
+        
+        # 2. Ejecutar el pipeline
+        harmonizer.run()
+        
+        console.print(f"[bold green]✨ Harmonization Pipeline Finished Successfully[/bold green]")
+        
+    except Exception as e:
+        # Usamos escape(str(e)) para que los corchetes [] del error 
+        # no confundan a la terminal de rich
+        console.print(f"[bold red]❌ Harmonization Failed: {escape(str(e))}[/bold red]")
+        raise typer.Exit(code=1)
 
 if __name__ == "__main__":
     app()
