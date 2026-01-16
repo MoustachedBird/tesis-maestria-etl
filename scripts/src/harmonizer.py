@@ -93,23 +93,46 @@ class DenueHarmonizer:
         if df_group.is_empty():
             return pl.DataFrame(), pl.DataFrame()
 
-        periods = sorted(df_group['period'].unique().to_list(), reverse=True)
+        # --- FIX ORDEN CRONOLÓGICO ---
+        # Convertimos 'MM_YYYY' a tupla (YYYY, MM) para ordenar correctamente
+        unique_periods = df_group['period'].unique().to_list()
+        periods = sorted(
+            unique_periods, 
+            key=lambda x: (int(x.split('_')[1]), int(x.split('_')[0])), 
+            reverse=True
+        )
+        # -----------------------------
+
         self.logger.info(f"   📅 Periodos detectados: {periods}")
         
         dict_dfs = {p: df_group.filter(pl.col('period') == p) for p in periods}
         
         # --- Llamadas al Core ---
+        self.logger.info(f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}...")
         map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
         
         for i in range(1, len(periods)):
             period = periods[i]
+            target_rows = dict_dfs[period].height
+            
+            # --- LOGS DE PROGRESO ---
+            self.logger.info(f"      🔄 [{i}/{len(periods)-1}] Analizando periodo {period} ({target_rows} negocios)...")
+            self.logger.info(f"         ↳ Propagando CLEEs del futuro hacia {period}...")
+            # ------------------------
+            
             # Delegamos la matemática a harmonizer_core
             df_resolved = resolve_period_logic(
                 dict_dfs[period], kb, prefix, 
                 self.spatial_tol, self.identity_thresh, self.activity_thresh
             )
+            
             map_accum = map_accum.vstack(df_resolved.select(['row_id', 'master_clee']))
+            
+            self.logger.info(f"         🧠 Aprendiendo y actualizando memoria con datos de {period}...")
             kb = update_kb_logic(kb, df_resolved)
+            
+            # --- LOG FINAL DEL PERIODO ---
+            self.logger.info(f"         ✅ {period} Terminado. Entidades totales en memoria: {kb.height}")
             
         return map_accum, kb
 

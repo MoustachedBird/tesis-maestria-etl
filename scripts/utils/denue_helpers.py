@@ -161,17 +161,24 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         df = df.unique()
 
         # --- APLICAMOS NORMALIZACIÓN DE VALORES AQUÍ (ANTES DE PARTICIONAR) ---
+        # Añadimos strip_chars() para eliminar espacios invisibles que rompen el replace
         df = df.with_columns([
             pl.col('latitud').cast(pl.Float64, strict=False),
             pl.col('longitud').cast(pl.Float64, strict=False),
-            # Normalización de Entidad: UpperCase + Reemplazo DF->CDMX
+            
             pl.col('entidad')
               .cast(pl.Utf8)
               .fill_null("DESCONOCIDO")
               .str.to_uppercase()
-              .replace(ENTITY_VALUE_NORMALIZATION, default=pl.col('entidad').str.to_uppercase()),
+              .str.strip_chars() # <--- Limpieza de espacios en blanco
+              .replace(ENTITY_VALUE_NORMALIZATION, default=pl.col('entidad').str.to_uppercase().str.strip_chars()),
             
-            pl.col('municipio').cast(pl.Utf8).fill_null("DESCONOCIDO").str.to_uppercase(),
+            pl.col('municipio')
+              .cast(pl.Utf8)
+              .fill_null("DESCONOCIDO")
+              .str.to_uppercase()
+              .str.strip_chars(), # <--- Limpieza de espacios en blanco
+            
             pl.lit(period).alias('period')
         ])
         # ----------------------------------------------------------------------
@@ -197,19 +204,22 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         valid_rows = 0
 
         # 11. ATOMIC WRITE
+        # Extraemos las particiones de la columna ya limpia y normalizada
         partitions = df.select(['entidad', 'municipio']).unique()
+        
         
         for row in partitions.iter_rows():
             ent, mun = row
             if not ent or not mun: continue
             
-            ent_clean = str(ent).strip().replace(' ', '_').replace('/', '-').replace('.', '')
-            mun_clean = str(mun).strip().replace(' ', '_').replace('/', '-').replace('.', '')
+            # Limpieza para nombres de carpeta basada en valores ya normalizados
+            ent_clean = str(ent).replace(' ', '_').replace('/', '-').replace('.', '')
+            mun_clean = str(mun).replace(' ', '_').replace('/', '-').replace('.', '')
             
-            # Ahora ent_clean será CIUDAD_DE_MÉXICO incluso para datos viejos del DF
             save_path = output_dir / f"state={ent_clean}" / f"municipality={mun_clean}" / f"period={period}"
             save_path.mkdir(parents=True, exist_ok=True)
             
+            # El filtro ahora usará el valor exacto que salió del replace/strip
             chunk = df.filter((pl.col('entidad') == ent) & (pl.col('municipio') == mun))
             
             if chunk.height > 0:
@@ -229,7 +239,7 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
 
     except Exception as e:
         return "ERROR", str(e)[:150], 0, 0
-
+    
 def process_zip_worker(args: Tuple) -> Dict:
     os.environ["POLARS_MAX_THREADS"] = "1"
     

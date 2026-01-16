@@ -32,6 +32,9 @@ def initialize_knowledge_base(df_base: pl.DataFrame, region_prefix: str) -> tupl
     kb = df_resolved.group_by('master_clee').agg([
         pl.col('latitud').first(), 
         pl.col('longitud').first(),
+        # --- NUEVO: Agregamos el periodo inicial ---
+        pl.col('period').alias('periods'),
+        # -------------------------------------------
         pl.col('nom_estab').fill_null("").alias('names'),
         pl.col('raz_social').fill_null("").alias('razones'),
         pl.col('nombre_act').fill_null("").alias('acts'),
@@ -108,6 +111,9 @@ def resolve_period_logic(df_target: pl.DataFrame, kb: pl.DataFrame, region_prefi
 def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.DataFrame:
     """Actualiza la KB con nuevos datos."""
     kb_updates = new_resolved_data.group_by('master_clee').agg([
+        # --- NUEVO: Agregamos el periodo del nuevo hallazgo ---
+        pl.col('period').alias('periods'),
+        # ----------------------------------------------------
         pl.col('nom_estab').fill_null("").alias('names'),
         pl.col('raz_social').fill_null("").alias('razones'),
         pl.col('nombre_act').fill_null("").alias('acts'),
@@ -130,6 +136,9 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
         pl.col('master_clee'),
         pl.coalesce(['latitud', 'latitud_new']).alias('latitud'),
         pl.coalesce(['longitud', 'longitud_new']).alias('longitud'),
+        # --- NUEVO: Merge de periodos (ordenados) ---
+        merge_lists('periods').list.sort().alias('periods'),
+        # --------------------------------------------
         merge_lists('names').alias('names'),
         merge_lists('razones').alias('razones'),
         merge_lists('acts').alias('acts'),
@@ -148,6 +157,9 @@ def consolidate_global_catalog(catalog_buffer: list[pl.DataFrame]) -> pl.DataFra
     return full_concat.group_by('master_clee').agg([
         pl.col('latitud').first(),
         pl.col('longitud').first(),
+        # --- NUEVO: Merge de periodos en consolidación final (ordenados) ---
+        merge_lists_final('periods').list.sort().alias('periods'),
+        # ------------------------------------------------------------------
         merge_lists_final('names'),
         merge_lists_final('razones'),
         merge_lists_final('acts'),

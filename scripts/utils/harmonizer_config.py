@@ -2,7 +2,11 @@ import polars as pl
 
 # --- CONFIGURACIÓN DE MEGA-REGIONES ---
 MEGA_REGIONS = {
-    "ZM_VALLE_MEXICO": ["CIUDAD_DE_MÉXICO", "MÉXICO", "DISTRITO_FEDERAL"],
+    "ZM_VALLE_MEXICO": [
+        "CIUDAD_DE_MÉXICO", 
+        "ESTADO_DE_MÉXICO",  # Actualizado para coincidir con la nueva normalización
+        "DISTRITO_FEDERAL"   # Se mantiene por compatibilidad con datos históricos
+    ],
     "LA_LAGUNA": ["COAHUILA_DE_ZARAGOZA", "DURANGO"],
     "PUEBLA_TLAXCALA": ["PUEBLA", "TLAXCALA"],
     "VALLARTA": ["JALISCO", "NAYARIT"]
