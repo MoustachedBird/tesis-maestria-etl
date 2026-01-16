@@ -29,6 +29,7 @@ env/
 # --- DATA LAKE & MODELS (DO NOT COMMIT) ---
 data/raw/*
 data/processed/*
+data/curated/*
 data/models/*
 data/temp/*
 
