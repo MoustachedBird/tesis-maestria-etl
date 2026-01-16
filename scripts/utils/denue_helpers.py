@@ -63,7 +63,7 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         except UnicodeDecodeError:
             header_line = csv_bytes.split(b'\n')[0].decode('latin-1').lower()
             encoding_used = 'latin1'
-            warnings.append("Used Latin-1 encoding")
+            warnings.append("Encoding: Latin-1")
 
         headers = [h.strip() for h in header_line.split(',')]
 
@@ -83,7 +83,7 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
                     new_headers.append(h)
             
             if dupe_mappings:
-                warnings.append(f"Renamed duplicates: {dupe_mappings[:3]}...") 
+                warnings.append(f"Deduped: {len(dupe_mappings)} cols") 
             
             df = pl.read_csv(csv_bytes, infer_schema_length=0, ignore_errors=True, encoding=encoding_used, has_header=True, new_columns=new_headers)
         else:
@@ -100,21 +100,30 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
         
         if renames:
             df = df.rename(renames)
-            warnings.append(f"Aliases applied: {list(renames.keys())}")
+            warnings.append(f"Aliased: {list(renames.keys())}")
 
         # Validate minimal requirements
         missing_req = [c for c in REQUIRED_RAW_COLUMNS if c not in df.columns]
         if missing_req:
             found_cols = df.columns[:10] 
-            return "ERROR", f"Missing {missing_req}. Found: {found_cols}", 0, 0
+            return "ERROR", f"Missing critical {missing_req}. Found: {found_cols}...", 0, 0
 
-        # 3. STRICT SCHEMA ENFORCEMENT
+        # 3. STRICT SCHEMA ENFORCEMENT & REPORTING (NUEVO)
         current_cols = set(df.columns)
         target_set = set(target_columns)
         
+        # A. Detectar columnas faltantes (que se llenarán con NULL)
         missing_cols = list(target_set - current_cols)
-        # Opcional: Loguear columnas faltantes si se desea
-        # if missing_cols: warnings.append(f"Filled missing: {len(missing_cols)}")
+        if missing_cols:
+            missing_cols.sort()
+            # Mostramos las primeras 3 para no ensuciar el log
+            detail = f"({', '.join(missing_cols[:3])}...)" if len(missing_cols) > 3 else f"({', '.join(missing_cols)})"
+            warnings.append(f"Filled: {len(missing_cols)} {detail}")
+
+        # B. Detectar columnas ignoradas (extras en el CSV)
+        ignored_cols = list(current_cols - target_set)
+        if ignored_cols:
+            warnings.append(f"Ignored: {len(ignored_cols)} extra cols")
 
         selection_exprs = []
         for col in target_columns:
@@ -132,8 +141,7 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
                              .str.strip_chars("_")
         )
         
-        # --- NEW: ROW ID FOR HARMONIZATION ---
-        # Hash determinístico para rastrear la fila a través del tiempo
+        # Row ID
         df = df.with_columns(
             pl.concat_str(
                 [pl.col("entidad"), pl.col("municipio"), pl.col("nom_estab"), pl.lit(period)],
@@ -167,17 +175,13 @@ def extract_and_process_polars(zip_path: Path, output_dir: Path, period: str, ta
                 )
                 valid_rows += chunk.height
 
-        final_msg = "; ".join(warnings) if warnings else ""
+        final_msg = "; ".join(warnings) if warnings else "Clean Schema"
         return "OK", final_msg, total_rows, valid_rows
 
     except Exception as e:
-        return "ERROR", str(e)[:100], 0, 0
+        return "ERROR", str(e)[:150], 0, 0
 
 def process_zip_worker(args: Tuple) -> Dict:
-    """
-    Worker que se ejecuta en paralelo.
-    Recibe ruta absoluta, pero retorna ruta relativa para el Manifiesto.
-    """
     os.environ["POLARS_MAX_THREADS"] = "1"
     
     zip_path, period, target_columns, output_dir = args
@@ -185,14 +189,13 @@ def process_zip_worker(args: Tuple) -> Dict:
     
     status, msg, total, valid = extract_and_process_polars(zip_path, output_dir, period, target_columns)
     
-    # Calcular ruta relativa para que coincida con el ID en manifest_download.csv
     try:
         file_log = os.path.relpath(zip_path, os.getcwd())
     except ValueError:
         file_log = str(zip_path)
 
     return {
-        'file': file_log, # ID para el manifiesto
+        'file': file_log,
         'period': period,
         'status': status,
         'total_rows': total,

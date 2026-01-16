@@ -9,17 +9,22 @@ class ManifestManager:
         self.raw_manifest_path = data_root / "manifest_download.csv"
         self.processed_manifest_path = data_root / "manifest_processed.csv"
         
-        # Esquemas
-        # 1. RAW (Descargas ZIP)
+        # 1. ESQUEMA UNIFICADO (Descarga + Proceso)
         self.raw_schema = {
-            "file_path": pl.Utf8,    # ID Único (ruta relativa)
+            "file_path": pl.Utf8,       # Primary Key (Ruta relativa)
+            "download_url": pl.Utf8,
             "period": pl.Utf8,
-            "status": pl.Utf8,       # NEW, DONE, ERROR
-            "last_updated": pl.Utf8,
-            "error_msg": pl.Utf8
+            # Estado de Descarga
+            "download_status": pl.Utf8, # OK, NOK
+            "download_msg": pl.Utf8,
+            # Estado de Procesamiento
+            "process_status": pl.Utf8,  # NEW, DONE, ERROR
+            "process_msg": pl.Utf8,
+            
+            "last_updated": pl.Utf8
         }
         
-        # 2. PROCESSED (Parquets Silver) - ¡Mejorado!
+        # 2. PROCESSED (Parquets Silver)
         self.processed_schema = {
             "partition_path": pl.Utf8, # ID Único
             "period": pl.Utf8,
@@ -36,69 +41,164 @@ class ManifestManager:
     def _get_timestamp(self):
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # ... [MANTENER MÉTODOS init_raw_manifest, get_raw_tasks, update_raw_status_batch IGUAL QUE ANTES] ...
-    # Voy a resumir init_raw_manifest para no repetir todo el código, asumiendo que ya lo tienes
-    # Si lo necesitas completo dímelo, pero solo cambió lo de abajo:
+    # ==========================================
+    # 1. MÉTODOS PARA EL DOWNLOADER
+    # ==========================================
+
+    def register_download(self, file_path: str, url: str, period: str, status: str, msg: str):
+        """Registra o actualiza una descarga en el manifiesto unificado."""
+        # Si la descarga es exitosa, queda listo para procesar (NEW)
+        # Si falló, queda en espera (WAITING)
+        proc_status = "NEW" if status == "OK" else "WAITING"
+        if status != "OK": proc_status = "WAITING"
+
+        new_row = pl.DataFrame([{
+            "file_path": file_path,
+            "download_url": url,
+            "period": period,
+            "download_status": status,
+            "download_msg": str(msg),
+            "process_status": proc_status,
+            "process_msg": "",
+            "last_updated": self._get_timestamp()
+        }], schema=self.raw_schema)
+
+        if self.raw_manifest_path.exists():
+            df = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+            # Upsert: Borrar viejo si existe e insertar nuevo
+            df = df.filter(pl.col("file_path") != file_path)
+            df = pl.concat([df, new_row], how="vertical")
+            df.write_csv(self.raw_manifest_path)
+        else:
+            new_row.write_csv(self.raw_manifest_path)
+
+    def get_failed_downloads(self):
+        """Retorna descargas fallidas (NOK) para reintentar."""
+        if not self.raw_manifest_path.exists(): return []
+        df = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+        return df.filter(pl.col("download_status") != "OK").to_dicts()
+
+    def get_existing_downloads(self):
+        """Retorna lista de URLs ya descargadas exitosamente (para evitar re-descargar)."""
+        if not self.raw_manifest_path.exists(): return set()
+        df = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+        return set(df.filter(pl.col("download_status") == "OK")["download_url"].to_list())
+
+    # ==========================================
+    # 2. MÉTODOS PARA EL PROCESSOR
+    # ==========================================
 
     def init_raw_manifest(self, raw_dir: Path):
-        # ... (código existente de init_raw_manifest) ...
-        # (Asegúrate de tener la versión corregida con Path.cwd() que te di antes)
+        """
+        Escanea disco para detectar archivos manuales (Fallback).
+        Útil si metiste ZIPs manualmente sin usar el downloader.
+        """
         print(f"🔍 Sincronizando manifiesto RAW desde: {raw_dir}")
         physical_files = []
         project_root = Path.cwd()
+        
         for f in raw_dir.glob("**/*.zip"):
             try:
                 rel_path = str(f.resolve().relative_to(project_root))
                 period = f.parent.name
-                physical_files.append({"file_path": rel_path, "period": period})
+                physical_files.append({
+                    "file_path": rel_path, 
+                    "period": period,
+                    "download_status": "OK",
+                    "process_status": "NEW"
+                })
             except ValueError: continue 
-        if not physical_files: return
         
-        df_physical = pl.DataFrame(physical_files)
+        if not physical_files: return
+        df_phys = pl.DataFrame(physical_files)
+
         if self.raw_manifest_path.exists():
-            df_manifest = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
-            df_new = df_physical.join(df_manifest, on="file_path", how="anti")
+            df = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+            # Solo agregar si NO existe en el manifiesto (Anti-Join)
+            df_new = df_phys.join(df, on="file_path", how="anti")
+            
             if df_new.height > 0:
+                # Rellenar columnas faltantes para coincidir con esquema
                 df_new = df_new.with_columns([
-                    pl.lit("NEW").alias("status"), pl.lit(self._get_timestamp()).alias("last_updated"), pl.lit("").alias("error_msg")
+                    pl.lit("Manual Discovery").alias("download_url"),
+                    pl.lit("Found on disk").alias("download_msg"),
+                    pl.lit("").alias("process_msg"),
+                    pl.lit(self._get_timestamp()).alias("last_updated")
                 ]).select(self.raw_schema.keys())
-                pl.concat([df_manifest, df_new], how="vertical").write_csv(self.raw_manifest_path)
-                print(f"📦 Manifiesto RAW: {df_new.height} archivos nuevos.")
+                
+                pl.concat([df, df_new], how="vertical").write_csv(self.raw_manifest_path)
+                print(f"📦 Manifiesto RAW: {df_new.height} archivos nuevos detectados.")
         else:
-            df_final = df_physical.with_columns([
-                pl.lit("NEW").alias("status"), pl.lit(self._get_timestamp()).alias("last_updated"), pl.lit("").alias("error_msg")
-            ]).select(self.raw_schema.keys())
-            df_final.write_csv(self.raw_manifest_path)
-            print(f"📦 Manifiesto RAW creado: {df_final.height} archivos.")
+            # Crear desde cero si no existe
+            df_phys.with_columns([
+                pl.lit("Manual Discovery").alias("download_url"),
+                pl.lit("Found on disk").alias("download_msg"),
+                pl.lit("").alias("process_msg"),
+                pl.lit(self._get_timestamp()).alias("last_updated")
+            ]).select(self.raw_schema.keys()).write_csv(self.raw_manifest_path)
+            print(f"📦 Manifiesto RAW creado con {df_phys.height} archivos.")
 
     def get_raw_tasks(self, retry_errors=False):
+        """Obtiene tareas de procesamiento (NEW/ERROR) que ya fueron descargadas (OK)."""
         if not self.raw_manifest_path.exists(): return []
         df = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+        
         target = ["NEW", "ERROR"] if retry_errors else ["NEW"]
-        return df.filter(pl.col("status").is_in(target)).to_dicts()
+        
+        return df.filter(
+            (pl.col("process_status").is_in(target)) & 
+            (pl.col("download_status") == "OK")
+        ).to_dicts()
 
     def update_raw_status_batch(self, updates: list):
+        """
+        Actualiza el estado de procesamiento (process_status) preservando 
+        la información original de descarga (download_url, period, etc).
+        """
         if not updates: return
-        df_updates = pl.DataFrame(updates).with_columns(pl.lit(self._get_timestamp()).alias("last_updated"))
-        df_manifest = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
-        df_unchanged = df_manifest.join(df_updates, on="file_path", how="anti")
-        df_updates_clean = df_updates.select(df_manifest.columns)
-        pl.concat([df_unchanged, df_updates_clean], how="vertical").write_csv(self.raw_manifest_path)
-        print(f"💾 RAW status actualizado ({len(updates)} items).")
-
-    # ... [MANTENER rebuild_processed_manifest, get_harmonization_tasks, update_harmonization_status IGUAL] ...
-    
-    def rebuild_processed_manifest(self, processed_dir: Path):
-        print(f"🔄 Sincronizando inventario PROCESSED en: {processed_dir}")
         
+        # 1. DataFrame con los cambios (file_path, process_status, process_msg)
+        df_updates = pl.DataFrame(updates).with_columns(
+            pl.lit(self._get_timestamp()).alias("last_updated")
+        )
+        
+        # 2. Cargar Manifiesto Original
+        df_manifest = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
+        
+        # 3. Separar Columnas Estáticas (CRÍTICO: Preservar 'period' y datos de descarga)
+        cols_to_preserve = ["file_path", "period", "download_url", "download_status", "download_msg"]
+        df_static_info = df_manifest.select(cols_to_preserve)
+        
+        # 4. Enriquecer los updates con la info estática original (Left Join)
+        df_updates_full = df_updates.join(df_static_info, on="file_path", how="left")
+        
+        # Ordenar columnas según esquema maestro
+        df_updates_full = df_updates_full.select(self.raw_schema.keys())
+        
+        # 5. Filtrar las filas viejas que NO se tocaron (Anti-Join)
+        df_unchanged = df_manifest.join(df_updates, on="file_path", how="anti")
+        
+        # 6. Concatenar y Guardar
+        df_final = pl.concat([df_unchanged, df_updates_full], how="vertical")
+        df_final.write_csv(self.raw_manifest_path)
+        
+        print(f"💾 Estatus de procesamiento actualizado ({len(updates)} items).")
+
+    # ==========================================
+    # 3. PROCESSED MANIFEST (Silver Layer)
+    # ==========================================
+
+    def rebuild_processed_manifest(self, processed_dir: Path):
+        """
+        Escanea los archivos Parquet generados y actualiza el inventario Silver.
+        Soporta migración de esquema automática.
+        """
+        print(f"🔄 Sincronizando inventario PROCESSED en: {processed_dir}")
         abs_processed_dir = processed_dir.resolve()
         project_root = Path.cwd()
 
-        if not abs_processed_dir.exists():
-            print(f"❌ Error: No existe {abs_processed_dir}")
-            return
+        if not abs_processed_dir.exists(): return
 
-        # 1. Escaneo Físico
         files = list(abs_processed_dir.glob("**/*.parquet"))
         physical_records = []
 
@@ -106,6 +206,7 @@ class ManifestManager:
             try:
                 stats = f.stat()
                 parts = f.parts
+                # Extracción de particiones: state=X/municipality=Y/period=Z
                 try:
                     period = next(p for p in parts if "period=" in p).split("=")[1]
                     mun = next(p for p in parts if "municipality=" in p).split("=")[1]
@@ -114,6 +215,8 @@ class ManifestManager:
                     continue
 
                 rel_path = str(f.resolve().relative_to(project_root))
+                
+                # Lectura rápida de metadatos parquet
                 row_count = pl.scan_parquet(f).select(pl.len()).collect().item()
                 
                 physical_records.append({
@@ -124,6 +227,7 @@ class ManifestManager:
                     "row_count": int(row_count),
                     "file_size_kb": float(round(stats.st_size / 1024, 2)),
                     "last_updated": self._get_timestamp(),
+                    # Valores por defecto para nuevos registros
                     "status": "NEW",
                     "harmonized_at": "",
                     "error_msg": ""
@@ -131,21 +235,21 @@ class ManifestManager:
             except Exception:
                 continue
 
+        # Si no hay archivos físicos, limpiar manifiesto
         if not physical_records:
-            print("⚠️ No se encontraron parquets físicos.")
+            if self.processed_manifest_path.exists():
+                os.remove(self.processed_manifest_path)
             return
 
         df_physical = pl.DataFrame(physical_records, schema=self.processed_schema)
 
-        # 2. Fusión y Migración
         if self.processed_manifest_path.exists():
             try:
-                # Leer sin esquema estricto para permitir migración
+                # Leer historial (schema relajado para permitir migración)
                 df_history = pl.read_csv(self.processed_manifest_path, infer_schema_length=0)
                 
-                schema_migrated = False  # <--- NUEVA BANDERA DE CONTROL
-
-                # A. Migración de Esquema
+                # --- AUTO-MIGRACIÓN DE ESQUEMA ---
+                schema_migrated = False
                 for col, dtype in self.processed_schema.items():
                     if col not in df_history.columns:
                         default_val = "NEW" if col == "status" else ""
@@ -154,81 +258,61 @@ class ManifestManager:
                         print(f"🔧 Migrando esquema: Agregando columna '{col}' al historial.")
                         df_history = df_history.with_columns(pl.lit(default_val).alias(col))
                         schema_migrated = True
-
-                # B. Normalización de Tipos
-                df_history = df_history.select([
-                    pl.col(c).cast(t) for c, t in self.processed_schema.items()
-                ])
-
-                # C. Detección de Nuevos
+                
+                # Castear tipos correctos
+                df_history = df_history.select([pl.col(c).cast(t) for c, t in self.processed_schema.items()])
+                
+                # Identificar Nuevos
                 df_new = df_physical.join(df_history, on="partition_path", how="anti")
                 
-                # D. Decisión de Guardado (CORREGIDA)
-                # Guardamos si hay archivos nuevos O si hubo migración de esquema
+                # Guardar si hay cambios o migración
                 if df_new.height > 0 or schema_migrated:
-                    df_final = pl.concat([df_history, df_new], how="vertical")
-                    df_final.write_csv(self.processed_manifest_path)
-                    
-                    if schema_migrated and df_new.height == 0:
-                        print(f"✅ Esquema migrado exitosamente (Se actualizaron headers).")
-                    else:
-                        print(f"✅ Inventario actualizado: {df_new.height} parquets nuevos.")
+                    pl.concat([df_history, df_new], how="vertical").write_csv(self.processed_manifest_path)
+                    msg = "Esquema migrado." if schema_migrated else f"{df_new.height} parquets nuevos."
+                    print(f"✅ Inventario actualizado: {msg}")
                 else:
-                    print("✨ Inventario al día (Esquema y Datos correctos).")
-
-            except Exception as e:
-                print(f"⚠️ Error leyendo historial ({e}). Regenerando.")
+                    print("✨ Inventario al día.")
+            except Exception:
+                # Si falla la lectura, regenerar
                 df_physical.write_csv(self.processed_manifest_path)
         else:
+            # Primera vez
             df_physical.write_csv(self.processed_manifest_path)
-            print(f"✅ Inventario PROCESSED creado: {df_physical.height} parquets.")
-    
+            print(f"✅ Inventario PROCESSED creado.")
+
     def validate_and_repair(self):
         """
-        Verifica la integridad: Si RAW dice DONE, pero no hay Parquets para ese periodo,
-        resetea el estado a NEW.
+        Verifica integridad: Si RAW dice DONE pero no hay Parquets, resetea a NEW.
         """
-        print("🕵️‍♂️ Ejecutando verificación de integridad (Reality Check)...")
+        if not self.raw_manifest_path.exists(): return
         
-        if not self.raw_manifest_path.exists():
-            return
-
-        # 1. Cargar RAW
         df_raw = pl.read_csv(self.raw_manifest_path, schema=self.raw_schema)
         
-        # 2. Obtener Periodos que creemos que están listos (DONE)
-        done_periods = df_raw.filter(pl.col("status") == "DONE")["period"].unique().to_list()
+        # Obtener periodos que supuestamente ya están procesados
+        done_periods = df_raw.filter(pl.col("process_status") == "DONE")["period"].unique().to_list()
         
-        if not done_periods:
-            print("✨ No hay tareas marcadas como DONE para verificar.")
-            return
+        if not done_periods: return
 
-        # 3. Obtener Periodos que REALMENTE existen en processed
+        # Obtener periodos que REALMENTE existen en disco (Silver)
         actual_periods = []
         if self.processed_manifest_path.exists():
-            df_proc = pl.read_csv(self.processed_manifest_path, schema=self.processed_schema)
-            if df_proc.height > 0:
-                actual_periods = df_proc["period"].unique().to_list()
+            try:
+                df_proc = pl.read_csv(self.processed_manifest_path, infer_schema_length=0)
+                if "period" in df_proc.columns and df_proc.height > 0:
+                    actual_periods = df_proc["period"].unique().to_list()
+            except: pass
 
-        # 4. Encontrar inconsistencias (Están en RAW como DONE, pero no en Processed)
-        # Nota: Convertimos a sets para restar
-        missing_periods = set(done_periods) - set(actual_periods)
+        # Detectar discrepancias
+        missing = set(done_periods) - set(actual_periods)
         
-        if missing_periods:
-            print(f"⚠️ ALERTA DE INTEGRIDAD: Se detectaron {len(missing_periods)} periodos marcados como DONE pero vacíos en disco.")
-            print(f"   Periodos afectados: {list(missing_periods)[:5]} ...")
-            
-            # 5. Reparar: Cambiar DONE -> NEW para esos periodos
-            df_repaired = df_raw.with_columns(
+        if missing:
+            print(f"⚠️ Integridad: {len(missing)} periodos marcados como DONE están vacíos. Reseteando a NEW.")
+            df_raw.with_columns(
                 pl.when(
-                    (pl.col("status") == "DONE") & 
-                    (pl.col("period").is_in(list(missing_periods)))
+                    (pl.col("process_status") == "DONE") & 
+                    (pl.col("period").is_in(list(missing)))
                 )
-                .then(pl.lit("NEW")) # Resetear a NEW
-                .otherwise(pl.col("status"))
-            )
-            
-            df_repaired.write_csv(self.raw_manifest_path)
-            print(f"✅ Reparación completada. Los archivos se volverán a procesar.")
-        else:
-            print("✨ Integridad verificada: El manifiesto coincide con el disco.")
+                .then(pl.lit("NEW"))
+                .otherwise(pl.col("process_status"))
+                .alias("process_status")
+            ).write_csv(self.raw_manifest_path)
