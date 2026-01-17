@@ -12,7 +12,7 @@ from scripts.utils.harmonizer_core import (
     initialize_knowledge_base, 
     resolve_period_logic, 
     update_kb_logic, 
-    consolidate_global_catalog
+    consolidate_global_catalog_lazy
 )
 
 class DenueHarmonizer:
@@ -24,6 +24,11 @@ class DenueHarmonizer:
         self.master_catalog_path = self.curated_dir / "master_catalog.parquet"
         self.manifest_mgr = ManifestManager(self.root / "data")
         
+        # --- CORRECCIÓN: Asegurar que la ruta base existe antes del log ---
+        self.curated_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = self.curated_dir / "harmonization_process.log"
+        # -----------------------------------------------------------------
+        
         # Parámetros
         self.spatial_tol = 60
         self.identity_thresh = 80
@@ -32,8 +37,27 @@ class DenueHarmonizer:
         self._setup_logging()
 
     def _setup_logging(self):
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+        """Configura el logging asegurando que el directorio del archivo exista."""
         self.logger = logging.getLogger("Harmonizer")
+        self.logger.setLevel(logging.INFO)
+        
+        if not self.logger.handlers:
+            formatter = logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S')
+
+            # Handler para Consola
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+
+            # Handler para Archivo (Ubicado en data/curated/denue/)
+            # El modo 'a' (append) permite continuar el log si el proceso se reinicia
+            try:
+                file_handler = logging.FileHandler(self.log_path, mode='a', encoding='utf-8')
+                file_handler.setFormatter(formatter)
+                self.logger.addHandler(file_handler)
+            except Exception as e:
+                # Si falla el archivo, al menos imprimimos en consola el error
+                print(f"⚠️ No se pudo crear el archivo de log en {self.log_path}: {e}")
 
     def get_processing_groups(self) -> list[list[str]]:
         """Detecta carpetas y arma los grupos."""
@@ -58,30 +82,51 @@ class DenueHarmonizer:
         return groups
 
     def load_group_history(self, state_list: list[str]) -> pl.DataFrame:
-        """Carga IO y limpieza inicial."""
+        """Carga IO, inyecta rutas de archivos y realiza limpieza inicial."""
         dfs = []
+        
+        # Definimos las columnas que sí existen físicamente en los archivos Silver
+        # Excluimos 'source_paths' de la lectura inicial ya que la crearemos ahora
+        cols_to_read = [c for c in COLS_NEEDED_FOR_MATCHING if c != 'source_paths']
+
         for state in state_list:
             try:
                 state_path = self.silver_dir / f"state={state}"
-                if not state_path.exists() or not any(state_path.glob("**/*.parquet")): 
+                if not state_path.exists():
                     continue
                 
+                # Buscamos archivos parquet de forma individual para capturar su ruta
+                parquet_files = list(state_path.glob("**/*.parquet"))
+                if not parquet_files:
+                    continue
+
                 self.logger.info(f"   📂 Cargando: {state}")
-                q = pl.scan_parquet(state_path / "**/*.parquet", hive_partitioning=True, schema=SILVER_SCHEMA)
                 
-                df_part = q.select(COLS_NEEDED_FOR_MATCHING).filter(
-                    pl.col('latitud').is_not_null() & pl.col('longitud').is_not_null()
-                ).collect()
-                dfs.append(df_part)
+                for file_path in parquet_files:
+                    # Leemos el archivo inyectando su propia ruta como valor
+                    df_part = pl.read_parquet(
+                        file_path, 
+                        columns=cols_to_read,
+                        hive_partitioning=True
+                    ).with_columns(
+                        # Guardamos la ruta relativa al proyecto para trazabilidad limpia
+                        pl.lit(str(file_path.relative_to(self.root))).alias("source_paths")
+                    )
+                    dfs.append(df_part)
+                    
             except Exception as e:
                 self.logger.error(f"❌ Error cargando {state}: {e}")
 
         if not dfs: return pl.DataFrame()
 
+        # Concatenamos todos los archivos del grupo/región
         full_df = pl.concat(dfs)
+        
+        # Sanitización de nulos en columnas de texto
         full_df = full_df.with_columns([
             pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in full_df.columns
         ])
+        
         return clean_contact_columns(full_df)
 
     def process_group(self, state_list: list[str]) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -94,14 +139,12 @@ class DenueHarmonizer:
             return pl.DataFrame(), pl.DataFrame()
 
         # --- FIX ORDEN CRONOLÓGICO ---
-        # Convertimos 'MM_YYYY' a tupla (YYYY, MM) para ordenar correctamente
         unique_periods = df_group['period'].unique().to_list()
         periods = sorted(
             unique_periods, 
             key=lambda x: (int(x.split('_')[1]), int(x.split('_')[0])), 
             reverse=True
         )
-        # -----------------------------
 
         self.logger.info(f"   📅 Periodos detectados: {periods}")
         
@@ -110,15 +153,16 @@ class DenueHarmonizer:
         # --- Llamadas al Core ---
         self.logger.info(f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}...")
         map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
+        self.logger.info(f"         📚 Entidades iniciales en memoria: {kb.height:,}")
         
         for i in range(1, len(periods)):
             period = periods[i]
             target_rows = dict_dfs[period].height
+            kb_before = kb.height # <--- Guardamos el tamaño actual antes de procesar
             
             # --- LOGS DE PROGRESO ---
-            self.logger.info(f"      🔄 [{i}/{len(periods)-1}] Analizando periodo {period} ({target_rows} negocios)...")
+            self.logger.info(f"      🔄 [{i}/{len(periods)-1}] Analizando periodo {period} ({target_rows:,} negocios)...")
             self.logger.info(f"         ↳ Propagando CLEEs del futuro hacia {period}...")
-            # ------------------------
             
             # Delegamos la matemática a harmonizer_core
             df_resolved = resolve_period_logic(
@@ -128,99 +172,93 @@ class DenueHarmonizer:
             
             map_accum = map_accum.vstack(df_resolved.select(['row_id', 'master_clee']))
             
-            self.logger.info(f"         🧠 Aprendiendo y actualizando memoria con datos de {period}...")
+            # Actualización de memoria
             kb = update_kb_logic(kb, df_resolved)
             
-            # --- LOG FINAL DEL PERIODO ---
-            self.logger.info(f"         ✅ {period} Terminado. Entidades totales en memoria: {kb.height}")
+            # --- CÁLCULO DE CRECIMIENTO ---
+            new_entities = kb.height - kb_before
+            self.logger.info(f"         🧠 Memoria actualizada con {period}:")
+            self.logger.info(f"            📈 Nuevas entidades (no estaban en el futuro): +{new_entities:,}")
+            self.logger.info(f"            📚 Total acumulado en KB: {kb.height:,} registros")
+            self.logger.info(f"         ✅ {period} Terminado.")
             
         return map_accum, kb
 
     def run(self, incremental: bool = True):
-        """Punto de entrada con soporte Incremental."""
         self.curated_root.mkdir(parents=True, exist_ok=True)
         
-        # 1. Detectar Grupos Físicos (Disco)
+        # --- SISTEMA DE SNAPSHOTS ---
+        snapshot_dir = self.curated_dir / "snapshots"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        # ----------------------------
+
         all_groups = self.get_processing_groups()
         
-        # 2. Lógica Incremental: ¿Qué procesamos?
-        groups_to_process = []
-        
         if incremental:
-            # Preguntamos al manifiesto qué está pendiente (NEW o ERROR)
-            tasks = self.manifest_mgr.get_harmonization_tasks(retry_errors=True)
-            
-            if not tasks:
-                self.logger.info("✨ Todo está armonizado. Nada que hacer.")
-                return
-
-            # Extraemos los estados que necesitan actualización
-            # tasks es lista de dicts con keys: 'state', 'partition_path', etc.
-            pending_states = set(t['state'] for t in tasks if 'state' in t)
-            
-            if not pending_states:
-                # Fallback si el manifiesto no tiene columna state
-                self.logger.warning("⚠️ No se detectaron estados en las tareas. Ejecutando todo.")
-                groups_to_process = all_groups
-            else:
-                self.logger.info(f"🎯 Estados pendientes: {pending_states}")
-                # Filtramos los grupos: Si UN estado del grupo está pendiente, procesamos TODO el grupo
-                for group in all_groups:
-                    # Intersección: si hay elementos en común entre el grupo y los pendientes
-                    if not set(group).isdisjoint(pending_states):
-                        groups_to_process.append(group)
+            processed_partitions = self.manifest_mgr.get_harmonized_partitions()
+            groups_to_process = []
+            for group in all_groups:
+                is_group_done = True
+                for state in group:
+                    state_path = f"state={state}"
+                    if not any(p.startswith(state_path) for p in processed_partitions):
+                        is_group_done = False
+                        break
+                if not is_group_done:
+                    groups_to_process.append(group)
         else:
-            # Modo Fuerza Bruta
             groups_to_process = all_groups
 
-        self.logger.info(f"🌎 Procesando {len(groups_to_process)} de {len(all_groups)} grupos.")
-        
-        global_catalog_buffer = [] 
-        processed_partitions = [] # Para actualizar el manifiesto al final
+        if not groups_to_process:
+            self.logger.info("Nothing to harmonize.")
+            return
 
-        # 3. Loop de Procesamiento
         for i, group in enumerate(groups_to_process, 1):
-            group_name = "+".join(group) if len(group) > 1 else group[0]
+            prefix = get_region_prefix(group)
+            group_name = "+".join(group)
             self.logger.info(f"🚀 [{i}/{len(groups_to_process)}] Procesando: {group_name}")
             
             group_map, group_kb = self.process_group(group)
             
             if not group_map.is_empty():
-                self.logger.info(f"   💾 Escribiendo resultados locales...")
-                # Guardamos y obtenemos qué archivos tocamos para actualizar el manifiesto
-                affected_files = self._save_local_results(group, group_map)
-                processed_partitions.extend(affected_files)
+                updated_paths = self._save_local_results(group, group_map)
                 
-                global_catalog_buffer.append(group_kb)
+                # --- GUARDAR SNAPSHOT ---
+                snapshot_path = snapshot_dir / f"kb_{prefix}.parquet"
+                group_kb.write_parquet(snapshot_path)
+                self.logger.info(f"   📸 Snapshot guardado: {snapshot_path.name}")
+                # ------------------------
+
+                if updated_paths:
+                    status_updates = [{"partition_path": p, "status": "HARMONIZED"} for p in updated_paths]
+                    self.manifest_mgr.update_harmonization_status(status_updates)
             
             del group_map
             del group_kb
             gc.collect()
-            
-        # 4. Consolidación (Solo si hubo cambios, o si forzamos regeneración)
-        # Nota: Idealmente deberíamos cargar el Master existente y hacer merge, 
-        # pero para tu tesis, regenerarlo con lo nuevo es aceptable si procesas todo,
-        # o si procesas parcial, deberías leer el master actual.
-        # POR AHORA: Si es incremental, asumimos que quieres reconstruir el master 
-        # con lo que acabas de procesar + lo que ya existía (Complejo).
-        # SIMPLIFICACIÓN: El Master Catalog se reconstruye mejor corriendo un FULL run periódicamente.
-        
-        if global_catalog_buffer:
-            self.logger.info("📚 Actualizando Master Catalog (Parcial)...")
-            # Cuidado: Esto sobrescribe el master solo con lo procesado hoy.
-            # Para producción real necesitarías leer el master viejo y unir.
-            # Para tesis: Asumiremos que corres 'make etl-harmonize' (Full) la primera vez
-            master_kb = consolidate_global_catalog(global_catalog_buffer)
-            master_kb.write_parquet(self.master_catalog_path)
-            self.logger.info(f"🏆 Catálogo Maestro Guardado.")
-        
-        # 5. Actualizar Manifiesto
-        if processed_partitions:
-            self.logger.info(f"📝 Actualizando estado de {len(processed_partitions)} particiones...")
-            updates = [{"partition_path": p, "status": "HARMONIZED"} for p in processed_partitions]
-            self.manifest_mgr.update_harmonization_status(updates)
 
+        # --- CONSOLIDACIÓN FINAL DESDE DISCO ---
+        self.logger.info("📚 Consolidando Master Catalog desde snapshots...")
+        self._consolidate_snapshots(snapshot_dir)
+        
+        self.manifest_mgr.update_harmonization_status([{"partition_path": "GLOBAL", "status": "HARMONIZED"}])
         self.logger.info("✨ Proceso Finalizado.")
+
+    def _consolidate_snapshots(self, snapshot_dir: Path):
+        """Lee snapshots y genera el catálogo maestro usando lógica Lazy."""
+        snapshot_files = list(snapshot_dir.glob("kb_*.parquet"))
+        
+        if not snapshot_files:
+            self.logger.warning("⚠️ No se encontraron snapshots.")
+            return
+
+        self.logger.info(f"   📦 Uniendo {len(snapshot_files)} archivos regionales...")
+                
+        lazy_frames = [pl.scan_parquet(f) for f in snapshot_files]
+        master_kb = consolidate_global_catalog_lazy(lazy_frames).collect()
+        
+        master_kb.write_parquet(self.master_catalog_path)
+        self.logger.info(f"🏆 Catálogo Maestro Guardado: {master_kb.height} entidades únicas.")
 
     def _save_local_results(self, group: list[str], group_map: pl.DataFrame) -> list[str]:
         """Helper privado. Retorna lista de partition_paths relativos actualizados."""
@@ -245,10 +283,6 @@ class DenueHarmonizer:
                 cols = ['clee'] + [c for c in df_curated.columns if c != 'clee']
                 df_curated.select(cols).write_parquet(dest_path, compression='snappy')
                 
-                # Agregamos a la lista de actualizados
-                # Ojo: El manifiesto usa paths relativos a PROJECT_ROOT/data/processed/denue?
-                # Revisando manifest.py, usa relative_to(project_root).
-                # Ajustamos para coincidir con lo que espera manifest.py
                 full_rel_path = str(file_path.relative_to(self.root)) # data/processed/denue/...
                 updated_paths.append(full_rel_path)
 
@@ -256,6 +290,7 @@ class DenueHarmonizer:
                 self.logger.error(f"Error escribiendo {file_path.name}: {e}")
         
         return updated_paths
+
 if __name__ == "__main__":
     harmonizer = DenueHarmonizer(Path.cwd())
     harmonizer.run()

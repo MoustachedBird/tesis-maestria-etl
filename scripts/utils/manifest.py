@@ -351,3 +351,23 @@ class ManifestManager:
         # (La lógica es similar a update_raw_status_batch: Join + AntiJoin + Concat)
         # Por simplicidad para tu tesis, si solo usas GLOBAL, el print de arriba basta.
         pass
+
+    def get_harmonized_partitions(self):
+        """
+        Retorna una lista simple de paths que ya fueron armonizados.
+        """
+        if not self.processed_manifest_path.exists():
+            return []
+
+        try:
+            df = pl.read_csv(self.processed_manifest_path, infer_schema_length=0)
+            
+            # Si no hay columna status o está vacía, nadie está armonizado aún
+            if "status" not in df.columns:
+                return []
+
+            # Retornamos solo los que ya tienen el sello de garantía
+            return df.filter(pl.col("status") == "HARMONIZED")["partition_path"].to_list()
+        except Exception as e:
+            print(f"⚠️ Error al consultar particiones armonizadas: {e}")
+            return []

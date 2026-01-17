@@ -34,11 +34,22 @@ SILVER_SCHEMA = {
 }
 
 # Columnas mínimas necesarias para la resolución
-COLS_NEEDED_FOR_MATCHING = [
+CCOLS_NEEDED_FOR_MATCHING = [
     'row_id', 'clee', 'nom_estab', 'raz_social', 'nombre_act', 
     'latitud', 'longitud', 'period', 'telefono', 'correoelec', 'www',
-    'entidad', 'municipio'
+    'entidad', 'municipio', 'localidad', 'fecha_alta',
+    'source_paths', 
+    'per_ocu', 
+    'tipo_asent', 
+    'nomb_asent', 
+    'tipocencom', 
+    'nom_cencom', 
+    'cod_postal'
 ]
 
 # Columnas de texto para sanitizar (None -> "")
-TEXT_COLS_TO_SANITIZE = ['nom_estab', 'raz_social', 'nombre_act', 'clee', 'telefono', 'correoelec', 'www']
+TEXT_COLS_TO_SANITIZE = [
+    'nom_estab', 'raz_social', 'nombre_act', 'entidad', 'municipio', 
+    'localidad', 'fecha_alta', 'per_ocu', 'tipo_asent', 'nomb_asent', 
+    'tipocencom', 'nom_cencom', 'cod_postal'
+]
