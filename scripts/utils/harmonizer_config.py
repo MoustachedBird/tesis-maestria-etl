@@ -34,7 +34,7 @@ SILVER_SCHEMA = {
 }
 
 # Columnas mínimas necesarias para la resolución
-CCOLS_NEEDED_FOR_MATCHING = [
+COLS_NEEDED_FOR_MATCHING = [
     'row_id', 'clee', 'nom_estab', 'raz_social', 'nombre_act', 
     'latitud', 'longitud', 'period', 'telefono', 'correoelec', 'www',
     'entidad', 'municipio', 'localidad', 'fecha_alta',

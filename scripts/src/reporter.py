@@ -139,6 +139,20 @@ class ReportRawFiles(ReportBase):
         if df_to_reset.height > 0:
             self._upsert(self.table_id, self.report_schema, df_to_reset, "file_path")
 
+    def get_failed_downloads(self):
+        """Retorna una lista de dicts con las descargas que fallaron."""
+        df = self._read_storage(self.table_id, self.report_schema)
+        if df.height == 0: 
+            return []
+        return df.filter(pl.col("download_status") != "OK").to_dicts()
+
+    def get_existing_downloads(self):
+        """Retorna un SET con las URLs que ya se descargaron correctamente."""
+        df = self._read_storage(self.table_id, self.report_schema)
+        if df.height == 0: 
+            return set()
+        return set(df.filter(pl.col("download_status") == "OK")["download_url"].to_list())
+
 class ReportProcessedFiles(ReportBase):
     """Capa denue_processed: Gestión de inventario Parquet en DuckDB."""
     def __init__(self, data_root: Path):

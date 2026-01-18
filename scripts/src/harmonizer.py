@@ -2,7 +2,7 @@ import polars as pl
 import logging
 import gc
 from pathlib import Path
-from scripts.utils.manifest import ReportManager
+from scripts.src.reporter import ReportManager
 from scripts.utils.matching import clean_contact_columns
 
 # Importamos la refactorización

@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 from scripts.utils.denue_helpers import process_zip_worker, get_valid_columns_list
-from scripts.utils.manifest import ReportManager
+from scripts.src.reporter import ReportManager
 
 class DenueProcessor:
     def __init__(self, input_dir: Path, output_dir: Path, project_root: Path, force_mode: bool = False):
