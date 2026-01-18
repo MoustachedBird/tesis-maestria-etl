@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 from scripts.utils.denue_helpers import process_zip_worker, get_valid_columns_list
-from scripts.utils.manifest import ManifestManager
+from scripts.utils.manifest import ReportManager
 
 class DenueProcessor:
     def __init__(self, input_dir: Path, output_dir: Path, project_root: Path, force_mode: bool = False):
@@ -13,23 +13,26 @@ class DenueProcessor:
         self.force_mode = force_mode
         self.num_workers = max(1, cpu_count() - 1)
         
-        self.manifest_mgr = ManifestManager(self.data_root)
+        # Orquestador Maestro (DuckDB)
+        self.report_mgr = ReportManager(self.data_root)
 
     def process(self):
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-        logging.info("🚀 DENUE PROCESSOR - MANIFEST DRIVEN")
+        logging.info("🚀 DENUE PROCESSOR - DUCKDB MANIFEST DRIVEN")
         
-        # 1. Fallback Scan
-        self.manifest_mgr.init_raw_manifest(self.input_dir)
+        # 1. Registro inicial / Sincronización de ZIPs (Capa Bronze)
+        # Equivalente a init_raw_manifest: usamos register_download o escaneo manual
+        # Para este processor, el equivalente directo es init_raw_manifest que definimos en ReportRawFiles
+        self.report_mgr.download_report.init_raw_manifest(self.input_dir)
         
-        # 2. Reconstruir inventario Processed
-        self.manifest_mgr.rebuild_processed_manifest(self.output_dir)
+        # 2. Reconstruir inventario Silver (Capa Silver)
+        self.report_mgr.process_report.rebuild_processed_manifest(self.output_dir)
         
-        # 3. Validar Integridad
-        self.manifest_mgr.validate_and_repair()
+        # 3. Validar Integridad (Orquestador Maestro)
+        self.report_mgr.validate_integrity()
         
-        # 4. Obtener Tareas
-        tasks = self.manifest_mgr.get_raw_tasks(retry_errors=self.force_mode)
+        # 4. Obtener Tareas (Capa Bronze)
+        tasks = self.report_mgr.download_report.get_raw_tasks(retry_errors=self.force_mode)
         
         if not tasks:
             logging.info("✨ Todo al día. Nada pendiente de procesar.")
@@ -44,11 +47,11 @@ class DenueProcessor:
         for t in tasks:
             full_path = project_cwd / t["file_path"]
             if not full_path.exists():
-                logging.warning(f"⚠️ Archivo perdido: {full_path}")
+                logging.warning(f"⚠️ Archivo perdido en disco: {full_path}")
                 continue
             worker_args.append((full_path, t["period"], target_columns, self.output_dir))
 
-        # 5. Ejecución
+        # 5. Ejecución en paralelo
         batch_results = []
         try:
             with Pool(self.num_workers) as pool:
@@ -57,29 +60,27 @@ class DenueProcessor:
                     icon = "✅" if res['status'] == 'OK' else "❌"
                     print(f"[{i}/{len(tasks)}] {icon} {res['file']}")
                     
-                    # --- CAMBIO IMPORTANTE ---
-                    # Guardamos el mensaje SIEMPRE, no solo en error.
-                    # Esto permite ver "Filled: 5 cols" en el manifiesto aunque sea OK.
+                    # Preparamos el batch para update_raw_status_batch
                     batch_results.append({
                         "file_path": res['file'], 
-                        "period": res['period'],
                         "process_status": "DONE" if res['status'] == 'OK' else "ERROR",
-                        "process_msg": res['invalid_cols'] # <-- Guardamos el reporte siempre
+                        "process_msg": str(res['invalid_cols'])
                     })
                     
+                    # Guardado parcial cada 20 archivos en DuckDB
                     if len(batch_results) >= 20:
-                        self.manifest_mgr.update_raw_status_batch(batch_results)
+                        self.report_mgr.download_report.update_raw_status_batch(batch_results)
                         batch_results = []
 
+            # Guardar resultados finales del lote
             if batch_results:
-                self.manifest_mgr.update_raw_status_batch(batch_results)
+                self.report_mgr.download_report.update_raw_status_batch(batch_results)
 
         except KeyboardInterrupt:
-            logging.warning("⚠️ Interrumpido.")
-            pool.terminate()
-            pool.join()
+            logging.warning("⚠️ Proceso interrumpido por el usuario.")
             return
         
-        logging.info("📋 Actualizando inventario final...")
-        self.manifest_mgr.rebuild_processed_manifest(self.output_dir)
+        # 6. Sincronización final de la capa Silver
+        logging.info("📋 Sincronizando inventario Silver final...")
+        self.report_mgr.process_report.rebuild_processed_manifest(self.output_dir)
         logging.info("✅ PROCESO FINALIZADO")

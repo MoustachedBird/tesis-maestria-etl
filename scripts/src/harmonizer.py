@@ -2,7 +2,7 @@ import polars as pl
 import logging
 import gc
 from pathlib import Path
-from scripts.utils.manifest import ManifestManager
+from scripts.utils.manifest import ReportManager
 from scripts.utils.matching import clean_contact_columns
 
 # Importamos la refactorización
@@ -22,7 +22,7 @@ class DenueHarmonizer:
         self.curated_root = self.root / "data/curated"
         self.curated_dir = self.curated_root / "denue"
         self.master_catalog_path = self.curated_dir / "master_catalog.parquet"
-        self.manifest_mgr = ManifestManager(self.root / "data")
+        self.report_mgr = ReportManager(self.root / "data")
         
         # --- CORRECCIÓN: Asegurar que la ruta base existe antes del log ---
         self.curated_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +195,7 @@ class DenueHarmonizer:
         all_groups = self.get_processing_groups()
         
         if incremental:
-            processed_partitions = self.manifest_mgr.get_harmonized_partitions()
+            processed_partitions = self.report_mgr.process_report.get_harmonized_partitions()
             groups_to_process = []
             for group in all_groups:
                 is_group_done = True
@@ -231,7 +231,7 @@ class DenueHarmonizer:
 
                 if updated_paths:
                     status_updates = [{"partition_path": p, "status": "HARMONIZED"} for p in updated_paths]
-                    self.manifest_mgr.update_harmonization_status(status_updates)
+                    self.report_mgr.process_report.update_harmonization_status(status_updates)
             
             del group_map
             del group_kb
@@ -241,7 +241,7 @@ class DenueHarmonizer:
         self.logger.info("📚 Consolidando Master Catalog desde snapshots...")
         self._consolidate_snapshots(snapshot_dir)
         
-        self.manifest_mgr.update_harmonization_status([{"partition_path": "GLOBAL", "status": "HARMONIZED"}])
+        self.report_mgr.update_harmonization_status([{"partition_path": "GLOBAL", "status": "HARMONIZED"}])
         self.logger.info("✨ Proceso Finalizado.")
 
     def _consolidate_snapshots(self, snapshot_dir: Path):

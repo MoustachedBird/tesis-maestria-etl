@@ -15,7 +15,7 @@ from selenium.common.exceptions import TimeoutException
 from scripts.utils.browser import get_chrome_driver
 from scripts.utils.text import clean_filename
 # Importamos el Manager Unificado
-from scripts.utils.manifest import ManifestManager
+from scripts.utils.manifest import ReportManager
 
 class InegiDownloader:
     def __init__(self, output_dir: Path, headless: bool = True):
@@ -35,7 +35,7 @@ class InegiDownloader:
         self.data_root = self.output_dir.parent.parent 
         
         # Instanciar el Gestor de Manifiesto
-        self.manifest_mgr = ManifestManager(self.data_root)
+        self.report_mgr = ReportManager(self.data_root)
 
     def _download_with_requests(self, url, destination):
         """
@@ -78,7 +78,7 @@ class InegiDownloader:
             print(f"  ... Procesando {len(rows)} filas encontradas.")
 
             # Obtener SET de URLs que ya existen y están OK según el Manifiesto
-            existing_urls = self.manifest_mgr.get_existing_downloads()
+            existing_urls = self.report_mgr.download_report.get_existing_downloads()
             skipped_count = 0
             
             for row in rows:
@@ -106,7 +106,7 @@ class InegiDownloader:
                     # Registramos error de enlace perdido en el manifiesto
                     # Usamos un path dummy para el registro
                     dummy_path = f"MISSING_LINK/{activity}.zip"
-                    self.manifest_mgr.register_download(
+                    self.report_mgr.download_report.register_download(
                         file_path=dummy_path,
                         url="N/A",
                         period=period,
@@ -136,7 +136,7 @@ class InegiDownloader:
         # Esto reemplaza al viejo _load_and_audit_report
         # Detecta si alguien borró archivos manualmente o si hay archivos nuevos 'extra'
         print("🔍 Auditando archivos físicos vs Manifiesto...")
-        self.manifest_mgr.init_raw_manifest(self.output_dir)
+        self.report_mgr.download_report.init_raw_manifest(self.output_dir)
         
         driver = get_chrome_driver(headless=self.headless)
         if not driver: return
@@ -168,7 +168,7 @@ class InegiDownloader:
                         print(f"    ❌ {msg}")
                     
                     # 3. REGISTRAR EN SINGLE SOURCE OF TRUTH
-                    self.manifest_mgr.register_download(
+                    self.report_mgr.download_report.register_download(
                         file_path=rel_path,
                         url=url,
                         period=period,
@@ -193,7 +193,7 @@ class InegiDownloader:
         Reintenta descargas marcadas como 'NOK' en el manifiesto.
         """
         # Obtenemos la lista de fallos desde el Manifiesto
-        failed_tasks = self.manifest_mgr.get_failed_downloads()
+        failed_tasks = self.report_mgr.download_report.get_failed_downloads()
         
         if not failed_tasks:
             print("✨ No hay reparaciones pendientes.")
@@ -225,7 +225,7 @@ class InegiDownloader:
                     success = True
                     print(f"    ✅ ÉXITO!")
                     # Actualizar Manifiesto inmediatamente
-                    self.manifest_mgr.register_download(
+                    self.report_mgr.download_report.register_download(
                         file_path=rel_path,
                         url=url,
                         period=period,
@@ -239,7 +239,7 @@ class InegiDownloader:
             
             if not success:
                 # Actualizar error en Manifiesto
-                self.manifest_mgr.register_download(
+                self.report_mgr.download_report.register_download(
                     file_path=rel_path,
                     url=url,
                     period=period,
