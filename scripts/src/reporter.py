@@ -92,7 +92,7 @@ class ReportRawFiles(ReportBase):
             if df_new.height > 0:
                 df_final = pl.concat([df_existing, df_new], how="vertical")
                 self._write_storage(df_final, self.table_id)
-                print(f"📦 Bronze: {df_new.height} archivos nuevos detectados.")
+                print(f"📦 Raw data: {df_new.height} archivos nuevos detectados.")
         else:
             df_final = df_phys.with_columns([
                 pl.lit("Manual Discovery").alias("download_url"),

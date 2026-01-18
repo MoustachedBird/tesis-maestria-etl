@@ -20,7 +20,7 @@ class DenueProcessor:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
         logging.info("🚀 DENUE PROCESSOR - DUCKDB MANIFEST DRIVEN")
         
-        # 1. Registro inicial / Sincronización de ZIPs (Capa Bronze)
+        # 1. Registro inicial / Sincronización de ZIPs (Capa Raw data)
         # Equivalente a init_raw_manifest: usamos register_download o escaneo manual
         # Para este processor, el equivalente directo es init_raw_manifest que definimos en ReportRawFiles
         self.report_mgr.download_report.init_raw_manifest(self.input_dir)
@@ -31,7 +31,7 @@ class DenueProcessor:
         # 3. Validar Integridad (Orquestador Maestro)
         self.report_mgr.validate_integrity()
         
-        # 4. Obtener Tareas (Capa Bronze)
+        # 4. Obtener Tareas (Capa Raw data)
         tasks = self.report_mgr.download_report.get_raw_tasks(retry_errors=self.force_mode)
         
         if not tasks:

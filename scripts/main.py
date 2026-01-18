@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.markup import escape
 
 # Import orchestrators
-from scripts.src.downloader import InegiDownloader
+from scripts.src.denue_downloader import InegiDownloader
 from scripts.src.processor import DenueProcessor  # Updated to processors
 from scripts.src.harmonizer import DenueHarmonizer
 
