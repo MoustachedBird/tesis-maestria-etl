@@ -3,92 +3,92 @@ from pathlib import Path
 from rich.console import Console
 from rich.markup import escape
 
-# Import orchestrators
+# Importación de orquestadores modulares
 from scripts.src.denue_downloader import InegiDownloader
-from scripts.src.processor import DenueProcessor  # Updated to processors
+from scripts.src.processor import DenueProcessor
 from scripts.src.harmonizer import DenueHarmonizer
 
-# Help text explaining the CLI purpose
-app = typer.Typer(help="ETL Scripts Runner for the Thesis (Extract, Transform, Load)")
+# Configuración de la CLI
+app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")
 console = Console()
 
-# Define default paths (relative to project root)
+# Definición de rutas raíz (basadas en la ubicación de este archivo)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw" / "denue"
-DEFAULT_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed" / "denue"
+DATA_ROOT = PROJECT_ROOT / "data"
+RAW_DIR = DATA_ROOT / "raw" / "denue"
 
 @app.command()
 def download_inegi(
-    # CLI Parameters
-    headless: bool = typer.Option(True, help="Run browser in headless mode (no window)"),
-    output: Path = typer.Option(DEFAULT_RAW_DIR, help="Destination folder for raw zip files")
+    headless: bool = typer.Option(True, help="Ejecutar navegador en modo headless (sin ventana)"),
+    output: Path = typer.Option(RAW_DIR, help="Carpeta de destino para los archivos ZIP")
 ):
     """
-    Step 1: Mass download of DENUE data (Raw Layer).
+    PASO 1: Descarga masiva de datos DENUE desde el sitio de INEGI.
+    Sincroniza lo que hay en disco con el reporte de control en reports.db.
     """
-    console.print(f"[bold green]🚀 Starting INEGI Downloader[/bold green]")
-    console.print(f"📂 Destination: {output}")
-    console.print(f"👻 Headless Mode: {headless}")
+    console.print(f"[bold green]🚀 Iniciando Inegi Downloader[/bold green]")
+    console.print(f"📂 Destino: {output}")
+    console.print(f"👻 Modo Headless: {headless}")
 
     downloader = InegiDownloader(output_dir=output, headless=headless)
     downloader.download_all()
 
 @app.command()
 def retry_inegi(
-    output: Path = typer.Option(DEFAULT_RAW_DIR, help="Directory containing the report to retry")
+    output: Path = typer.Option(RAW_DIR, help="Carpeta que contiene los ZIPs y el reporte a reintentar")
 ):
     """
-    Step 1.5: Retries failed downloads found in 'report_download.csv'.
+    PASO 1.5: Reintenta descargas fallidas basándose en el historial de reports.db.
     """
-    console.print(f"[bold yellow]🔄 Starting Retry Process[/bold yellow]")
-    console.print(f"📂 Target Directory: {output}")
-    
-    # Headless is usually preferred for retries
+    console.print(f"[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
     downloader = InegiDownloader(output_dir=output, headless=True)
     downloader.retry()
 
 @app.command()
 def process_denue(
-    input_dir: Path = typer.Option(DEFAULT_RAW_DIR, help="Folder containing downloaded ZIPs"),
-    output_dir: Path = typer.Option(DEFAULT_PROCESSED_DIR, help="Destination for Parquet files"),
-    force: bool = typer.Option(False, "--force", "-f", help="Retry failed files in Manifest")
+    force: bool = typer.Option(
+        False, "--force", "-f", 
+        help="Forzar el procesamiento de todos los archivos ZIP, ignorando si ya fueron marcados como exitosos (DONE)."
+    )
 ):
     """
-    Step 2: Process Raw ZIPs -> Parquet.
-    Controlled by 'data/manifest_download.csv'.
+    PASO 2: Procesar ZIPs Raw -> Warehouse Centralizado (DuckDB).
+    Limpia, normaliza encodings (UTF-8/Latin-1) y sincroniza catálogos de actividades y entidades.
     """
-    console.print(f"[bold blue]⚙️ Starting DENUE Processor[/bold blue]")
+    console.print(f"[bold blue]⚙️ Iniciando DENUE Warehouse Processor[/bold blue]")
+    if force:
+        console.print("[bold orange3]⚠️ MODO FORCE: Se re-procesarán todos los archivos en disco.[/bold orange3]")
     
-    # Pasamos PROJECT_ROOT
-    processor = DenueProcessor(
-        input_dir=input_dir, 
-        output_dir=output_dir, 
-        project_root=PROJECT_ROOT, 
-        force_mode=force
-    )
-    processor.process()
+    try:
+        # DenueProcessor localiza automáticamente reports.db y denue_warehouse.db en DATA_ROOT
+        processor = DenueProcessor(data_root=DATA_ROOT)
+        
+        # Ejecuta el pipeline (Limpieza -> Sincronización de Catálogos -> Carga de Hechos)
+        processor.run_pipeline(force=force)
+        
+        console.print(f"[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]")
+        
+    except Exception as e:
+        console.print(f"[bold red]❌ Error en el procesamiento: {escape(str(e))}[/bold red]")
+        raise typer.Exit(code=1)
 
 @app.command()
 def harmonize():
     """
-    Step 3: Identity Resolution (Gold Layer).
-    Generates the 'master_catalog.parquet' linking stores across time (2015-2024).
+    PASO 3: Resolución de Identidad (Capa Gold).
+    Vincula establecimientos a través del tiempo generando el catálogo maestro de identidades.
     """
-    console.print(f"[bold magenta]🔗 Starting Identity Resolution (Gold Layer)[/bold magenta]")
+    console.print(f"[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]")
     
     try:
-        # 1. Instanciar la clase pasándole la raíz del proyecto
+        # El Harmonizer ahora leerá directamente de las tablas de DuckDB en el Warehouse
         harmonizer = DenueHarmonizer(project_root=PROJECT_ROOT)
-        
-        # 2. Ejecutar el pipeline
         harmonizer.run()
         
-        console.print(f"[bold green]✨ Harmonization Pipeline Finished Successfully[/bold green]")
+        console.print(f"[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]")
         
     except Exception as e:
-        # Usamos escape(str(e)) para que los corchetes [] del error 
-        # no confundan a la terminal de rich
-        console.print(f"[bold red]❌ Harmonization Failed: {escape(str(e))}[/bold red]")
+        console.print(f"[bold red]❌ Error en armonización: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
 
 if __name__ == "__main__":

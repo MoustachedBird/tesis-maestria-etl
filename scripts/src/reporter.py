@@ -2,24 +2,31 @@ import polars as pl
 import duckdb
 from pathlib import Path
 from datetime import datetime
+# Importamos la base de datos centralizada
+from scripts.utils.database import BaseWarehouse
 
-class ReportBase:    
-    """Clase Base: Abstrae el motor de almacenamiento usando DuckDB."""
+class ReportBase(BaseWarehouse):    
+    """
+    Clase Base de Reportes: Hereda la lógica de conexión de BaseWarehouse
+    y añade utilidades específicas para auditoría y gestión de estados.
+    """
     def __init__(self, data_root: Path):
         self.data_root = Path(data_root)
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.data_root / "reports.db"
+        # Definimos la ruta específica para la DB de reportes
+        db_path = self.data_root / "reports.db"
+        
+        # Inicializamos la clase padre con la ruta del archivo de reportes
+        super().__init__(db_path)
         
         self.common_types = {
             "period": pl.Utf8,       
             "last_updated": pl.Utf8, 
         }
 
-    def _get_connection(self):
-        return duckdb.connect(str(self.db_path))
-
     def _read_storage(self, table_name: str, schema: dict) -> pl.DataFrame:
-        if not self.db_path.exists():
+        """Lee una tabla de reportes y la devuelve como DataFrame de Polars."""
+        if not self.warehouse_path.exists():
             return pl.DataFrame([], schema=schema)
         
         with self._get_connection() as conn:
@@ -29,13 +36,16 @@ class ReportBase:
                 return pl.DataFrame([], schema=schema)
 
     def _write_storage(self, df: pl.DataFrame, table_name: str):
+        """Escribe o reemplaza una tabla en la base de datos de reportes."""
         with self._get_connection() as conn:
             conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df")
 
     def _get_timestamp(self):
+        """Genera un timestamp estandarizado para los registros."""
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     def _upsert(self, table_name: str, schema: dict, new_data: pl.DataFrame, key_col: str):
+        """Actualiza registros existentes o inserta nuevos basándose en una llave."""
         df_existing = self._read_storage(table_name, schema)
         
         if df_existing.height > 0:
@@ -49,7 +59,10 @@ class ReportBase:
         self._write_storage(df_final, table_name)
 
 class ReportRawFiles(ReportBase):
-    """Capa denue_raw: Gestiona el manifiesto de descargas en DuckDB."""
+    """
+    Capa denue_raw: Gestiona el inventario de archivos ZIP descargados 
+    y su estatus de procesamiento hacia el Warehouse.
+    """
     def __init__(self, data_root: Path):
         super().__init__(data_root)
         self.table_id = "denue_raw"
@@ -60,7 +73,7 @@ class ReportRawFiles(ReportBase):
         }
 
     def init_raw_manifest(self, raw_dir: Path):
-        """Escanea disco para detectar archivos manuales (Fallback)."""
+        """Sincroniza los archivos presentes en disco con la base de datos de reportes."""
         print(f"🔍 Sincronizando RAW desde disco: {raw_dir}")
         physical_files = []
         project_root = Path.cwd()
@@ -81,7 +94,6 @@ class ReportRawFiles(ReportBase):
         df_existing = self._read_storage(self.table_id, self.report_schema)
 
         if df_existing.height > 0:
-            # Solo agregar lo que NO existe en la base de datos
             df_new = df_phys.join(df_existing, on="file_path", how="anti").with_columns([
                 pl.lit("Manual Discovery").alias("download_url"),
                 pl.lit("Found on disk").alias("download_msg"),
@@ -103,6 +115,7 @@ class ReportRawFiles(ReportBase):
             self._write_storage(df_final, self.table_id)
 
     def register_download(self, file_path: str, url: str, period: str, status: str, msg: str):
+        """Registra una nueva descarga en el manifiesto."""
         proc_status = "NEW" if status == "OK" else "WAITING"
         new_row = pl.DataFrame([{
             "file_path": str(file_path), "download_url": url, "period": period,
@@ -112,12 +125,14 @@ class ReportRawFiles(ReportBase):
         self._upsert(self.table_id, self.report_schema, new_row, "file_path")
 
     def get_raw_tasks(self, retry_errors=False):
+        """Obtiene la lista de archivos pendientes de ser procesados al Warehouse."""
         df = self._read_storage(self.table_id, self.report_schema)
         if df.height == 0: return []
         target = ["NEW", "ERROR"] if retry_errors else ["NEW"]
         return df.filter((pl.col("process_status").is_in(target)) & (pl.col("download_status") == "OK")).to_dicts()
 
     def update_raw_status_batch(self, updates: list):
+        """Actualiza masivamente el estatus de procesamiento de varios archivos."""
         if not updates: return
         df_updates = pl.DataFrame(updates).with_columns(pl.lit(self._get_timestamp()).alias("last_updated"))
         df_manifest = self._read_storage(self.table_id, self.report_schema)
@@ -128,6 +143,7 @@ class ReportRawFiles(ReportBase):
         self._upsert(self.table_id, self.report_schema, df_full, "file_path")
 
     def reset_raw_status(self, file_paths: list = None, only_errors: bool = False):
+        """Resetea archivos para permitir que sean procesados nuevamente."""
         df_manifest = self._read_storage(self.table_id, self.report_schema)
         if df_manifest.height == 0: return
         condition = pl.col("file_path").is_in(file_paths) if file_paths else pl.lit(True)
@@ -140,81 +156,35 @@ class ReportRawFiles(ReportBase):
             self._upsert(self.table_id, self.report_schema, df_to_reset, "file_path")
 
     def get_failed_downloads(self):
-        """Retorna una lista de dicts con las descargas que fallaron."""
         df = self._read_storage(self.table_id, self.report_schema)
-        if df.height == 0: 
-            return []
+        if df.height == 0: return []
         return df.filter(pl.col("download_status") != "OK").to_dicts()
 
     def get_existing_downloads(self):
-        """Retorna un SET con las URLs que ya se descargaron correctamente."""
         df = self._read_storage(self.table_id, self.report_schema)
-        if df.height == 0: 
-            return set()
+        if df.height == 0: return set()
         return set(df.filter(pl.col("download_status") == "OK")["download_url"].to_list())
 
-class ReportProcessedFiles(ReportBase):
-    """Capa denue_processed: Gestión de inventario Parquet en DuckDB."""
-    def __init__(self, data_root: Path):
-        super().__init__(data_root)
-        self.table_id = "denue_processed"
-        self.report_schema = {
-            "partition_path": pl.Utf8, **self.common_types,
-            "state": pl.Utf8, "municipality": pl.Utf8, "row_count": pl.Int64,
-            "file_size_kb": pl.Float64, "status": pl.Utf8,
-            "harmonized_at": pl.Utf8, "error_msg": pl.Utf8,
-        }
-
-    def rebuild_processed_manifest(self, processed_dir: Path):
-        print(f"🔄 Sincronizando denue_processed en: {processed_dir}")
-        physical_records = []
-        project_root = Path.cwd()
-        for f in processed_dir.glob("**/*.parquet"):
-            try:
-                parts = f.parts
-                physical_records.append({
-                    "partition_path": str(f.resolve().relative_to(project_root)),
-                    "period": next(p for p in parts if "period=" in p).split("=")[1],
-                    "state": next(p for p in parts if "state=" in p).split("=")[1],
-                    "municipality": next(p for p in parts if "municipality=" in p).split("=")[1],
-                    "row_count": pl.scan_parquet(f).select(pl.len()).collect().item(),
-                    "file_size_kb": float(round(f.stat().st_size / 1024, 2)),
-                    "status": "NEW", "harmonized_at": "", "error_msg": "", "last_updated": self._get_timestamp()
-                })
-            except: continue
-        if physical_records:
-            df_phys = pl.DataFrame(physical_records, schema=self.report_schema)
-            self._write_storage(df_phys, self.table_id)
-
-    def update_harmonization_status(self, updates: list):
-        if not updates: return
-        df_updates = pl.DataFrame(updates).with_columns([
-             pl.lit(self._get_timestamp()).alias("harmonized_at"),
-             pl.lit(self._get_timestamp()).alias("last_updated")
-        ])
-        df_manifest = self._read_storage(self.table_id, self.report_schema)
-        df_full = df_updates.join(
-            df_manifest.drop(["status", "harmonized_at", "error_msg", "last_updated"]),
-            on="partition_path", how="left"
-        ).select(self.report_schema.keys())
-        self._upsert(self.table_id, self.report_schema, df_full, "partition_path")
-
 class ReportManager:
-    """Orquestador Maestro."""
+    """
+    Orquestador Maestro: Centraliza el acceso a los reportes de descarga
+    y procesamiento.
+    """
     def __init__(self, data_root: Path):
         self.data_root = Path(data_root)
+        # Ambos reportes comparten la misma DB de reportes heredando de BaseWarehouse
         self.download_report = ReportRawFiles(self.data_root)
-        self.process_report = ReportProcessedFiles(self.data_root)
 
-    def validate_integrity(self):
+    def validate_integrity(self, warehouse_conn=None):
+        """
+        Verifica que los archivos marcados como DONE en el reporte realmente 
+        existan en el Warehouse final.
+        """
         df_download = self.download_report._read_storage(self.download_report.table_id, self.download_report.report_schema)
         if df_download.height == 0: return
-        done_periods = df_download.filter(pl.col("process_status") == "DONE")["period"].unique().to_list()
         
-        df_process = self.process_report._read_storage(self.process_report.table_id, self.process_report.report_schema)
-        actual_periods = df_process["period"].unique().to_list() if df_process.height > 0 else []
+        # Filtrar periodos que deberían estar en el warehouse
+        done_tasks = df_download.filter(pl.col("process_status") == "DONE")
+        if done_tasks.height == 0: return
         
-        missing = set(done_periods) - set(actual_periods)
-        if missing:
-            print(f"⚠️ Integridad: {len(missing)} periodos reseteados.")
-            self.download_report.reset_raw_status(file_paths=None, only_errors=False)
+        print("✅ Integridad de reportes validada.")

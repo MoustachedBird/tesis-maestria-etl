@@ -1,96 +1,40 @@
-# ==============================================================================
-#  Tesis Backend Core - Makefile (Linux & macOS Compatible)
-# ==============================================================================
+# Variables
+PYTHON := python
+MAIN := scripts/main.py
+# Usamos export para que PYTHONPATH esté disponible en todos los comandos
+export PYTHONPATH := .
 
-.PHONY: help install api etl-download etl-retry etl-process etl-harmonize docker-build docker-download docker-process docker-harmonize clean check-os
+.PHONY: help etl-download etl-process etl-process-force etl-status clean
 
-# ------------------------------------------------------------------------------
-#  Global Configuration
-# ------------------------------------------------------------------------------
-SHELL := /bin/bash
+help:
+	@echo "Thesis ETL Pipeline - Available commands:"
+	@echo "  make etl-download      - Step 1: Download RAW ZIPs"
+	@echo "  make etl-process       - Step 2: Process new/failed ZIPs"
+	@echo "  make etl-process-force - Step 2: Re-process ALL ZIPs"
+	@echo "  make etl-status        - Show reports.db summary"
 
-# PYTHONPATH=. ensures Python finds the 'scripts' module locally
-PYTHON := PYTHONPATH=. uv run python
-DOCKER_COMPOSE := docker compose
-
-# Default arguments
-HEADLESS ?= true
-RAW_DIR ?= data/raw/denue
-PROCESSED_DIR ?= data/processed/denue
-
-# ------------------------------------------------------------------------------
-#  1. Help & Utilities
-# ------------------------------------------------------------------------------
-
-help: ## Show this help message
-	@echo "Usage: make [target]"
-	@echo ""
-	@echo "Targets:"
-	@grep -E '^[a-zA-Z0-9_-]+:.*## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
-
-check-os: ## Print detected OS information
-	@echo "🖥️  Detected OS: $$(uname -s)"
-	@echo "🐚 Shell: $(SHELL)"
-
-install: ## Install dependencies with uv
-	@echo "📦 Installing dependencies..."
-	uv sync --all-groups
-
-# ------------------------------------------------------------------------------
-#  2. API Development
-# ------------------------------------------------------------------------------
-
-api: ## Run FastAPI server in development mode
-	@echo "🚀 Starting FastAPI server..."
-	uv run fastapi dev app/main.py
-
-# ------------------------------------------------------------------------------
-#  3. Local ETL Execution (Runs on your machine)
-# ------------------------------------------------------------------------------
-
-etl-download: ## Step 1: Download Raw Data. Usage: make etl-download HEADLESS=false
+## --- STEP 1: DOWNLOAD ---
+etl-download:
 	@echo "🕷️  Running Inegi Downloader..."
-	$(PYTHON) scripts/main.py download-inegi $(if $(filter true,$(HEADLESS)),--headless,--no-headless) --output=$(RAW_DIR)
+	uv run $(PYTHON) $(MAIN) download-inegi --headless
 
-etl-retry: ## Step 1.5: Retry failed downloads. Usage: make etl-retry
-	@echo "🔄 Retrying downloads in $(RAW_DIR)..."
-	$(PYTHON) scripts/main.py retry-inegi --output=$(RAW_DIR)
+## --- STEP 2: PROCESSING ---
+etl-process:
+	@echo "⚙️  Processing DENUE data (Normal Mode)..."
+	uv run $(PYTHON) $(MAIN) process-denue
 
-etl-process: ## Step 2: Process ZIPs to Parquet (Polars). Usage: make etl-process
-	@echo "⚙️  Processing DENUE data (High Performance Mode)..."
-	$(PYTHON) scripts/main.py process-denue --input-dir=$(RAW_DIR) --output-dir=$(PROCESSED_DIR)
+etl-process-force:
+	@echo "⚠️  FORCE MODE: Re-processing all files..."
+	uv run $(PYTHON) $(MAIN) process-denue --force
 
-etl-harmonize: ## Step 3: Create Master Catalog (Identity Resolution). Usage: make etl-harmonize
-	@echo "🔗 Running Identity Resolution..."
-	$(PYTHON) scripts/main.py harmonize
+## --- UTILS ---
+etl-status:
+	@echo "📊 ETL Telemetry Summary:"
+	@uv run $(PYTHON) -c "import duckdb, json; \
+		conn = duckdb.connect('data/reports.db', read_only=True); \
+		res = conn.execute('SELECT process_status, count(*) FROM denue_raw GROUP BY 1').fetchall(); \
+		print('\n[STATUS SUMMARY]'); \
+		[print(f'  {row[0]}: {row[1]} files') for row in res];"
 
-# ------------------------------------------------------------------------------
-#  4. Docker ETL Execution (The "Pro" Way)
-# ------------------------------------------------------------------------------
-
-docker-build: ## Re-build the Docker ETL image (Run this after adding libs)
-	@echo "🔨 Building Docker image..."
-	$(DOCKER_COMPOSE) build
-
-docker-download: ## Run Downloader inside Docker
-	@echo "🐳 Running Downloader in Docker..."
-	$(DOCKER_COMPOSE) run --rm etl download-inegi
-
-docker-process: ## Run Processor inside Docker
-	@echo "🐳 Running Processor in Docker..."
-	$(DOCKER_COMPOSE) run --rm etl process-denue
-
-docker-harmonize: ## Run Harmonizer inside Docker
-	@echo "🐳 Running Harmonizer in Docker..."
-	$(DOCKER_COMPOSE) run --rm etl harmonize
-
-# ------------------------------------------------------------------------------
-#  5. Maintenance
-# ------------------------------------------------------------------------------
-
-clean: ## Clean cache files (.pyc, __pycache__) safely
-	@echo "🧹 Cleaning up..."
-	@find . -type d -name "__pycache__" -exec rm -rf {} +
-	@find . -type f -name "*.pyc" -exec rm -f {} +
-	@find . -type f -name "*.DS_Store" -exec rm -f {} +
-	@echo "✅ Clean complete."
+clean:
+	find . -type d -name "__pycache__" -exec rm -rf {} +
