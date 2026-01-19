@@ -84,6 +84,8 @@ class DenueProcessor:
             .str.replace_all("SECCIEN", "SECCION")
             .str.replace_all("FRACCIEN", "FRACCION")
             .str.replace_all("RANCHEROA", "RANCHERIA")
+            .str.replace_all("RANCHERA", "RANCHERIA")
+
             
             # ==========================================
             # PASO 2: CORRECCIÓN DE TYPOS ESPECÍFICOS
@@ -196,10 +198,14 @@ class DenueProcessor:
 
     def _clean_raw_data(self, zip_path: Path, period: str):
         """
-        Motor de limpieza robusto con detección de columnas duplicadas,
-        filtrado estricto de REQUIRED_COLUMNS y generación de Fingerprint Hash.
+        Motor de limpieza robusto con soporte para periodos anuales (2015),
+        detección de columnas duplicadas, filtrado estricto y normalización de catálogos.
         """
         logs = {"steps": {}, "stats": {"period": period}, "schema_changes": {}}
+
+        # Manejo de periodos con formato solo año (ej. "2015")
+        # Se normaliza a "01_YYYY" para cumplir con el formato "%m_%Y"
+        clean_period = f"01_{period}" if len(period) == 4 and period.isdigit() else period
 
         with zipfile.ZipFile(zip_path, 'r') as z:
             csv_candidates = [f for f in z.namelist() if f.endswith('.csv') and 'conjunto_de_datos' in f.lower()]
@@ -269,10 +275,11 @@ class DenueProcessor:
         df = df.with_columns([
             pl.col('cve_ent').cast(pl.Utf8).str.strip_chars().str.pad_start(2, "0"),
             pl.col('cve_mun').cast(pl.Utf8).str.strip_chars().str.pad_start(3, "0"),
-            pl.col('cve_loc').cast(pl.Utf8).str.pad_start(4, "0"),
+            pl.col('cve_loc').cast(pl.Utf8).str.strip_chars().str.pad_start(4, "0"),
             pl.col('latitud').cast(pl.Float64, strict=False),
             pl.col('longitud').cast(pl.Float64, strict=False),
-            pl.lit(period).str.to_date(format="%m_%Y").alias('period'),
+            # Uso de clean_period para evitar errores de parseo en años como 2015
+            pl.lit(clean_period).str.to_date(format="%m_%Y").alias('period'),
             pl.col('entidad').cast(pl.Utf8).str.to_uppercase()
               .replace(ENTITY_VALUE_NORMALIZATION, default=pl.col('entidad').str.to_uppercase()),
             pl.col('municipio').str.to_uppercase().str.strip_chars(),
