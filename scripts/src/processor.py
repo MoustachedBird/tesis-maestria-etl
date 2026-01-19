@@ -3,27 +3,19 @@ import json
 import logging
 import sys
 import traceback
+import time
 from pathlib import Path
 from datetime import datetime
 import polars as pl
 
-# Importación de managers especializados
-from scripts.src.denue_activities import ActivityManager
-from scripts.src.denue_geography import StateManager, MunicipalityManager, LocalityManager
-from scripts.src.denue_stores import (
-    DataStoreManager, 
-    EstratoManager, 
-    RoadTypeManager, 
-    SettlementTypeManager, 
-    BusinessUnitTypeManager
-)
+from scripts.src.denue_stores import DataStoreManager
 from scripts.src.reporter import ReportManager
 from scripts.utils.constants import (
-    MASTER_COLUMNS, REQUIRED_COLUMNS, COLUMN_ALIASES, ENTITY_VALUE_NORMALIZATION
+    MASTER_COLUMNS, REQUIRED_COLUMNS, COLUMN_ALIASES, 
+    ENTITY_VALUE_NORMALIZATION, ENUM_CATALOGS, DB_FACT_COLUMNS
 )
 
-# Configuración de Logger persistente (Consola + Archivo)
-log_file = Path("etl_process.log")
+log_file = Path("./data/etl_process.log")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -39,23 +31,173 @@ class DenueProcessor:
         self.data_root = Path(data_root)
         self.warehouse_path = self.data_root / "denue_warehouse.db"
         
-        # Inicialización de Gestores de Dimensiones y Hechos
-        self.activities = ActivityManager(self.warehouse_path)
-        self.entities = StateManager(self.warehouse_path)
-        self.municipalities = MunicipalityManager(self.warehouse_path)
-        self.localities = LocalityManager(self.warehouse_path)
-        self.estratos = EstratoManager(self.warehouse_path)
-        self.roads = RoadTypeManager(self.warehouse_path)
-        self.settlements = SettlementTypeManager(self.warehouse_path)
-        self.business_units = BusinessUnitTypeManager(self.warehouse_path)
-        
         self.datastore = DataStoreManager(self.warehouse_path)
         self.report_mgr = ReportManager(self.data_root)
+        
+        self._bootstrap_seeds()
+
+    def _normalize_text_col(self, col_name: str):
+        """
+        Normalización estricta basada en el catálogo oficial del INEGI.
+        
+        Referencia oficial:
+        - Norma Técnica sobre Domicilios Geográficos (DOF 22/11/2024)
+        - Censo de Alojamientos de Asistencia Social (INEGI)
+        
+        El catálogo oficial incluye "Otro" para valores no previstos.
+        """
+        return (
+            pl.col(col_name)
+            .cast(pl.Utf8)
+            .str.to_uppercase()
+            .str.strip_chars()
+
+            # ==========================================
+            # PASO 0: LIMPIEZA DE ACENTOS (MOVIDO AL INICIO)
+            # ==========================================
+            # Crucial mover esto aquí para que los reemplazos de truncamientos
+            # en el PASO 1 funcionen correctamente con strings que tenían tildes.
+            .str.replace_all(r'[ÁÀÄÂÃ]', 'A')
+            .str.replace_all(r'[ÉÈËÊ]', 'E')
+            .str.replace_all(r'[ÍÌÏÎĨ]', 'I')
+            .str.replace_all(r'[ÓÒÖÔÕ]', 'O')
+            .str.replace_all(r'[ÚÙÜÛ]', 'U')
+            .str.replace_all(r'Ñ', 'N')
+            
+            # ==========================================
+            # PASO 1: CORRECCIÓN DE TRUNCAMIENTOS (encoding UTF-8 corrupto)
+            # ==========================================
+            # Estos valores aparecen truncados en archivos históricos del INEGI
+            # por problemas de codificación latin-1 vs utf-8
+            
+            # Tipo Vialidad
+            .str.replace_all("CALLEJEN", "CALLEJON")
+            .str.replace_all("PROLONGACIEN", "PROLONGACION")
+            .str.replace_all("CONTINUACIEN", "CONTINUACION")
+            .str.replace_all("CIRCUNVALACIEN", "CIRCUNVALACION")
+            .str.replace_all("AMPLIACIEN", "AMPLIACION")
+            .str.replace_all("PERIFRIEN", "PERIFERICO")
+            
+            # Tipo Asentamiento
+            .str.replace_all("COLONI", "COLONIA")
+            .str.replace_all("COLONIAA", "COLONIA")
+            .str.replace_all("SECCIEN", "SECCION")
+            .str.replace_all("FRACCIEN", "FRACCION")
+            .str.replace_all("RANCHEROA", "RANCHERIA")
+            
+            # ==========================================
+            # PASO 2: CORRECCIÓN DE TYPOS ESPECÍFICOS
+            # ==========================================
+            .str.replace_all("AEREOPUERTO", "AEROPUERTO")
+            .str.replace_all("NUNGUNO", "NINGUNO")
+            .str.replace_all("TERRACERA", "TERRACERIA")
+            
+            # ==========================================
+            # PASO 3: UNIFICACIÓN DE VARIANTES REGIONALES
+            # ==========================================
+            # El catálogo oficial solo reconoce una forma
+            .str.replace_all("RANCHERA", "RANCHERIA")  # Variante regional → forma oficial
+            
+            # ==========================================
+            # PASO 4: (ELIMINADO - MOVIDO AL PASO 0)
+            # ==========================================
+            
+            # ==========================================
+            # PASO 5: MAPEO A 'OTRA (ESPECIFICAR)' - Valores NO oficiales
+            # ==========================================
+            # Según la Norma Técnica del INEGI, valores fuera del catálogo
+            # oficial deben mapearse a "Otro"
+            
+            # A. Errores de captura comunes (NO están en catálogo oficial)
+            .str.replace_all("ZONA COMERCIAL", "OTRA (ESPECIFICAR)")
+            .str.replace_all("AREA RURAL", "OTRA (ESPECIFICAR)")
+            .str.replace_all("LOCALIDAD URBANA", "OTRA (ESPECIFICAR)")
+            
+            # B. Nombres propios mal clasificados como tipos
+            .str.replace_all("SEGUNDA PRIVADA", "PRIVADA")  # "SEGUNDA" es ordinal, no tipo
+            .str.replace_all("^HIDALGO$", "OTRA (ESPECIFICAR)")  # Es nombre, no tipo de vía
+            
+            # C. Captura genérica de variantes de "OTRO/OTRA"
+            .str.replace_all(r"OTR[OA]\s*\(?\s*ESPECIF.*", "OTRA (ESPECIFICAR)")
+            
+            # ==========================================
+            # PASO 6: MANEJO DE VALORES VACÍOS
+            # ==========================================
+            .fill_null("NINGUNO")
+            .map_elements(
+                lambda x: "NINGUNO" if x in ["", " ", None] else x, 
+                return_dtype=pl.Utf8
+            )
+            
+            # ==========================================
+            # PASO 7: LIMPIEZA FINAL DE CARACTERES ESPECIALES
+            # ==========================================
+            # Solo permite: letras, números, espacios Y PARÉNTESIS
+            # (necesarios para 'OTRA (ESPECIFICAR)')
+            .str.replace_all(r'[^A-Z0-9\s\(\)]', '')
+            .str.strip_chars()
+        )
+    
+    def _bootstrap_seeds(self, force: bool = False):
+        """Carga semillas y asegura integridad referencial con validación estricta."""
+        seeds = {
+            "denue_entidades": "seed_entidades.parquet",
+            "denue_municipios": "seed_municipios.parquet",
+            "denue_localidades": "seed_localidades.parquet",
+            "denue_actividades_economicas": "seed_actividades.parquet"
+        }
+        
+        with self.datastore._get_connection() as conn:
+            if force:
+                logger.warning("🗑️ Eliminando tabla de hechos por restricción de integridad...")
+                conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
+
+            # Creación de tipos ENUM
+            for name, values in ENUM_CATALOGS.items():
+                type_name = f"{name}_type"
+                if not conn.execute(f"SELECT 1 FROM pg_type WHERE typname = '{type_name}'").fetchone():
+                    vals_sql = ", ".join([f"'{v}'" for v in values])
+                    conn.execute(f"CREATE TYPE {type_name} AS ENUM ({vals_sql})")
+
+            # Validación y Carga de Dimensiones
+            for table, file_name in seeds.items():
+                seed_path = self.data_root / "seeds" / file_name
+                
+                if not seed_path.exists():
+                    logger.error(f"❌ Archivo no encontrado en: {seed_path}")
+                    raise FileNotFoundError(
+                        f"Error Crítico: La semilla '{file_name}' es obligatoria para la integridad referencial."
+                    )
+                
+                try:
+                    row_count = pl.scan_parquet(seed_path).select(pl.len()).collect().item()
+                    if row_count == 0:
+                        raise ValueError(f"Error Crítico: El archivo '{file_name}' tiene 0 registros.")
+                    logger.info(f"✅ Semilla validada: {file_name} ({row_count:,} registros).")
+                except Exception as e:
+                    raise RuntimeError(f"Error al leer la semilla {file_name}: {str(e)}")
+
+                if force:
+                    conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+                
+                if not conn.execute(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table}'").fetchone():
+                    if table == "denue_entidades":
+                        conn.execute(f"CREATE TABLE {table} (cve_ent VARCHAR PRIMARY KEY, entidad VARCHAR)")
+                    elif table == "denue_municipios":
+                        conn.execute(f"CREATE TABLE {table} (cve_ent VARCHAR, cve_mun VARCHAR, municipio VARCHAR, PRIMARY KEY (cve_ent, cve_mun))")
+                    elif table == "denue_localidades":
+                        conn.execute(f"CREATE TABLE {table} (cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR, localidad VARCHAR, PRIMARY KEY (cve_ent, cve_mun, cve_loc))")
+                    elif table == "denue_actividades_economicas":
+                        conn.execute(f"CREATE TABLE {table} (codigo_act VARCHAR, nombre_act VARCHAR, PRIMARY KEY (codigo_act, nombre_act))")
+
+                    conn.execute(f"INSERT INTO {table} SELECT * FROM read_parquet('{seed_path}')")
+            
+            conn.execute("CHECKPOINT;")
 
     def _clean_raw_data(self, zip_path: Path, period: str):
         """
-        Motor de limpieza robusto con filtrado estricto de REQUIRED_COLUMNS 
-        y generación de Fingerprint Hash.
+        Motor de limpieza robusto con detección de columnas duplicadas,
+        filtrado estricto de REQUIRED_COLUMNS y generación de Fingerprint Hash.
         """
         logs = {"steps": {}, "stats": {"period": period}, "schema_changes": {}}
 
@@ -79,21 +221,37 @@ class DenueProcessor:
                         df = pl.read_csv(sanitized_data, infer_schema_length=0, ignore_errors=True, encoding='utf-8')
                         logs["steps"]["encoding"] = "LATIN-1 (Sanitized)"
 
-        # 1. Normalización de cabeceras
+        # 1. Normalización de cabeceras y Manejo de Duplicados
         df = df.rename({c: c.lower().strip().replace('\ufeff', '') for c in df.columns})
         
+        # Lógica de des-duplicación integrada
+        if len(df.columns) != len(set(df.columns)):
+            new_cols = []
+            seen = {}
+            renamed_list = []
+            for c in df.columns:
+                count = seen.get(c, 0) + 1
+                seen[c] = count
+                if count > 1:
+                    new_name = f"{c}_{count}"
+                    new_cols.append(new_name)
+                    renamed_list.append(f"{c}->{new_name}")
+                else:
+                    new_cols.append(c)
+            df.columns = new_cols
+            logs["schema_changes"]["duplicates_renamed"] = renamed_list
+
         # 2. Aliases y Validación de estructura
         applied_aliases = {k: v for k, v in COLUMN_ALIASES.items() if k in df.columns and v not in df.columns}
         if applied_aliases:
             df = df.rename(applied_aliases)
+            logs["schema_changes"]["aliases_applied"] = list(applied_aliases.keys())
         
         if missing_req_cols := [c for c in REQUIRED_COLUMNS if c not in df.columns]:
             raise ValueError(f"Required columns missing in CSV: {missing_req_cols}")
 
-        # 4. Filtrado estricto (Elimina si REQUIRED_COLUMNS son nulas o vacías)
+        # 4. Filtrado estricto
         initial_count = df.height
-        
-        # Máscara dinámica: verifica que ninguna columna requerida sea nula o string vacío
         required_mask = pl.all_horizontal([
             pl.col(c).is_not_null() & (pl.col(c).cast(pl.Utf8).str.strip_chars() != "")
             for c in REQUIRED_COLUMNS
@@ -107,10 +265,11 @@ class DenueProcessor:
         df = df.select(selection)
 
         # 6. Transformación de Tipos y Normalización de valores
+        # Nota: Aquí usamos tus funciones de normalización para las columnas de catálogo
         df = df.with_columns([
             pl.col('cve_ent').cast(pl.Utf8).str.strip_chars().str.pad_start(2, "0"),
             pl.col('cve_mun').cast(pl.Utf8).str.strip_chars().str.pad_start(3, "0"),
-            pl.col('cve_loc').cast(pl.Utf8).str.strip_chars().str.pad_start(4, "0"),
+            pl.col('cve_loc').cast(pl.Utf8).str.pad_start(4, "0"),
             pl.col('latitud').cast(pl.Float64, strict=False),
             pl.col('longitud').cast(pl.Float64, strict=False),
             pl.lit(period).str.to_date(format="%m_%Y").alias('period'),
@@ -118,14 +277,13 @@ class DenueProcessor:
               .replace(ENTITY_VALUE_NORMALIZATION, default=pl.col('entidad').str.to_uppercase()),
             pl.col('municipio').str.to_uppercase().str.strip_chars(),
             pl.col('localidad').str.to_uppercase().str.strip_chars(),
-            pl.col('tipo_vial').str.to_uppercase().str.strip_chars(),
-            pl.col('tipo_asent').str.to_uppercase().str.strip_chars(),
-            pl.col('tipounieco').str.to_uppercase().str.strip_chars(),
-            pl.col('per_ocu').str.strip_chars()
+            self._normalize_text_col('tipo_vial'), 
+            self._normalize_text_col('tipo_asent'),
+            self._normalize_text_col('tipounieco'), 
+            self._normalize_text_col('per_ocu')
         ])
 
         # 7. Generación de ID Único vía Hash (Fingerprinting)
-        # Garantiza unicidad incluso si el 'id' original es nulo
         df = df.with_columns(
             pl.concat_str([
                 pl.col('id').fill_null('no_id').cast(pl.Utf8).str.strip_chars(),
@@ -137,71 +295,70 @@ class DenueProcessor:
         
         logs["stats"]["rows_final"] = df.height
         return df, logs
-
+    
     def process_zip(self, zip_path: Path, period: str):
-        """Coordina el flujo con reporte de errores detallado y traceback."""
+        """Retorna estatus, mensaje (incluyendo logs de limpieza) y conteo."""
         try:
+            # DESEMPAQUETAR LA TUPLA: df (DataFrame) y logs (dict)
             df, logs = self._clean_raw_data(zip_path, period)
             
-            # Sincronización de dimensiones (Catálogos)
-            self.activities.sync(df)
-            self.entities.sync(df)
-            self.municipalities.sync(df)
-            self.localities.sync(df)
-            self.estratos.sync(df)
-            self.roads.sync(df)
-            self.settlements.sync(df)
-            self.business_units.sync(df)
-            
-            # Carga de tabla de hechos
+            # Ahora enviamos solo el DataFrame al upsert
             self.datastore.upsert(df)
-            return "DONE", json.dumps(logs), df.height
+            
+            # Construcción del mensaje dinámico para el reporte
+            msg = f"Exito: {df.height} registros."
+            if renamed := logs["schema_changes"].get("duplicates_renamed"):
+                msg += f" | Renombrados: {', '.join(renamed)}"
+            if dropped := logs["stats"].get("rows_dropped_invalid_req"):
+                msg += f" | Descartados: {dropped} filas por columnas requeridas vacías"
+                
+            return "DONE", msg, df.height
             
         except Exception as e:
-            error_msg = f"Error en {zip_path.name}: {str(e)}"
-            full_trace = traceback.format_exc()
-            logger.error(f"❌ Falló el procesamiento de {zip_path.name}")
-            logger.error(f"DETALLE: {error_msg}")
-            logger.error(f"TRACEBACK:\n{full_trace}")
-            
-            return "ERROR", json.dumps({"status": "FAILED", "error": error_msg, "traceback": full_trace}), 0
-
+            error_msg = str(e)
+            return "ERROR", f"Error en procesamiento: {error_msg}", 0
+        
     def run_pipeline(self, force: bool = False):
-        """Orquestador con reporte persistente y métricas de sesión."""
+        """Orquestador con log detallado y métricas de sesión."""
         if force:
-            logger.warning("⚠️ MODO FORCE ACTIVADO")
-            import duckdb
-            with duckdb.connect(str(self.data_root / "reports.db")) as conn:
-                res = conn.execute("SELECT file_path, period, process_status FROM denue_raw").fetchall()
-                tasks = [{"file_path": r[0], "period": r[1], "process_status": r[2]} for r in res]
+            logger.warning("⚠️ MODO FORCE ACTIVADO: Se re-procesarán todos los archivos en disco.")
+            self._bootstrap_seeds(force=True)
+            time.sleep(3)
+            tasks = self.report_mgr.download_report.get_raw_tasks(force=True)
         else:
-            tasks = [t for t in self.report_mgr.download_report.get_raw_tasks(retry_errors=True) 
-                     if t.get('process_status') != 'DONE']
+            tasks = self.report_mgr.download_report.get_raw_tasks(retry_errors=True)
 
         if not tasks:
             logger.info("✨ Warehouse actualizado. Nada por procesar.")
             return
 
-        logger.info(f"⚙️ Procesando {len(tasks)} archivos...")
+        logger.info(f"⚙️ Iniciando pipeline para {len(tasks)} archivos...")
         session_total_rows = 0
 
         for idx, task in enumerate(tasks, start=1):
             zip_p = Path.cwd() / task['file_path']
+            
             if not zip_p.exists():
-                logger.warning(f"   ⚠️ [{idx}/{len(tasks)}] No existe: {zip_p.name}")
+                logger.warning(f"   ⚠️ [{idx}/{len(tasks)}] Archivo no encontrado físicamente: {zip_p.name}")
                 continue
 
-            logger.info(f"📦 [{idx}/{len(tasks)}] Procesando: {zip_p.name} ({task['period']})...")
-            status, msg, row_count = self.process_zip(zip_p, task['period'])
+            logger.info(f"📦 [{idx}/{len(tasks)}] Procesando: {zip_p.name} (Periodo: {task['period']})...")
+            
+            status, message, row_count = self.process_zip(zip_p, task['period'])
             
             self.report_mgr.download_report.update_raw_status_batch([{
-                "file_path": task['file_path'], "process_status": status, "process_msg": msg
+                "file_path": task['file_path'], 
+                "process_status": status,
+                "process_msg": message
             }])
             
             if status == "DONE":
                 session_total_rows += row_count
-                logger.info(f"   ✅ Éxito: {row_count} registros integrados.")
+                logger.info(f"   ✅ Éxito: {row_count:,} registros integrados.")
+            else:
+                logger.error(f"   ❌ Fallo en archivo {zip_p.name}: {message}")
 
         with self.datastore._get_connection() as conn:
             conn.execute("CHECKPOINT;")
-        logger.info(f"✨ Proceso terminado. Total sesión: {session_total_rows:,} registros.")
+        
+        logger.info(f"✨ Proceso terminado. Total sesión: {session_total_rows:,} registros integrados en el Warehouse.")

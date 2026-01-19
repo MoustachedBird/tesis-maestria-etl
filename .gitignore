@@ -42,8 +42,9 @@ data/temp/*
 *.duckdb
 *.db
 *.sqlite3
-*.parquet
 *.csv
+*.wal
+*.log
 
 # --- Jupyter Notebooks ---
 .ipynb_checkpoints

@@ -124,12 +124,22 @@ class ReportRawFiles(ReportBase):
         }], schema=self.report_schema)
         self._upsert(self.table_id, self.report_schema, new_row, "file_path")
 
-    def get_raw_tasks(self, retry_errors=False):
-        """Obtiene la lista de archivos pendientes de ser procesados al Warehouse."""
+    def get_raw_tasks(self, retry_errors=False, force=False):
+        """Obtiene la lista de archivos para procesar."""
         df = self._read_storage(self.table_id, self.report_schema)
         if df.height == 0: return []
+        
+        # MODO FORCE: Ignora process_status por completo
+        if force:
+            # Solo filtramos que el archivo haya sido marcado como exitoso en disco (OK)
+            return df.filter(pl.col("download_status") == "OK").to_dicts()
+        
+        # Lógica normal
         target = ["NEW", "ERROR"] if retry_errors else ["NEW"]
-        return df.filter((pl.col("process_status").is_in(target)) & (pl.col("download_status") == "OK")).to_dicts()
+        return df.filter(
+            (pl.col("process_status").is_in(target)) & 
+            (pl.col("download_status") == "OK")
+        ).to_dicts()
 
     def update_raw_status_batch(self, updates: list):
         """Actualiza masivamente el estatus de procesamiento de varios archivos."""

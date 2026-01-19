@@ -1,115 +1,48 @@
 import polars as pl
 from scripts.utils.database import BaseWarehouse
-from scripts.utils.constants import DB_FACT_COLUMNS
+from scripts.utils.constants import DB_FACT_COLUMNS, ENUM_CATALOGS
 
 class DataStoreManager(BaseWarehouse):
     def __init__(self, warehouse_path):
         super().__init__(warehouse_path)
         self.table_id = "establecimientos"
 
+    def validate_integrity(self, df: pl.DataFrame):
+        """Validador Fail-fast en Polars."""
+        for col, allowed in ENUM_CATALOGS.items():
+            invalid = df.select(col).unique().filter(~pl.col(col).is_in(allowed)).to_series().drop_nulls().to_list()
+            if invalid:
+                raise ValueError(f"❌ Error de integridad en '{col}': valores {invalid} no permitidos.")
+
     def upsert(self, df: pl.DataFrame):
-        """
-        Inserta hechos utilizando únicamente las columnas definidas en DB_FACT_COLUMNS.
-        Garantiza un Warehouse ligero y normalizado.
-        """
-        # Filtramos el DataFrame usando la constante que ahora debe contener 'id'
-        df_optimized = df.select([
-            c for c in DB_FACT_COLUMNS if c in df.columns
-        ])
+        self.validate_integrity(df)
 
         with self._get_connection() as conn:
-            # 1. Crear la tabla si no existe con el esquema de df_optimized
-            conn.execute(f"CREATE TABLE IF NOT EXISTS {self.table_id} AS SELECT * FROM df_optimized WHERE 1=0")
-            
-            # 2. Crear el índice sobre la nueva columna 'id' (UUID lógico)
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_id ON {self.table_id} (id)")
-            
-            # 3. Inserción de registros nuevos mediante LEFT JOIN usando 'id'
-            # Se usa src.id porque 'row_id' ya no existe en el DataFrame
+            # DDL actualizado con nombres directos
             conn.execute(f"""
-                INSERT INTO {self.table_id} 
-                SELECT src.* FROM df_optimized src
-                LEFT JOIN {self.table_id} tgt ON src.id = tgt.id
-                WHERE tgt.id IS NULL
-            """)
-
-class EstratoManager(BaseWarehouse):
-    def __init__(self, warehouse_path):
-        super().__init__(warehouse_path)
-        self.table_id = "denue_estratos_personal"
-
-    def sync(self, df: pl.DataFrame):
-        """Crea catálogo de personal ocupado."""
-        estratos_df = df.select([
-            pl.col("per_ocu").cast(pl.Utf8).str.strip_chars()
-        ]).unique().drop_nulls()
-
-        with self._get_connection() as conn:
-            conn.execute(f"""
-                CREATE SEQUENCE IF NOT EXISTS seq_estrato_id;
                 CREATE TABLE IF NOT EXISTS {self.table_id} (
-                    id_estrato INTEGER PRIMARY KEY DEFAULT nextval('seq_estrato_id'),
-                    per_ocu VARCHAR UNIQUE
+                    id VARCHAR PRIMARY KEY,
+                    clee VARCHAR, nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
+                    tipo_vial tipo_vial_type, 
+                    tipo_asent tipo_asent_type,
+                    tipounieco tipounieco_type,
+                    per_ocu per_ocu_type,
+                    nom_vial VARCHAR, tipo_v_e_1 VARCHAR, nom_v_e_1 VARCHAR,
+                    tipo_v_e_2 VARCHAR, nom_v_e_2 VARCHAR, tipo_v_e_3 VARCHAR,
+                    nom_v_e_3 VARCHAR, numero_ext VARCHAR, letra_ext VARCHAR,
+                    edificio VARCHAR, edificio_e VARCHAR, numero_int VARCHAR,
+                    letra_int VARCHAR, nomb_asent VARCHAR, nom_cencom VARCHAR,
+                    num_local VARCHAR, cod_postal VARCHAR,
+                    cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR,
+                    ageb VARCHAR, manzana VARCHAR, telefono VARCHAR,
+                    correoelec VARCHAR, www VARCHAR,
+                    latitud DOUBLE, longitud DOUBLE, fecha_alta VARCHAR, period DATE,
+                    FOREIGN KEY (cve_ent) REFERENCES denue_entidades(cve_ent),
+                    FOREIGN KEY (cve_ent, cve_mun) REFERENCES denue_municipios(cve_ent, cve_mun),
+                    FOREIGN KEY (cve_ent, cve_mun, cve_loc) REFERENCES denue_localidades(cve_ent, cve_mun, cve_loc)
                 )
             """)
-            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} (per_ocu) SELECT per_ocu FROM estratos_df")
 
-class RoadTypeManager(BaseWarehouse):
-    def __init__(self, warehouse_path):
-        super().__init__(warehouse_path)
-        self.table_id = "denue_tipos_vialidad"
-
-    def sync(self, df: pl.DataFrame):
-        items_df = df.select([
-            pl.col("tipo_vial").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
-        ]).unique().drop_nulls()
-
-        with self._get_connection() as conn:
-            conn.execute(f"""
-                CREATE SEQUENCE IF NOT EXISTS seq_{self.table_id}_id;
-                CREATE TABLE IF NOT EXISTS {self.table_id} (
-                    id_tipo_vial INTEGER PRIMARY KEY DEFAULT nextval('seq_{self.table_id}_id'),
-                    tipo_vial VARCHAR UNIQUE
-                )
-            """)
-            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} (tipo_vial) SELECT * FROM items_df")
-
-class SettlementTypeManager(BaseWarehouse):
-    def __init__(self, warehouse_path):
-        super().__init__(warehouse_path)
-        self.table_id = "denue_tipos_asentamiento"
-
-    def sync(self, df: pl.DataFrame):
-        items_df = df.select([
-            pl.col("tipo_asent").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
-        ]).unique().drop_nulls()
-
-        with self._get_connection() as conn:
-            conn.execute(f"""
-                CREATE SEQUENCE IF NOT EXISTS seq_{self.table_id}_id;
-                CREATE TABLE IF NOT EXISTS {self.table_id} (
-                    id_tipo_asent INTEGER PRIMARY KEY DEFAULT nextval('seq_{self.table_id}_id'),
-                    tipo_asent VARCHAR UNIQUE
-                )
-            """)
-            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} (tipo_asent) SELECT * FROM items_df")
-
-class BusinessUnitTypeManager(BaseWarehouse):
-    def __init__(self, warehouse_path):
-        super().__init__(warehouse_path)
-        self.table_id = "denue_tipos_unidad"
-
-    def sync(self, df: pl.DataFrame):
-        items_df = df.select([
-            pl.col("tipounieco").cast(pl.Utf8).str.strip_chars().str.to_uppercase()
-        ]).unique().drop_nulls()
-
-        with self._get_connection() as conn:
-            conn.execute(f"""
-                CREATE SEQUENCE IF NOT EXISTS seq_{self.table_id}_id;
-                CREATE TABLE IF NOT EXISTS {self.table_id} (
-                    id_tipo_unidad INTEGER PRIMARY KEY DEFAULT nextval('seq_{self.table_id}_id'),
-                    tipounieco VARCHAR UNIQUE
-                )
-            """)
-            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} (tipounieco) SELECT * FROM items_df")
+            cols_sql = ", ".join(DB_FACT_COLUMNS)
+            # DuckDB ahora encontrará 'tipo_vial' en 'df' porque ya no buscamos 'id_tipo_vial'
+            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {cols_sql} FROM df")
