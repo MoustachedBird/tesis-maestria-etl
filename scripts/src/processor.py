@@ -53,10 +53,8 @@ class DenueProcessor:
             .str.strip_chars()
 
             # ==========================================
-            # PASO 0: LIMPIEZA DE ACENTOS (MOVIDO AL INICIO)
+            # PASO 0: ESTANDARIZACIÓN DE CARACTERES (ANTES de los reemplazos)
             # ==========================================
-            # Crucial mover esto aquí para que los reemplazos de truncamientos
-            # en el PASO 1 funcionen correctamente con strings que tenían tildes.
             .str.replace_all(r'[ÁÀÄÂÃ]', 'A')
             .str.replace_all(r'[ÉÈËÊ]', 'E')
             .str.replace_all(r'[ÍÌÏÎĨ]', 'I')
@@ -64,82 +62,51 @@ class DenueProcessor:
             .str.replace_all(r'[ÚÙÜÛ]', 'U')
             .str.replace_all(r'Ñ', 'N')
             
-            # ==========================================
-            # PASO 1: CORRECCIÓN DE TRUNCAMIENTOS (encoding UTF-8 corrupto)
-            # ==========================================
-            # Estos valores aparecen truncados en archivos históricos del INEGI
-            # por problemas de codificación latin-1 vs utf-8
+            # ELIMINAR BASURA AQUÍ: Así "RANCHERA." o "RANCHERA\x00" se vuelven "RANCHERA"
+            .str.replace_all(r'[^A-Z0-9\s\(\)]', '') 
             
-            # Tipo Vialidad
-            .str.replace_all("CALLEJEN", "CALLEJON")
-            .str.replace_all("PROLONGACIEN", "PROLONGACION")
-            .str.replace_all("CONTINUACIEN", "CONTINUACION")
-            .str.replace_all("CIRCUNVALACIEN", "CIRCUNVALACION")
-            .str.replace_all("AMPLIACIEN", "AMPLIACION")
-            .str.replace_all("PERIFRIEN", "PERIFERICO")
+            # ==========================================
+            # PASO 1: CORRECCIÓN DE TRUNCAMIENTOS Y CATÁLOGO
+            # ==========================================
+            .str.replace_all(r"\bCALLEJEN\b", "CALLEJON")
+            .str.replace_all(r"\bPROLONGACIEN\b", "PROLONGACION")
+            .str.replace_all(r"\bCONTINUACIEN\b", "CONTINUACION")
+            .str.replace_all(r"\bCIRCUNVALACIEN\b", "CIRCUNVALACION")
+            .str.replace_all(r"\bAMPLIACIEN\b", "AMPLIACION")
+            .str.replace_all(r"\bPERIFRIEN\b", "PERIFERICO")
             
-            # Tipo Asentamiento
-            .str.replace_all("COLONI", "COLONIA")
-            .str.replace_all("COLONIAA", "COLONIA")
-            .str.replace_all("SECCIEN", "SECCION")
-            .str.replace_all("FRACCIEN", "FRACCION")
-            .str.replace_all("RANCHEROA", "RANCHERIA")
-            .str.replace_all("RANCHERA", "RANCHERIA")
+            .str.replace_all(r"\bCOLONI\b", "COLONIA")
+            .str.replace_all(r"\bCOLONIAA\b", "COLONIA")
+            .str.replace_all(r"\bSECCIEN\b", "SECCION")
+            .str.replace_all(r"\bFRACCIEN\b", "FRACCION")
+            .str.replace_all(r"\bRANCHEROA\b", "RANCHERIA")
+            .str.replace_all(r"\bRANCHERA\b", "RANCHERIA") # Ahora sí hará match
 
+            # ==========================================
+            # PASO 2: TYPOS Y MAPEOS
+            # ==========================================
+            .str.replace_all(r"\bAEREOPUERTO\b", "AEROPUERTO")
+            .str.replace_all(r"\bNUNGUNO\b", "NINGUNO")
+            .str.replace_all(r"\bTERRACERA\b", "TERRACERIA")
             
-            # ==========================================
-            # PASO 2: CORRECCIÓN DE TYPOS ESPECÍFICOS
-            # ==========================================
-            .str.replace_all("AEREOPUERTO", "AEROPUERTO")
-            .str.replace_all("NUNGUNO", "NINGUNO")
-            .str.replace_all("TERRACERA", "TERRACERIA")
-            
-            # ==========================================
-            # PASO 3: UNIFICACIÓN DE VARIANTES REGIONALES
-            # ==========================================
-            # El catálogo oficial solo reconoce una forma
-            .str.replace_all("RANCHERA", "RANCHERIA")  # Variante regional → forma oficial
-            
-            # ==========================================
-            # PASO 4: (ELIMINADO - MOVIDO AL PASO 0)
-            # ==========================================
-            
-            # ==========================================
-            # PASO 5: MAPEO A 'OTRA (ESPECIFICAR)' - Valores NO oficiales
-            # ==========================================
-            # Según la Norma Técnica del INEGI, valores fuera del catálogo
-            # oficial deben mapearse a "Otro"
-            
-            # A. Errores de captura comunes (NO están en catálogo oficial)
-            .str.replace_all("ZONA COMERCIAL", "OTRA (ESPECIFICAR)")
-            .str.replace_all("AREA RURAL", "OTRA (ESPECIFICAR)")
-            .str.replace_all("LOCALIDAD URBANA", "OTRA (ESPECIFICAR)")
-            
-            # B. Nombres propios mal clasificados como tipos
-            .str.replace_all("SEGUNDA PRIVADA", "PRIVADA")  # "SEGUNDA" es ordinal, no tipo
-            .str.replace_all("^HIDALGO$", "OTRA (ESPECIFICAR)")  # Es nombre, no tipo de vía
-            
-            # C. Captura genérica de variantes de "OTRO/OTRA"
+            .str.replace_all(r"\bZONA COMERCIAL\b", "OTRA (ESPECIFICAR)")
+            .str.replace_all(r"\bAREA RURAL\b", "OTRA (ESPECIFICAR)")
+            .str.replace_all(r"\bLOCALIDAD URBANA\b", "OTRA (ESPECIFICAR)")
+            .str.replace_all(r"\bSEGUNDA PRIVADA\b", "PRIVADA")
+            .str.replace_all(r"^HIDALGO$", "OTRA (ESPECIFICAR)")
             .str.replace_all(r"OTR[OA]\s*\(?\s*ESPECIF.*", "OTRA (ESPECIFICAR)")
             
             # ==========================================
-            # PASO 6: MANEJO DE VALORES VACÍOS
+            # PASO 3: CIERRE Y NULOS
             # ==========================================
             .fill_null("NINGUNO")
             .map_elements(
-                lambda x: "NINGUNO" if x in ["", " ", None] else x, 
+                lambda x: "NINGUNO" if x in ["", " ", None, "NAN", "NULL"] else x, 
                 return_dtype=pl.Utf8
             )
-            
-            # ==========================================
-            # PASO 7: LIMPIEZA FINAL DE CARACTERES ESPECIALES
-            # ==========================================
-            # Solo permite: letras, números, espacios Y PARÉNTESIS
-            # (necesarios para 'OTRA (ESPECIFICAR)')
-            .str.replace_all(r'[^A-Z0-9\s\(\)]', '')
             .str.strip_chars()
         )
-    
+
     def _bootstrap_seeds(self, force: bool = False):
         """Carga semillas y asegura integridad referencial con validación estricta."""
         seeds = {
