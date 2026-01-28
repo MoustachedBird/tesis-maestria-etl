@@ -14,10 +14,22 @@ The project follows a simplified Hexagonal Architecture (Src Layout) to decouple
 
 ## Project Structure
 
-    src/tesis_core/
-    ├── domain/           # Pydantic Models & Business Logic
-    ├── infrastructure/   # Database connections & ML Model Loading
-    └── interface/        # FastAPI Endpoints & CLI Commands
+    tesi-etl/
+    ├── data/                   # Datos locales (solo para desarrollo/pruebas)
+    │   ├── raw/                # Datos de entrada sin procesar
+    │   └── processed/          # Resultados finales antes de la carga
+    ├── src/                    # Código fuente principal
+    │   ├── __init__.py
+    │   ├── main.py             # Orquestador/Punto de entrada
+    │   ├── extract/            # Módulos de extracción (APIs, DBs, CSVs)
+    │   ├── transform/          # Lógica de negocio y limpieza
+    │   ├── load/               # Módulos de carga (Data Warehouse, S3)
+    │   └── utils/              # Funciones compartidas (loggers, conexiones)
+    ├── tests/                  # Pruebas unitarias y de integración
+    ├── config/                 # Archivos de configuración (YAML, JSON, .env)
+    ├── logs/                   # Archivos de registro de ejecución
+    ├── requirements.txt        # Dependencias del proyecto
+    └── README.md               # Documentación
 
 ## Installation & Setup
 

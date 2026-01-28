@@ -1,5 +1,5 @@
 import polars as pl
-from scripts.utils.database import BaseWarehouse
+from src.utils.database import BaseWarehouse
 
 class ActivityManager(BaseWarehouse):
     def __init__(self, warehouse_path):

@@ -1,9 +1,9 @@
 import time
 from pathlib import Path
-from scripts.utils.browser import get_chrome_driver
-from scripts.src.reporter import ReportManager
-from scripts.utils.denue_network import download_file_streaming
-from scripts.utils.denue_scraping import scrape_denue_table
+from src.utils.browser import get_chrome_driver
+from src.src.reporter import ReportManager
+from src.utils.denue_network import download_file_streaming
+from src.utils.denue_scraping import scrape_denue_table
 
 class InegiDownloader:
     def __init__(self, output_dir: Path, headless: bool = True):

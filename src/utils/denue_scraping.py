@@ -7,7 +7,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # Importamos el limpiador de texto que ya tienes
-from scripts.utils.text import clean_filename
+from src.utils.text import clean_filename
 
 def scrape_denue_table(driver, wait_timeout, report_mgr, output_dir, base_url_inegi):
     """

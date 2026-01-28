@@ -3,7 +3,7 @@ import duckdb
 from pathlib import Path
 from datetime import datetime
 # Importamos la base de datos centralizada
-from scripts.utils.database import BaseWarehouse
+from src.utils.database import BaseWarehouse
 
 class ReportBase(BaseWarehouse):    
     """

@@ -8,9 +8,9 @@ from pathlib import Path
 from datetime import datetime
 import polars as pl
 
-from scripts.src.denue_stores import DataStoreManager
-from scripts.src.reporter import ReportManager
-from scripts.utils.constants import (
+from src.src.denue_stores import DataStoreManager
+from src.src.reporter import ReportManager
+from src.utils.constants import (
     MASTER_COLUMNS, REQUIRED_COLUMNS, COLUMN_ALIASES, 
     ENTITY_VALUE_NORMALIZATION, ENUM_CATALOGS, DB_FACT_COLUMNS
 )

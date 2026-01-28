@@ -4,9 +4,9 @@ from rich.console import Console
 from rich.markup import escape
 
 # Importación de orquestadores modulares
-from scripts.src.denue_downloader import InegiDownloader
-from scripts.src.processor import DenueProcessor
-from scripts.src.harmonizer import DenueHarmonizer
+from src.extract.denue_downloader import InegiDownloader
+from src.src.processor import DenueProcessor
+from src.src.harmonizer import DenueHarmonizer
 
 # Configuración de la CLI
 app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")

@@ -1,40 +1,49 @@
+.PHONY: help setup download process normalize harmonize validate clean
+.DEFAULT_GOAL := help
+
 # Variables
-PYTHON := python
-MAIN := scripts/main.py
-# Usamos export para que PYTHONPATH esté disponible en todos los comandos
-export PYTHONPATH := .
+PYTHON := uv run python
+WAREHOUSE := data/denue_warehouse.db
 
-.PHONY: help etl-download etl-process etl-process-force etl-status clean
+help: ## 📚 Muestra esta ayuda
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "🚀 DENUE ETL Pipeline"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
+	@echo ""
 
-help:
-	@echo "Thesis ETL Pipeline - Available commands:"
-	@echo "  make etl-download      - Step 1: Download RAW ZIPs"
-	@echo "  make etl-process       - Step 2: Process new/failed ZIPs"
-	@echo "  make etl-process-force - Step 2: Re-process ALL ZIPs"
-	@echo "  make etl-status        - Show reports.db summary"
+setup: ## 🔧 Instala dependencias
+	uv sync
 
-## --- STEP 1: DOWNLOAD ---
-etl-download:
-	@echo "🕷️  Running Inegi Downloader..."
-	uv run $(PYTHON) $(MAIN) download-inegi --headless
+download: ## ⬇️  Descarga datos INEGI
+	$(PYTHON) -m scripts.main download-inegi
 
-## --- STEP 2: PROCESSING ---
-etl-process:
-	@echo "⚙️  Processing DENUE data (Normal Mode)..."
-	uv run $(PYTHON) $(MAIN) process-denue
+process: ## ⚙️  Procesa archivos RAW → Warehouse
+	$(PYTHON) -m scripts.main process
 
-etl-process-force:
-	@echo "⚠️  FORCE MODE: Re-processing all files..."
-	uv run $(PYTHON) $(MAIN) process-denue --force
+process-parallel: ## ⚡ Procesa en paralelo
+	$(PYTHON) -m scripts.main process --parallel
 
-## --- UTILS ---
-etl-status:
-	@echo "📊 ETL Telemetry Summary:"
-	@uv run $(PYTHON) -c "import duckdb, json; \
-		conn = duckdb.connect('data/reports.db', read_only=True); \
-		res = conn.execute('SELECT process_status, count(*) FROM denue_raw GROUP BY 1').fetchall(); \
-		print('\n[STATUS SUMMARY]'); \
-		[print(f'  {row[0]}: {row[1]} files') for row in res];"
+normalize: ## 📅 Normaliza fechas
+	$(PYTHON) -m scripts.main normalize-dates
 
-clean:
-	find . -type d -name "__pycache__" -exec rm -rf {} +
+harmonize: ## 🔗 Ejecuta harmonización
+	$(PYTHON) -m scripts.main harmonize
+
+validate: ## ✅ Valida warehouse
+	$(PYTHON) -m scripts.main stats
+
+clean: ## 🧹 Limpia cache
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+# Pipeline completo
+pipeline: download process normalize harmonize validate ## 🚀 Pipeline completo
+	@echo "✨ Pipeline completado"
+
+# Desarrollo
+dev: setup ## 🛠️  Setup desarrollo
+	@echo "✅ Listo para desarrollo"
+
+pipeline: download process normalize generate-seeds load-seeds harmonize validate ## 🚀 Pipeline completo

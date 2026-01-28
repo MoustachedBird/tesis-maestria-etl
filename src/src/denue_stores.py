@@ -1,6 +1,6 @@
 import polars as pl
-from scripts.utils.database import BaseWarehouse
-from scripts.utils.constants import DB_FACT_COLUMNS, ENUM_CATALOGS
+from src.utils.database import BaseWarehouse
+from src.utils.constants import DB_FACT_COLUMNS, ENUM_CATALOGS
 
 class DataStoreManager(BaseWarehouse):
     def __init__(self, warehouse_path):

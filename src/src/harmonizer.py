@@ -2,12 +2,12 @@ import polars as pl
 import logging
 import gc
 from pathlib import Path
-from scripts.src.reporter import ReportManager
-from scripts.utils.matching import clean_contact_columns
+from src.src.reporter import ReportManager
+from src.utils.matching import clean_contact_columns
 
 # Importamos la refactorización
-from scripts.utils.harmonizer_config import MEGA_REGIONS, SILVER_SCHEMA, COLS_NEEDED_FOR_MATCHING, TEXT_COLS_TO_SANITIZE
-from scripts.utils.harmonizer_core import (
+from src.utils.harmonizer_config import MEGA_REGIONS, SILVER_SCHEMA, COLS_NEEDED_FOR_MATCHING, TEXT_COLS_TO_SANITIZE
+from src.utils.harmonizer_core import (
     get_region_prefix, 
     initialize_knowledge_base, 
     resolve_period_logic, 
