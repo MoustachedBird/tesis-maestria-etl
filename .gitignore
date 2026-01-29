@@ -27,11 +27,9 @@ env/
 .env.test
 
 # --- DATA LAKE & MODELS (DO NOT COMMIT) ---
-data/raw/*
-data/processed/*
-data/curated/*
-data/models/*
-data/temp/*
+data/bronze/*
+data/silver/*
+data/gold/*
 
 # Exception: Keep empty folder structure
 !data/raw/.gitkeep

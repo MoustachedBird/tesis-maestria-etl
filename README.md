@@ -16,8 +16,10 @@ The project follows a simplified Hexagonal Architecture (Src Layout) to decouple
 
     tesi-etl/
     ├── data/                   # Datos locales (solo para desarrollo/pruebas)
-    │   ├── raw/                # Datos de entrada sin procesar
-    │   └── processed/          # Resultados finales antes de la carga
+    │   ├── bronze/                # Datos de entrada sin procesar
+    │   └── silver/          # Resultados finales antes de la carga
+    │   └── gold/           
+    │   └── seeds/         
     ├── src/                    # Código fuente principal
     │   ├── __init__.py
     │   ├── main.py             # Orquestador/Punto de entrada

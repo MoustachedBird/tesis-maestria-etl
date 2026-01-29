@@ -17,6 +17,10 @@ dependencies = [
     "dateparser>=1.2.2",
     "rapidfuzz>=3.14.3",
     "psutil>=7.2.1",
+    "sqlalchemy>=2.0.46",
+    "alembic>=1.18.1",
+    "duckdb-engine>=0.17.0",
+    "psycopg2-binary>=2.9.11",
 ]
 
 [dependency-groups]
