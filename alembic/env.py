@@ -8,6 +8,7 @@ It uses the settings from src/core/config.py to determine the database backend.
 from logging.config import fileConfig
 from sqlalchemy import pool
 from alembic import context
+from alembic.ddl.impl import DefaultImpl
 import sys
 from pathlib import Path
 
@@ -21,6 +22,21 @@ from src.db.base import Base
 
 # Import all models to ensure they're registered with Base.metadata
 from src.db import models  # noqa: F401
+
+
+# ------------------------------------------------------------------------------
+# DuckDB Support for Alembic
+# ------------------------------------------------------------------------------
+class DuckDBImpl(DefaultImpl):
+    """
+    Alembic DDL implementation for DuckDB dialect.
+
+    DuckDB is not natively supported by Alembic, so we register it
+    to use the default implementation for basic DDL operations.
+    """
+
+    __dialect__ = "duckdb"
+
 
 # ------------------------------------------------------------------------------
 # Alembic Configuration
