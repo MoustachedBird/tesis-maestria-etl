@@ -46,4 +46,27 @@ pipeline: download process normalize harmonize validate ## 🚀 Pipeline complet
 dev: setup ## 🛠️  Setup desarrollo
 	@echo "✅ Listo para desarrollo"
 
+# Testing
+test: ## 🧪 Ejecuta todos los tests
+	uv run pytest
+
+test-unit: ## ⚡ Tests unitarios (rápidos)
+	uv run pytest -m unit
+
+test-integration: ## 🔗 Tests de integración (con BD)
+	uv run pytest -m integration
+
+test-db: ## 💾 Tests de base de datos
+	uv run pytest -m db
+
+test-cov: ## 📊 Tests con cobertura
+	uv run pytest --cov=src/db --cov-report=html --cov-report=term
+	@echo "📈 Reporte de cobertura en: htmlcov/index.html"
+
+test-verbose: ## 🔍 Tests en modo verbose
+	uv run pytest -vv
+
+test-fast: ## 🚀 Tests rápidos (solo unit, sin slow)
+	uv run pytest -m "unit and not slow"
+
 pipeline: download process normalize generate-seeds load-seeds harmonize validate ## 🚀 Pipeline completo

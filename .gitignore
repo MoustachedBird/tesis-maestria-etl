@@ -50,5 +50,17 @@ data/gold/*
 
 # --- Testing & Coverage ---
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .pytest_cache/
+*.cover
+.hypothesis/
+.tox/
+.nox/
+
+# --- Type Checking & Linting ---
+.mypy_cache/
+.pytype/
+.dmypy.json
+dmypy.json
