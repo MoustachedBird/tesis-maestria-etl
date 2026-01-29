@@ -1,9 +1,10 @@
-.PHONY: help setup download process normalize harmonize validate clean
+.PHONY: help setup download process normalize harmonize validate clean db-migrate db-downgrade db-seed db-reset
 .DEFAULT_GOAL := help
 
 # Variables
 PYTHON := uv run python
 WAREHOUSE := data/denue_warehouse.db
+ALEMBIC := uv run alembic
 
 help: ## 📚 Muestra esta ayuda
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -38,6 +39,45 @@ clean: ## 🧹 Limpia cache
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
 
+# Database migrations
+db-migrate: ## 🗄️  Ejecuta migraciones pendientes
+	@echo "🔄 Running database migrations..."
+	$(ALEMBIC) upgrade head
+	@echo "✅ Migrations completed"
+
+db-downgrade: ## ⏮️  Rollback última migración
+	@echo "⏮️  Rolling back last migration..."
+	$(ALEMBIC) downgrade -1
+	@echo "✅ Downgrade completed"
+
+db-seed: ## 🌱 Carga seeds (catalog data)
+	@echo "🌱 Loading seed data..."
+	@echo "   This will re-run the seed migration (idempotent)"
+	$(ALEMBIC) downgrade cbc954c59583
+	$(ALEMBIC) upgrade head
+	@echo "✅ Seed data loaded"
+
+db-reset: ## 🔄 Reset completo de BD (schema + seeds)
+	@echo "🔄 Resetting database..."
+	@echo "⚠️  This will drop all tables and data"
+	@read -p "Are you sure? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		$(ALEMBIC) downgrade base; \
+		$(ALEMBIC) upgrade head; \
+		echo "✅ Database reset completed"; \
+	else \
+		echo "❌ Reset cancelled"; \
+	fi
+
+db-status: ## 📊 Muestra estado de migraciones
+	@echo "📊 Current database status:"
+	@echo ""
+	$(ALEMBIC) current --verbose
+	@echo ""
+	@echo "📜 Migration history:"
+	$(ALEMBIC) history
+
 # Pipeline completo
 pipeline: download process normalize harmonize validate ## 🚀 Pipeline completo
 	@echo "✨ Pipeline completado"
@@ -68,5 +108,3 @@ test-verbose: ## 🔍 Tests en modo verbose
 
 test-fast: ## 🚀 Tests rápidos (solo unit, sin slow)
 	uv run pytest -m "unit and not slow"
-
-pipeline: download process normalize generate-seeds load-seeds harmonize validate ## 🚀 Pipeline completo
