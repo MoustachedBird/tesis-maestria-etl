@@ -74,6 +74,29 @@ def include_object(obj, name, type_, reflected, compare_to):
     return True
 
 
+def include_name(name, type_, parent_names):
+    """
+    Filter function to prevent DuckDB from querying problematic system catalogs.
+
+    DuckDB has limited PostgreSQL compatibility and doesn't support all pg_catalog tables.
+    This filter prevents Alembic from attempting queries that would fail.
+
+    Args:
+        name: Name of the object
+        type_: Type of object (table, column, index, etc.)
+        parent_names: Dictionary of parent object names
+
+    Returns:
+        bool: True if object should be included, False otherwise
+    """
+    # For DuckDB, skip collation introspection (causes pg_collation errors)
+    if settings.DATABASE_BACKEND == "duckdb":
+        # Skip any system catalog queries
+        if type_ == "schema" and name in ("information_schema", "pg_catalog"):
+            return False
+    return True
+
+
 # ------------------------------------------------------------------------------
 # Migration Logic (Offline Mode)
 # ------------------------------------------------------------------------------
@@ -94,14 +117,20 @@ def run_migrations_offline() -> None:
         "target_metadata": target_metadata,
         "literal_binds": True,
         "include_object": include_object,
+        "include_name": include_name,
         "dialect_opts": {"paramstyle": "named"},
-        "compare_type": True,
-        "compare_server_default": True,
     }
 
-    # Only add render_as_batch for PostgreSQL (DuckDB doesn't support it in Alembic)
+    # Backend-specific configuration
     if settings.DATABASE_BACKEND == "postgresql":
         config_dict["render_as_batch"] = False
+        config_dict["compare_type"] = True
+        config_dict["compare_server_default"] = True
+    elif settings.DATABASE_BACKEND == "duckdb":
+        # DuckDB has limited introspection capabilities
+        # Disable comparisons that trigger problematic catalog queries
+        config_dict["compare_type"] = False
+        config_dict["compare_server_default"] = False
 
     context.configure(**config_dict)
 
@@ -127,13 +156,19 @@ def run_migrations_online() -> None:
             "connection": connection,
             "target_metadata": target_metadata,
             "include_object": include_object,
-            "compare_type": True,
-            "compare_server_default": True,
+            "include_name": include_name,
         }
 
-        # Only add render_as_batch for PostgreSQL (DuckDB doesn't support it in Alembic)
+        # Backend-specific configuration
         if settings.DATABASE_BACKEND == "postgresql":
             config_dict["render_as_batch"] = False
+            config_dict["compare_type"] = True
+            config_dict["compare_server_default"] = True
+        elif settings.DATABASE_BACKEND == "duckdb":
+            # DuckDB has limited introspection capabilities
+            # Disable comparisons that trigger problematic catalog queries
+            config_dict["compare_type"] = False
+            config_dict["compare_server_default"] = False
 
         context.configure(**config_dict)
 
