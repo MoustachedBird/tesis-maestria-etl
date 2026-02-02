@@ -19,7 +19,7 @@ setup: ## 🔧 Instala dependencias
 	uv sync
 
 download: ## ⬇️  Descarga datos INEGI (Phase 2 system)
-	$(PYTHON) -m src.main download-inegi
+	$(PYTHON) -m src.main download-inegi $(ARGS)
 
 retry: ## 🔄 Reintenta descargas fallidas
 	$(PYTHON) -m src.main retry-inegi

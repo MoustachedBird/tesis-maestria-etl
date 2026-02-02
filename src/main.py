@@ -26,16 +26,28 @@ def download_inegi(
     output: Path = typer.Option(
         RAW_DIR, help="Carpeta de destino para los archivos ZIP"
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="🔄 Re-download ALL files, ignoring metadata and disk cache",
+    ),
 ):
     """
     PASO 1: Descarga masiva de datos DENUE desde el sitio de INEGI.
     Sincroniza lo que hay en disco con el reporte de control en reports.db.
+
+    Use --force to re-download all files regardless of existing downloads.
     """
     console.print(f"[bold green]🚀 Iniciando DENUE Downloader (Phase 2)[/bold green]")
     console.print(f"📂 Destino: {output}")
     console.print(f"👻 Modo Headless: {headless}")
 
-    downloader = DenueDownloader(output_dir=output, headless=headless)
+    if force:
+        console.print(
+            f"⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]"
+        )
+
+    downloader = DenueDownloader(output_dir=output, headless=headless, force=force)
     downloader.download_all()
 
 

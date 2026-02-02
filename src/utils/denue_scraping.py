@@ -25,6 +25,7 @@ def scrape_denue_table(
     run_id: str,
     output_dir: Path,
     base_url_inegi: str,
+    force: bool = False,
 ) -> List[Tuple[str, str, str]]:
     """
     Scrape INEGI DENUE table and synchronize with metadata database.
@@ -36,15 +37,21 @@ def scrape_denue_table(
         run_id: Current job run ID
         output_dir: Base output directory for downloads
         base_url_inegi: Base URL for INEGI website
+        force: If True, re-download ALL files ignoring existing state
 
     Returns:
         List of (period, activity, url) tuples for files that need downloading
 
     Logic:
-        1. Scrape INEGI table for all available files
-        2. Skip files already successfully downloaded (in metadata DB)
-        3. Sync files found on disk but not in DB
-        4. Return new files that need downloading
+        Normal mode:
+            1. Scrape INEGI table for all available files
+            2. Skip files already successfully downloaded (in metadata DB)
+            3. Sync files found on disk but not in DB
+            4. Return new files that need downloading
+
+        Force mode:
+            1. Scrape INEGI table for all available files
+            2. Return ALL files for re-download (ignore metadata and disk)
     """
     new_tasks = []
     wait = WebDriverWait(driver, wait_timeout)
@@ -67,15 +74,17 @@ def scrape_denue_table(
         rows = table.find("tbody").find_all("tr")
         print(f"  ... Processing {len(rows)} rows from INEGI website")
 
-        # Get existing successful downloads from metadata
-        existing_tasks = tracker.get_tasks_by_run(run_id) if run_id else []
-        existing_urls = {
-            task["source_url"]
-            for task in existing_tasks
-            if task["status"] == TaskStatus.SUCCESS.value
-        }
+        # Get existing successful downloads from metadata (only for normal mode)
+        existing_urls = set()
+        if not force:
+            existing_tasks = tracker.get_tasks_by_run(run_id) if run_id else []
+            existing_urls = {
+                task["source_url"]
+                for task in existing_tasks
+                if task["status"] == TaskStatus.SUCCESS.value
+            }
 
-        counts = {"skipped": 0, "synced": 0, "new": 0}
+        counts = {"skipped": 0, "synced": 0, "new": 0, "forced": 0}
 
         for row in rows:
             cols = row.find_all("td")
@@ -96,6 +105,13 @@ def scrape_denue_table(
             if link_tag:
                 url = f"{base_url_inegi}{link_tag['href']}"
 
+                # FORCE MODE: Queue everything for download
+                if force:
+                    new_tasks.append((period, activity, url))
+                    counts["forced"] += 1
+                    continue
+
+                # NORMAL MODE: Skip/sync/download logic
                 # A. Skip if already in metadata as successful
                 if url in existing_urls:
                     counts["skipped"] += 1
@@ -153,9 +169,13 @@ def scrape_denue_table(
 
         # Display summary
         print(f"\n📊 Scraping Summary:")
-        print(f"   ⏩ Already in metadata: {counts['skipped']}")
-        print(f"   🏠 Synced from disk: {counts['synced']}")
-        print(f"   🆕 New files to download: {counts['new']}")
+
+        if force:
+            print(f"   🔄 Force mode - queued for re-download: {counts['forced']}")
+        else:
+            print(f"   ⏩ Already in metadata: {counts['skipped']}")
+            print(f"   🏠 Synced from disk: {counts['synced']}")
+            print(f"   🆕 New files to download: {counts['new']}")
 
         return new_tasks
 

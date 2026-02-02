@@ -38,10 +38,12 @@ class DenueDownloader:
         output_dir: Path,
         headless: bool = True,
         config: Optional[DownloadConfig] = None,
+        force: bool = False,
     ):
         """Initialize DENUE downloader."""
         self.output_dir = Path(output_dir)
         self.headless = headless
+        self.force = force
         self.base_url = "https://www.inegi.org.mx/app/descarga/"
         self.base_url_inegi = "https://www.inegi.org.mx"
 
@@ -135,7 +137,11 @@ class DenueDownloader:
     def _scrape_download_tasks(self, log) -> List[Tuple[str, str, str]]:
         """Scrape INEGI website for download tasks."""
         self.console.print("🔍 [yellow]Scraping INEGI website...[/yellow]")
-        log.info("scraping_started", url=self.base_url)
+
+        if self.force:
+            self.console.print("⚠️  [yellow]Force mode: Will queue ALL files[/yellow]")
+
+        log.info("scraping_started", url=self.base_url, force=self.force)
 
         driver = get_chrome_driver(headless=self.headless)
         if not driver:
@@ -151,9 +157,10 @@ class DenueDownloader:
                 run_id=self.run_id,
                 output_dir=self.output_dir,
                 base_url_inegi=self.base_url_inegi,
+                force=self.force,
             )
 
-            log.info("scraping_completed", tasks_found=len(tasks))
+            log.info("scraping_completed", tasks_found=len(tasks), force=self.force)
             return tasks
 
         finally:
