@@ -21,6 +21,9 @@ dependencies = [
     "alembic>=1.18.1",
     "duckdb-engine>=0.17.0",
     "psycopg2-binary>=2.9.11",
+    "tenacity>=8.2.3",
+    "structlog>=24.1.0",
+    "pyyaml>=6.0.0",
 ]
 
 [dependency-groups]
@@ -37,4 +40,5 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-httpserver>=1.0.8",
 ]

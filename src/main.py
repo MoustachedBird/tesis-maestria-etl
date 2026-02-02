@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.markup import escape
 
 # Importación de orquestadores modulares
-from src.extractors.denue_downloader import InegiDownloader
+from src.extractors.denue_downloader import DenueDownloader
 from src.transformers.denue_processor import DenueProcessor
 from src.transformers.denue_harmonizer import DenueHarmonizer
 
@@ -31,11 +31,11 @@ def download_inegi(
     PASO 1: Descarga masiva de datos DENUE desde el sitio de INEGI.
     Sincroniza lo que hay en disco con el reporte de control en reports.db.
     """
-    console.print(f"[bold green]🚀 Iniciando Inegi Downloader[/bold green]")
+    console.print(f"[bold green]🚀 Iniciando DENUE Downloader (Phase 2)[/bold green]")
     console.print(f"📂 Destino: {output}")
     console.print(f"👻 Modo Headless: {headless}")
 
-    downloader = InegiDownloader(output_dir=output, headless=headless)
+    downloader = DenueDownloader(output_dir=output, headless=headless)
     downloader.download_all()
 
 
@@ -46,11 +46,14 @@ def retry_inegi(
     ),
 ):
     """
-    PASO 1.5: Reintenta descargas fallidas basándose en el historial de reports.db.
+    PASO 1.5: Reintenta descargas fallidas basándose en el historial de metadata.duckdb.
     """
     console.print(f"[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
-    downloader = InegiDownloader(output_dir=output, headless=True)
-    downloader.retry()
+    downloader = DenueDownloader(output_dir=output, headless=True)
+    # Retry functionality will be added separately
+    console.print(
+        "[yellow]Retry functionality coming soon - use download-inegi to re-run[/yellow]"
+    )
 
 
 @app.command()

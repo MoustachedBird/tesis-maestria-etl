@@ -27,6 +27,7 @@ env/
 .env.test
 
 # --- DATA LAKE & MODELS (DO NOT COMMIT) ---
+data/raw/*
 data/bronze/*
 data/silver/*
 data/gold/*

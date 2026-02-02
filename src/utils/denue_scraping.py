@@ -1,106 +1,167 @@
+"""
+DENUE web scraping utilities.
+
+Scrapes the INEGI DENUE download page and synchronizes with metadata database.
+"""
+
 import re
 import time
 from pathlib import Path
+from typing import List, Tuple
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# Importamos el limpiador de texto que ya tienes
 from src.utils.text import clean_filename
+from src.metadata.tracker import MetadataTracker
+from src.metadata.models import TaskStatus
 
-def scrape_denue_table(driver, wait_timeout, report_mgr, output_dir, base_url_inegi):
+
+def scrape_denue_table(
+    driver,
+    wait_timeout: int,
+    tracker: MetadataTracker,
+    run_id: str,
+    output_dir: Path,
+    base_url_inegi: str,
+) -> List[Tuple[str, str, str]]:
     """
-    Scrapea la tabla de INEGI y sincroniza el manifiesto DuckDB con el disco.
+    Scrape INEGI DENUE table and synchronize with metadata database.
+
+    Args:
+        driver: Selenium WebDriver instance
+        wait_timeout: Seconds to wait for table to load
+        tracker: MetadataTracker instance
+        run_id: Current job run ID
+        output_dir: Base output directory for downloads
+        base_url_inegi: Base URL for INEGI website
+
+    Returns:
+        List of (period, activity, url) tuples for files that need downloading
+
+    Logic:
+        1. Scrape INEGI table for all available files
+        2. Skip files already successfully downloaded (in metadata DB)
+        3. Sync files found on disk but not in DB
+        4. Return new files that need downloading
     """
     new_tasks = []
     wait = WebDriverWait(driver, wait_timeout)
     project_root = Path.cwd()
-    
-    try:
-        # 1. Esperar a que la tabla dinámica cargue
-        print("  ... Esperando tabla 'tblDescargaArchivos_denue'...")
-        wait.until(EC.presence_of_element_located((By.ID, "tblDescargaArchivos_denue")))
-        time.sleep(3) # Tiempo para que el JS termine de renderizar filas
 
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        table = soup.find('table', id='tblDescargaArchivos_denue')
-        
-        if not table or not table.find('tbody'):
-            print("❌ Error: No se encontró el cuerpo de la tabla en el HTML.")
+    try:
+        # Wait for table to load
+        print("  ... Waiting for table 'tblDescargaArchivos_denue'...")
+        wait.until(EC.presence_of_element_located((By.ID, "tblDescargaArchivos_denue")))
+        time.sleep(3)  # Allow JS to finish rendering
+
+        # Parse table
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        table = soup.find("table", id="tblDescargaArchivos_denue")
+
+        if not table or not table.find("tbody"):
+            print("❌ Error: Table body not found in HTML")
             return []
 
-        rows = table.find('tbody').find_all('tr')
-        print(f"  ... Procesando {len(rows)} filas encontradas en el sitio.")
+        rows = table.find("tbody").find_all("tr")
+        print(f"  ... Processing {len(rows)} rows from INEGI website")
 
-        # Obtener lo que la DB ya conoce como exitoso
-        existing_urls = report_mgr.download_report.get_existing_downloads()
-        
-        counts = {"skipped": 0, "synced": 0}
+        # Get existing successful downloads from metadata
+        existing_tasks = tracker.get_tasks_by_run(run_id) if run_id else []
+        existing_urls = {
+            task["source_url"]
+            for task in existing_tasks
+            if task["status"] == TaskStatus.SUCCESS.value
+        }
+
+        counts = {"skipped": 0, "synced": 0, "new": 0}
 
         for row in rows:
-            cols = row.find_all('td')
-            if len(cols) < 3: continue
+            cols = row.find_all("td")
+            if len(cols) < 3:
+                continue
 
-            # Extraer metadata de la fila
+            # Extract metadata
             activity_raw = cols[0].get_text(strip=True)
-            if not activity_raw: continue
-            
+            if not activity_raw:
+                continue
+
             activity = clean_filename(activity_raw)
-            period = cols[1].get_text(strip=True).replace('/', '_')
-            
-            # Buscar el enlace al archivo ZIP
-            link_tag = cols[2].find('a', href=re.compile(r'csv\.zip'))
+            period = cols[1].get_text(strip=True).replace("/", "_")
+
+            # Find ZIP link
+            link_tag = cols[2].find("a", href=re.compile(r"csv\.zip"))
 
             if link_tag:
                 url = f"{base_url_inegi}{link_tag['href']}"
-                
-                # --- LÓGICA DE FILTRADO Y ACTUALIZACIÓN ---
-                
-                # A. Saltado: Si la URL ya está marcada como OK en DuckDB
+
+                # A. Skip if already in metadata as successful
                 if url in existing_urls:
                     counts["skipped"] += 1
                     continue
-                
-                # B. Sincronización: Si no está en DB pero el archivo existe físicamente
+
+                # B. Sync if file exists on disk but not in metadata
                 filename = f"{activity}.zip"
                 dest_path = output_dir / period / filename
-                rel_path = str(dest_path.resolve().relative_to(project_root))
 
                 if dest_path.exists():
-                    print(f"📝 Actualizando reporte: {filename} encontrado en disco.")
-                    report_mgr.download_report.register_download(
-                        file_path=rel_path, 
-                        url=url, 
+                    # File exists on disk - create metadata record
+                    print(f"📝 Syncing from disk: {filename}")
+
+                    task_id = tracker.create_task(
+                        run_id=run_id,
+                        task_name=f"{activity}_{period}",
+                        source_url=url,
+                        target_path=str(dest_path.relative_to(project_root)),
                         period=period,
-                        status="OK", 
-                        msg="Found on disk during scraping synchronization"
                     )
+
+                    # Mark as successful (found on disk)
+                    tracker.complete_task(
+                        task_id=task_id,
+                        status=TaskStatus.SUCCESS,
+                        actual_size_bytes=dest_path.stat().st_size,
+                        validation_passed=True,
+                    )
+
                     counts["synced"] += 1
                     continue
-                
-                # C. Tarea Nueva: No está en DB y no está en disco
+
+                # C. New task - not in DB and not on disk
                 new_tasks.append((period, activity, url))
-            
+                counts["new"] += 1
+
             else:
-                # D. Error de Enlace: No hay link ZIP en la tabla de INEGI
-                print(f"⚠️ Enlace no encontrado para: {activity} ({period})")
-                dummy_path = f"MISSING_LINK/{activity}.zip"
-                report_mgr.download_report.register_download(
-                    file_path=dummy_path,
-                    url="N/A",
+                # D. Link not found in INEGI table
+                print(f"⚠️  Link not found for: {activity} ({period})")
+
+                # Create failed task record
+                task_id = tracker.create_task(
+                    run_id=run_id,
+                    task_name=f"{activity}_{period}",
+                    source_url="N/A",
+                    target_path=f"MISSING_LINK/{activity}.zip",
                     period=period,
-                    status="NOK",
-                    msg="No se encontró link ZIP en la tabla del INEGI"
                 )
 
-        print(f"\n📊 Resumen de la tabla:")
-        print(f"   ⏩ Ya registrados en DB: {counts['skipped']}")
-        print(f"   🏠 Sincronizados desde disco: {counts['synced']}")
-        print(f"   🆕 Pendientes por descargar: {len(new_tasks)}")
-        
+                tracker.complete_task(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    error_message="No ZIP link found in INEGI table",
+                )
+
+        # Display summary
+        print(f"\n📊 Scraping Summary:")
+        print(f"   ⏩ Already in metadata: {counts['skipped']}")
+        print(f"   🏠 Synced from disk: {counts['synced']}")
+        print(f"   🆕 New files to download: {counts['new']}")
+
         return new_tasks
 
     except Exception as e:
-        print(f"❌ Error fatal en el Scraper: {str(e)}")
+        print(f"❌ Fatal error in scraper: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
         return []

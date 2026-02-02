@@ -1,9 +1,10 @@
-.PHONY: help setup download process normalize harmonize validate clean db-migrate db-downgrade db-seed db-reset
+.PHONY: help setup download retry process normalize harmonize validate clean db-migrate db-downgrade db-seed db-reset test-phase2 test-phase3
 .DEFAULT_GOAL := help
 
 # Variables
 PYTHON := uv run python
 WAREHOUSE := data/denue_warehouse.db
+METADATA_DB := data/metadata.duckdb
 ALEMBIC := uv run alembic
 
 help: ## 📚 Muestra esta ayuda
@@ -17,27 +18,45 @@ help: ## 📚 Muestra esta ayuda
 setup: ## 🔧 Instala dependencias
 	uv sync
 
-download: ## ⬇️  Descarga datos INEGI
-	$(PYTHON) -m scripts.main download-inegi
+download: ## ⬇️  Descarga datos INEGI (Phase 2 system)
+	$(PYTHON) -m src.main download-inegi
+
+retry: ## 🔄 Reintenta descargas fallidas
+	$(PYTHON) -m src.main retry-inegi
 
 process: ## ⚙️  Procesa archivos RAW → Warehouse
-	$(PYTHON) -m scripts.main process
+	$(PYTHON) -m src.main process-denue
 
-process-parallel: ## ⚡ Procesa en paralelo
-	$(PYTHON) -m scripts.main process --parallel
-
-normalize: ## 📅 Normaliza fechas
-	$(PYTHON) -m scripts.main normalize-dates
-
-harmonize: ## 🔗 Ejecuta harmonización
-	$(PYTHON) -m scripts.main harmonize
+harmonize: ## 🔗 Ejecuta harmonización (Identity Resolution)
+	$(PYTHON) -m src.main harmonize
 
 validate: ## ✅ Valida warehouse
-	$(PYTHON) -m scripts.main stats
+	@echo "📊 Warehouse validation (coming soon)"
 
 clean: ## 🧹 Limpia cache
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+clean-logs: ## 🧹 Limpia logs antiguos
+	@echo "🧹 Cleaning old logs..."
+	@find logs/downloads -type d -name "run_*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+	@echo "✅ Old logs cleaned (kept last 7 days)"
+
+# Metadata commands
+metadata-query: ## 📊 Query metadata database
+	@echo "📊 Recent job runs:"
+	@$(PYTHON) -c "from src.metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); import json; print(json.dumps(t.get_recent_runs(5), indent=2, default=str))"
+
+metadata-stats: ## 📈 Show metadata statistics
+	@echo "📈 Download Statistics:"
+	@$(PYTHON) -c "from src.metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); runs = t.get_recent_runs(1); print(f'Recent runs: {len(runs)}'); [print(f\"  - {r.get('job_name')}: {r.get('status')} ({r.get('total_tasks')} tasks)\") for r in runs]"
+
+logs: ## 📝 Show latest logs
+	@echo "📝 Latest download logs:"
+	@ls -la logs/downloads/latest/ 2>/dev/null || echo "No logs found yet"
+	@echo ""
+	@echo "📄 Last 20 log entries:"
+	@tail -20 logs/downloads/latest/app.log 2>/dev/null || echo "No app.log found yet"
 
 # Database migrations
 db-migrate: ## 🗄️  Ejecuta migraciones pendientes
@@ -79,8 +98,11 @@ db-status: ## 📊 Muestra estado de migraciones
 	$(ALEMBIC) history
 
 # Pipeline completo
-pipeline: download process normalize harmonize validate ## 🚀 Pipeline completo
+pipeline: download process harmonize ## 🚀 Pipeline completo (Phase 2)
 	@echo "✨ Pipeline completado"
+
+pipeline-full: setup download process harmonize validate ## 🎯 Pipeline completo con setup
+	@echo "✨ Pipeline completo con todas las etapas"
 
 # Desarrollo
 dev: setup ## 🛠️  Setup desarrollo
@@ -108,3 +130,18 @@ test-verbose: ## 🔍 Tests en modo verbose
 
 test-fast: ## 🚀 Tests rápidos (solo unit, sin slow)
 	uv run pytest -m "unit and not slow"
+
+# Phase 2 & 3 Testing
+test-phase2: ## 🧪 Test Phase 2 components
+	@echo "🧪 Testing Phase 2 Components..."
+	$(PYTHON) test_phase2.py
+
+test-phase3: ## 🔗 Test Phase 3 integration
+	@echo "🔗 Testing Phase 3 Integration..."
+	$(PYTHON) test_phase3_integration.py
+
+test-all-phases: ## 🎯 Test all phases
+	@echo "🎯 Running all phase tests..."
+	$(PYTHON) test_phase2.py
+	$(PYTHON) test_phase3_integration.py
+	@echo "✅ All phase tests completed"

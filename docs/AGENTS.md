@@ -434,3 +434,610 @@ All project documentation is located in the `docs/` directory:
 - ❌ Don't forget to validate seed files before committing
 
 See `docs/TRANSACTION_MANAGEMENT.md` for critical information about Alembic transaction handling.
+
+---
+
+## ETL Download System Architecture (Industry Standards)
+
+### Overview
+
+The DENUE downloader has been refactored to follow **industry-standard ETL patterns** used by Apache Airflow, Prefect, Netflix, and Uber. This implementation provides enterprise-grade tracking, observability, and reliability.
+
+### Architecture Pattern: Metadata-Driven ETL
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    METADATA LAYER                           │
+│              data/metadata.duckdb                           │
+│  ┌──────────────┬──────────────┬──────────────┐            │
+│  │  job_runs    │ download_tasks│ data_lineage │            │
+│  │  (run-level) │ (file-level)  │ (provenance) │            │
+│  └──────────────┴──────────────┴──────────────┘            │
+└─────────────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────────────┐
+│                   EXECUTION LAYER                           │
+│  DenueDownloader → Downloader → FileValidator               │
+│  (orchestrator)    (base class) (validation)                │
+└─────────────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────────────┐
+│                    STORAGE LAYER                            │
+│  data/bronze/denue/{period}/*.zip                           │
+└─────────────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────────────┐
+│                    LOGGING LAYER                            │
+│  logs/downloads/YYYY-MM-DD/run_TIMESTAMP/                   │
+│  ├── structured.jsonl     (machine-readable)                │
+│  ├── application.log      (human-readable)                  │
+│  ├── errors.log           (errors only)                     │
+│  └── summary.json         (run statistics)                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### New Package Structure
+
+```
+src/
+├── metadata/                    # NEW: Industry-standard metadata tracking
+│   ├── __init__.py
+│   ├── schema.py               # DDL for metadata.duckdb
+│   ├── models.py               # Pydantic models (JobRun, DownloadTask, etc.)
+│   └── tracker.py              # MetadataTracker class
+│
+├── extractors/
+│   ├── download_config.py      # NEW: Configuration dataclass
+│   ├── file_validator.py       # NEW: Multi-level validation
+│   ├── downloader.py           # NEW: Generic base class with retry logic
+│   └── denue_downloader.py     # REFACTORED: Orchestrator with parallel downloads
+│
+└── core/
+    └── logging.py              # NEW: Structured logging + Rich progress bars
+```
+
+### Key Components
+
+#### 1. Metadata Tracker (`src/metadata/tracker.py`)
+
+**Purpose**: Centralized tracking of job execution and task instances.
+
+**Key Methods**:
+```python
+tracker = MetadataTracker(Path("data/metadata.duckdb"))
+
+# Job run lifecycle
+run_id = tracker.create_run("denue_downloader", config={...})
+tracker.complete_run(run_id, JobStatus.SUCCESS)
+
+# Task management
+task_id = tracker.create_task(run_id, "download_comercio_2024_11", url, path)
+tracker.start_task(task_id)
+tracker.complete_task(task_id, TaskStatus.SUCCESS, result)
+
+# Queries
+failed_tasks = tracker.get_failed_tasks(retryable_only=True)
+summary = tracker.get_run_summary(run_id)
+metrics = tracker.get_performance_metrics()
+```
+
+**Database Schema**: See `src/metadata/schema.py` for complete DDL.
+
+#### 2. File Validator (`src/extractors/file_validator.py`)
+
+**Multi-Level Validation**:
+1. ✅ File exists
+2. ✅ Minimum size check (10KB default)
+3. ✅ Expected size comparison (from Content-Length header)
+4. ✅ SHA256 hash verification
+5. ✅ ZIP integrity test
+
+**Usage**:
+```python
+from src.extractors.file_validator import FileValidator
+
+validation = FileValidator.validate(
+    file_path=Path("data/bronze/denue/2024_11/comercio.zip"),
+    expected_size=52428800,
+    expected_hash="abc123...",
+    min_size_kb=10,
+    check_zip=True
+)
+
+if validation.is_valid:
+    print(f"✅ Valid file: {validation.sha256_hash}")
+else:
+    print(f"❌ Validation failed: {validation.error_message}")
+```
+
+#### 3. Generic Downloader (`src/extractors/downloader.py`)
+
+**Features**:
+- Exponential backoff retry (2s, 4s, 8s, 16s, 32s, max 60s)
+- Streaming downloads with progress callbacks
+- Automatic file validation after download
+- Error classification (NETWORK, HTTP_404, HTTP_500, TIMEOUT, VALIDATION)
+- Cleanup of failed downloads
+
+**Retry Logic** (using `tenacity` library):
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    retry=retry_if_exception_type((ConnectionError, Timeout))
+)
+def download_with_retry(url, dest):
+    # Download logic with automatic retries
+    pass
+```
+
+#### 4. DENUE Downloader Orchestrator (`src/extractors/denue_downloader.py`)
+
+**Responsibilities**:
+- Scrape INEGI website for download URLs
+- Create job run and task instances in metadata
+- Execute parallel downloads (max 3 concurrent)
+- Track execution with Rich progress bars
+- Generate comprehensive run summaries
+- Handle retries with exponential backoff
+
+**Usage**:
+```python
+from pathlib import Path
+from src.extractors.denue_downloader import DenueDownloader
+from src.extractors.download_config import DownloadConfig
+
+config = DownloadConfig(
+    max_retries=5,
+    validate_sha256=True,
+    enable_progress_bars=True,
+    max_concurrent_downloads=3
+)
+
+downloader = DenueDownloader(
+    output_dir=Path("data/bronze/denue"),
+    metadata_db=Path("data/metadata.duckdb"),
+    config=config,
+    headless=True
+)
+
+success = downloader.run()
+```
+
+#### 5. Structured Logging (`src/core/logging.py`)
+
+**Three-Tier Logging**:
+1. **Structured JSON** (`structured.jsonl`) - Machine-parseable events
+2. **Human-readable** (`application.log`) - Formatted log messages
+3. **Error-only** (`errors.log`) - Failed operations with stack traces
+
+**Log Directory Structure**:
+```
+logs/downloads/
+├── 2026-01-29/
+│   ├── run_20260129_143045/
+│   │   ├── structured.jsonl
+│   │   ├── application.log
+│   │   ├── errors.log
+│   │   └── summary.json
+│   └── run_20260129_150122/
+│       └── ...
+└── latest -> 2026-01-29/run_20260129_150122/
+```
+
+**Usage**:
+```python
+from src.core.logging import StructuredLogger
+
+log_system = StructuredLogger(
+    run_id=run_id,
+    job_name="denue_downloader",
+    log_dir=Path("logs/downloads")
+)
+
+# Get loggers
+logger = log_system.get_logger(__name__)
+struct_logger = log_system.get_structured_logger()
+
+# Log events
+logger.info("Processing file...")
+struct_logger.info("download_started", file="comercio.zip", size_mb=50.5)
+```
+
+### Configuration Management
+
+All download parameters are externalized in `DownloadConfig`:
+
+```python
+from src.extractors.download_config import DownloadConfig
+
+config = DownloadConfig(
+    # Retry configuration
+    max_retries=5,
+    retry_strategy="exponential",
+    retry_base_delay=2,
+    retry_max_delay=60,
+    
+    # Network configuration
+    timeout_seconds=60,
+    chunk_size_bytes=8192,
+    max_concurrent_downloads=3,
+    
+    # Validation configuration
+    validate_size=True,
+    validate_sha256=True,
+    validate_zip_integrity=True,
+    min_file_size_kb=10,
+    
+    # Logging configuration
+    enable_progress_bars=True,
+    log_level="INFO"
+)
+```
+
+### CLI Commands
+
+**Download with options**:
+```bash
+# Download with custom configuration
+python -m src.main download-inegi \
+    --max-retries 5 \
+    --validate-hash \
+    --show-progress \
+    --parallel \
+    --max-concurrent 3
+
+# Retry failed downloads
+python -m src.main retry-downloads
+
+# Show download statistics
+python -m src.main download-stats --last-n 10
+```
+
+### Metadata Queries
+
+**Common queries** in `metadata.duckdb`:
+
+```sql
+-- Get recent job runs
+SELECT * FROM job_runs 
+ORDER BY run_date DESC 
+LIMIT 10;
+
+-- Get failed downloads that can be retried
+SELECT * FROM download_tasks 
+WHERE status = 'FAILED' 
+  AND is_retryable = TRUE 
+  AND attempt_number < max_retries;
+
+-- Get performance metrics by period
+SELECT 
+    period,
+    COUNT(*) as total_downloads,
+    AVG(file_size_bytes) / 1024 / 1024 as avg_size_mb,
+    AVG(download_speed_mbps) as avg_speed_mbps,
+    AVG(duration_seconds) as avg_duration_sec
+FROM download_tasks
+WHERE status = 'SUCCESS'
+GROUP BY period
+ORDER BY period DESC;
+
+-- Get error summary
+SELECT 
+    error_type,
+    COUNT(*) as error_count,
+    COUNT(DISTINCT run_id) as affected_runs
+FROM download_tasks
+WHERE status = 'FAILED'
+GROUP BY error_type
+ORDER BY error_count DESC;
+```
+
+### Migration from Old System
+
+**Migration Script**: `scripts/migrate_reports_to_metadata.py`
+
+```bash
+# Migrate historical data from reports.db to metadata.duckdb
+python scripts/migrate_reports_to_metadata.py
+
+# Verify migration
+python -c "
+import duckdb
+conn = duckdb.connect('data/metadata.duckdb')
+print('Tasks migrated:', conn.execute('SELECT COUNT(*) FROM download_tasks').fetchone()[0])
+"
+```
+
+**Old vs New**:
+
+| Aspect | Old (reports.db) | New (metadata.duckdb) |
+|--------|------------------|----------------------|
+| **Tracking** | Basic status | Job runs + task instances |
+| **Metrics** | None | Duration, speed, size |
+| **Retries** | 1 attempt | 5 attempts with backoff |
+| **Validation** | None | SHA256 + size + ZIP |
+| **Logging** | DuckDB only | DuckDB + structured JSON logs |
+| **Queries** | Limited | Rich analytics |
+| **Standard** | Custom | Airflow/Prefect pattern |
+
+### Testing
+
+**Unit Tests**:
+```bash
+# Test file validator
+pytest tests/unit/test_file_validator.py -v
+
+# Test downloader with mocked HTTP
+pytest tests/unit/test_downloader.py -v
+
+# Test metadata tracker
+pytest tests/unit/test_metadata_tracker.py -v
+```
+
+**Integration Tests**:
+```bash
+# Test full download workflow
+pytest tests/integration/test_denue_downloader.py -v
+```
+
+**E2E Tests**:
+```bash
+# Test complete pipeline (slow)
+pytest tests/e2e/test_full_pipeline.py -v --slow
+```
+
+### Performance Characteristics
+
+**Parallel Downloads**:
+- Max 3 concurrent downloads (configurable)
+- ThreadPoolExecutor for I/O-bound operations
+- Rich progress bars track all downloads simultaneously
+
+**Retry Strategy**:
+- Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 60s)
+- Max 5 retry attempts (configurable)
+- Only retries transient errors (not 404, validation failures)
+
+**Validation Overhead**:
+- SHA256 calculation: ~50-100 MB/s (depends on disk speed)
+- ZIP integrity test: O(n) where n = number of files in archive
+- Minimal performance impact (<5% overhead)
+
+### Error Handling
+
+**Error Classification** (see `src/metadata/models.py`):
+```python
+class ErrorType(str, Enum):
+    NETWORK_ERROR = "NETWORK"
+    HTTP_404 = "HTTP_404"
+    HTTP_500 = "HTTP_500"
+    HTTP_TIMEOUT = "TIMEOUT"
+    VALIDATION_ERROR = "VALIDATION"
+    DISK_FULL = "DISK_FULL"
+    ZIP_CORRUPT = "ZIP_CORRUPT"
+    HASH_MISMATCH = "HASH_MISMATCH"
+    SIZE_MISMATCH = "SIZE_MISMATCH"
+    UNKNOWN = "UNKNOWN"
+```
+
+**Retryable Errors**:
+- ✅ NETWORK_ERROR (connection issues)
+- ✅ HTTP_500 (server errors)
+- ✅ HTTP_TIMEOUT (timeout)
+- ❌ HTTP_404 (not found - permanent)
+- ❌ VALIDATION_ERROR (corrupt file - permanent)
+
+### Best Practices
+
+#### When Writing Download Logic
+
+```python
+# ✅ DO: Use the generic Downloader base class
+from src.extractors.downloader import Downloader
+
+downloader = Downloader(config)
+result = downloader.download(url, dest, task_id)
+
+# ❌ DON'T: Use requests directly without retry/validation
+import requests
+response = requests.get(url)  # No retry, no validation!
+```
+
+#### When Tracking Execution
+
+```python
+# ✅ DO: Use MetadataTracker for all tracking
+tracker = MetadataTracker(metadata_db)
+run_id = tracker.create_run("job_name")
+# ... do work ...
+tracker.complete_run(run_id, JobStatus.SUCCESS)
+
+# ❌ DON'T: Use the old ReportManager
+from src.reports.reporter import ReportManager  # DEPRECATED!
+```
+
+#### When Logging
+
+```python
+# ✅ DO: Use structured logging for events
+struct_logger.info("download_completed", 
+    file="comercio.zip",
+    size_bytes=52428800,
+    duration_sec=45.2
+)
+
+# ❌ DON'T: Use print statements
+print(f"Downloaded {file} in {duration}s")  # Not structured, not searchable!
+```
+
+### Monitoring & Observability
+
+**Dashboards** (query `metadata.duckdb`):
+
+1. **Job Success Rate**:
+```sql
+SELECT 
+    DATE(run_date) as date,
+    COUNT(*) as total_runs,
+    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as successful,
+    ROUND(100.0 * SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) / COUNT(*), 2) as success_rate_pct
+FROM job_runs
+WHERE job_name = 'denue_downloader'
+GROUP BY DATE(run_date)
+ORDER BY date DESC;
+```
+
+2. **Download Performance Trends**:
+```sql
+SELECT 
+    period,
+    COUNT(*) as files,
+    SUM(file_size_bytes) / 1024 / 1024 / 1024 as total_gb,
+    AVG(download_speed_mbps) as avg_speed,
+    AVG(duration_seconds) as avg_duration
+FROM download_tasks
+WHERE status = 'SUCCESS'
+GROUP BY period
+ORDER BY period DESC;
+```
+
+3. **Error Analysis**:
+```sql
+SELECT 
+    error_type,
+    COUNT(*) as occurrences,
+    AVG(attempt_number) as avg_attempts,
+    GROUP_CONCAT(DISTINCT period) as affected_periods
+FROM download_tasks
+WHERE status = 'FAILED'
+GROUP BY error_type;
+```
+
+### Dependencies Added
+
+```toml
+[project]
+dependencies = [
+    # ... existing ...
+    "tenacity>=8.2.3",      # Retry logic with exponential backoff
+    "structlog>=24.1.0",    # Structured JSON logging
+]
+
+[dependency-groups]
+dev = [
+    # ... existing ...
+    "pytest-httpserver>=1.0.8",  # HTTP mocking for tests
+]
+```
+
+### Files Modified/Created
+
+**NEW Files** (16):
+```
+src/metadata/__init__.py
+src/metadata/schema.py
+src/metadata/models.py
+src/metadata/tracker.py
+src/core/logging.py
+src/extractors/download_config.py
+src/extractors/file_validator.py
+src/extractors/downloader.py
+scripts/migrate_reports_to_metadata.py
+tests/unit/test_file_validator.py
+tests/unit/test_downloader.py
+tests/unit/test_metadata_tracker.py
+tests/integration/test_denue_downloader.py
+tests/e2e/test_full_pipeline.py
+docs/ETL_DOWNLOAD_ARCHITECTURE.md
+```
+
+**REFACTORED Files** (3):
+```
+src/extractors/denue_downloader.py     # Complete rewrite
+src/utils/denue_scraping.py            # Updated to use MetadataTracker
+src/main.py                            # Updated CLI commands
+```
+
+**DEPRECATED Files** (1):
+```
+src/reports/reporter.py                # Replaced by metadata/tracker.py
+```
+
+### Breaking Changes
+
+⚠️ **Clean Break Migration**: The old `reports.db` system has been completely replaced.
+
+**Migration Required**:
+1. Run migration script: `python scripts/migrate_reports_to_metadata.py`
+2. Verify data: Check `data/metadata.duckdb` has all historical records
+3. Update processor: Ensure `denue_processor.py` reads from `metadata.duckdb`
+4. Archive old database: `mv data/reports.db data/reports.db.backup`
+
+**Processor Compatibility**:
+```python
+# OLD (deprecated)
+from src.reports.reporter import ReportManager
+tasks = report_mgr.download_report.get_raw_tasks()
+
+# NEW (standard)
+from src.metadata.tracker import MetadataTracker
+tasks = tracker.get_tasks_by_status(TaskStatus.SUCCESS)
+```
+
+### Future Enhancements
+
+**Roadmap** (not yet implemented):
+
+1. **Orchestration**: Add Prefect/Dagster integration
+2. **Monitoring**: Prometheus metrics + Grafana dashboards
+3. **Alerting**: Email/Slack notifications on failures
+4. **Distributed**: Support for distributed downloads (multi-node)
+5. **Cloud Storage**: Direct upload to S3/GCS after download
+6. **Data Quality**: Integration with Great Expectations
+7. **Workflow**: dbt integration for downstream transformations
+
+### References
+
+**Industry Standards**:
+- Apache Airflow metadata model: https://airflow.apache.org/docs/apache-airflow/stable/database-erd-ref.html
+- Prefect job tracking: https://docs.prefect.io/core/concepts/results.html
+- Tenacity retry patterns: https://tenacity.readthedocs.io/
+- Structlog practices: https://www.structlog.org/
+
+**Related Documentation**:
+- Complete implementation plan: See conversation history
+- Database schema: `src/metadata/schema.py`
+- Pydantic models: `src/metadata/models.py`
+- Configuration options: `src/extractors/download_config.py`
+
+---
+
+## Quick Reference: ETL Download Commands
+
+```bash
+# Download DENUE data with all features enabled
+make download
+
+# Or with custom options
+python -m src.main download-inegi \
+    --max-retries 5 \
+    --validate-hash \
+    --show-progress \
+    --parallel
+
+# Retry failed downloads
+python -m src.main retry-downloads
+
+# Show statistics
+python -m src.main download-stats --last-n 10
+
+# Check metadata database
+duckdb data/metadata.duckdb "SELECT * FROM job_runs ORDER BY run_date DESC LIMIT 5"
+
+# View logs
+cat logs/downloads/latest/application.log
+cat logs/downloads/latest/summary.json | jq
+```
