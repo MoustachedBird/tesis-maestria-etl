@@ -257,6 +257,18 @@ class DenueDownloader:
                 ),
                 duration_seconds=result.duration_seconds,
             )
+
+            # Record data lineage for audit trail and thesis documentation
+            self.tracker.record_lineage(
+                run_id=self.run_id,
+                task_id=task_id,
+                source_location=url,
+                target_location=str(dest_path),
+                source_type="WEB",
+                target_type="FILE",
+                bytes_processed=result.size_bytes,
+            )
+
             task_log.info("task_completed", size_bytes=result.size_bytes)
             return True
         else:

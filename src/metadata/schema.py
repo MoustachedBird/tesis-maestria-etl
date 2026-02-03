@@ -92,10 +92,10 @@ CREATE TABLE IF NOT EXISTS download_tasks (
     
     -- Audit
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     
-    -- Foreign key constraint
-    FOREIGN KEY (run_id) REFERENCES job_runs(run_id)
+    -- Note: Foreign key constraints removed due to DuckDB UPDATE limitations
+    -- Referential integrity is maintained at application level
 );
 
 -- ============================================================================
@@ -120,11 +120,10 @@ CREATE TABLE IF NOT EXISTS data_lineage (
     rows_written BIGINT,
     bytes_processed BIGINT,
     
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     
-    -- Foreign key constraints
-    FOREIGN KEY (run_id) REFERENCES job_runs(run_id),
-    FOREIGN KEY (task_id) REFERENCES download_tasks(task_id)
+    -- Note: Foreign key constraints removed due to DuckDB UPDATE limitations
+    -- Referential integrity is maintained at application level
 );
 
 -- ============================================================================

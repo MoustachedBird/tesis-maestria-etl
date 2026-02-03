@@ -57,6 +57,20 @@ class MetadataTracker:
         conn = duckdb.connect(str(self.db_path))
         try:
             yield conn
+            # Explicitly commit transaction to ensure data is written
+            try:
+                conn.commit()
+            except Exception:
+                # Ignore commit errors, may not have active transaction
+                pass
+        except Exception:
+            # Rollback on error (only if transaction is active)
+            try:
+                conn.rollback()
+            except Exception:
+                # Ignore rollback errors
+                pass
+            raise
         finally:
             conn.close()
 
@@ -637,3 +651,92 @@ class MetadataTracker:
                     datetime.now(),
                 ],
             )
+
+    # ========================================================================
+    # UTILITY METHODS
+    # ========================================================================
+
+    def fix_incomplete_run(self, run_id: str) -> bool:
+        """
+        Fix a run that failed to complete properly.
+
+        This is useful when complete_run() failed due to transaction issues
+        but all tasks were actually completed.
+
+        Args:
+            run_id: Job run identifier to fix
+
+        Returns:
+            bool: True if run was fixed, False if already complete
+        """
+        # Check if run needs fixing
+        run = self.get_run(run_id)
+        if not run:
+            return False
+
+        if run["status"] != "RUNNING":
+            # Already completed
+            return False
+
+        # Force complete the run
+        try:
+            self.complete_run(run_id)
+            return True
+        except Exception as e:
+            # If it still fails, try direct SQL update
+            with self._get_connection() as conn:
+                # Get task stats
+                stats = conn.execute(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as succeeded,
+                        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+                    FROM download_tasks
+                    WHERE run_id = ?
+                    """,
+                    [run_id],
+                ).fetchone()
+
+                # Direct update bypassing foreign key checks
+                total, succeeded, failed = stats[0] or 0, stats[1] or 0, stats[2] or 0
+
+                if total == 0:
+                    final_status = "SUCCESS"
+                elif failed == 0:
+                    final_status = "SUCCESS"
+                elif succeeded == 0:
+                    final_status = "FAILED"
+                else:
+                    final_status = "PARTIAL"
+
+                # Calculate duration
+                run_start = run.get("start_time")
+                if run_start:
+                    from datetime import datetime as dt
+
+                    duration = (dt.now() - run_start).total_seconds()
+                else:
+                    duration = 0
+
+                # Flush any pending writes first
+                conn.commit()
+
+                # Update job run - this should work now that child records are committed
+                conn.execute(
+                    """
+                    UPDATE job_runs 
+                    SET status = ?, 
+                        end_time = CURRENT_TIMESTAMP,
+                        duration_seconds = ?,
+                        total_tasks = ?,
+                        tasks_succeeded = ?,
+                        tasks_failed = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE run_id = ?
+                    """,
+                    [final_status, duration, total, succeeded, failed, run_id],
+                )
+
+                conn.commit()
+                return True

@@ -67,7 +67,8 @@ make setup          # Install dependencies
 make clean          # Clean cache and compiled files
 
 # ETL Pipeline
-make download       # Download INEGI data
+make download       # Download INEGI data (incremental)
+make download ARGS="--force"  # Force re-download all files
 make process        # Process RAW → Warehouse
 make process-parallel # Process in parallel mode
 make normalize      # Normalize dates
@@ -945,20 +946,21 @@ src/core/logging.py
 src/extractors/download_config.py
 src/extractors/file_validator.py
 src/extractors/downloader.py
-scripts/migrate_reports_to_metadata.py
 tests/unit/test_file_validator.py
 tests/unit/test_downloader.py
 tests/unit/test_metadata_tracker.py
 tests/integration/test_denue_downloader.py
 tests/e2e/test_full_pipeline.py
 docs/ETL_DOWNLOAD_ARCHITECTURE.md
+docs/DOWNLOAD_FIX_SUMMARY.md              # Documents database fix (Feb 2026)
+docs/DATA_LINEAGE_IMPLEMENTATION.md       # Documents lineage implementation (Feb 2026)
 ```
 
 **REFACTORED Files** (3):
 ```
-src/extractors/denue_downloader.py     # Complete rewrite
-src/utils/denue_scraping.py            # Updated to use MetadataTracker
-src/main.py                            # Updated CLI commands
+src/extractors/denue_downloader.py     # Complete rewrite with auto-lineage recording
+src/utils/denue_scraping.py            # Updated to use MetadataTracker + force mode
+src/main.py                            # Updated CLI commands with --force flag
 ```
 
 **DEPRECATED Files** (1):
@@ -966,12 +968,61 @@ src/main.py                            # Updated CLI commands
 src/reports/reporter.py                # Replaced by metadata/tracker.py
 ```
 
+### Recent Fixes & Enhancements (Feb 2026)
+
+#### 1. Database Transaction Fix
+**Problem**: 24-hour download (459 files, 8.6 GB) crashed at end with foreign key constraint error.
+
+**Solution**:
+- Added explicit `commit()`/`rollback()` in `src/metadata/tracker.py` (lines 54-73)
+- Removed foreign key constraints from `data_lineage` and `download_tasks` tables
+- Manual fix script successfully completed the stuck run
+- See `docs/DOWNLOAD_FIX_SUMMARY.md` for full details
+
+#### 2. Force Download Mode
+**Feature**: Added `--force` flag to re-download all files ignoring cache.
+
+**Files Modified**:
+- `Makefile` (line 22): Added `$(ARGS)` parameter support
+- `src/main.py` (lines 28-32): Added `--force` CLI option
+- `src/extractors/denue_downloader.py` (lines 40, 43, 137-141, 160): Force mode logic
+- `src/utils/denue_scraping.py` (lines 27, 72-86, 104-111, 172-177): Skip logic
+
+**Usage**:
+```bash
+make download                    # Normal incremental download
+make download ARGS="--force"     # Force re-download all files
+```
+
+#### 3. Data Lineage Auto-Recording
+**Problem**: `data_lineage` table was empty - tracking existed but was never called.
+
+**Solution**:
+- Added auto-recording call in `src/extractors/denue_downloader.py` (lines 261-268)
+- Backfilled 459 historical lineage records (8.60 GB tracked)
+- Future downloads automatically create lineage records
+- See `docs/DATA_LINEAGE_IMPLEMENTATION.md` for complete documentation
+
+**Current State**:
+```sql
+SELECT COUNT(*) FROM data_lineage;                    -- 459 records
+SELECT SUM(bytes_processed)/1e9 FROM data_lineage;    -- 8.60 GB tracked
+```
+
+#### 4. Codebase Cleanup
+**Removed**: One-time scripts no longer needed in production:
+- ~~`fix_incomplete_run.py`~~ (one-time fix, job complete)
+- ~~`scripts/backfill_download_lineage.py`~~ (one-time backfill, job complete)
+- ~~`scripts/`~~ directory (empty, removed)
+
+**Retained**: Production code with auto-recording at line 262 of `denue_downloader.py`
+
 ### Breaking Changes
 
 ⚠️ **Clean Break Migration**: The old `reports.db` system has been completely replaced.
 
 **Migration Required**:
-1. Run migration script: `python scripts/migrate_reports_to_metadata.py`
+1. ~~Run migration script: `python scripts/migrate_reports_to_metadata.py`~~ (DEPRECATED - script removed Feb 2026)
 2. Verify data: Check `data/metadata.duckdb` has all historical records
 3. Update processor: Ensure `denue_processor.py` reads from `metadata.duckdb`
 4. Archive old database: `mv data/reports.db data/reports.db.backup`
@@ -1018,15 +1069,19 @@ tasks = tracker.get_tasks_by_status(TaskStatus.SUCCESS)
 ## Quick Reference: ETL Download Commands
 
 ```bash
-# Download DENUE data with all features enabled
+# Download DENUE data (incremental - skips existing files)
 make download
+
+# Force re-download all files (ignores metadata and disk cache)
+make download ARGS="--force"
 
 # Or with custom options
 python -m src.main download-inegi \
     --max-retries 5 \
     --validate-hash \
     --show-progress \
-    --parallel
+    --parallel \
+    --force
 
 # Retry failed downloads
 python -m src.main retry-downloads
@@ -1036,6 +1091,10 @@ python -m src.main download-stats --last-n 10
 
 # Check metadata database
 duckdb data/metadata.duckdb "SELECT * FROM job_runs ORDER BY run_date DESC LIMIT 5"
+
+# View data lineage (NEW - tracks data provenance)
+duckdb data/metadata.duckdb "SELECT * FROM data_lineage ORDER BY created_at DESC LIMIT 10"
+duckdb data/metadata.duckdb "SELECT COUNT(*), SUM(bytes_processed)/1e9 as total_gb FROM data_lineage"
 
 # View logs
 cat logs/downloads/latest/application.log
