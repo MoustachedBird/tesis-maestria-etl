@@ -5,24 +5,22 @@ Implements industry-standard patterns from Apache Airflow and Prefect
 for tracking ETL job execution, task instances, and data lineage.
 """
 
-import uuid
-import duckdb
 import json
-from pathlib import Path
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+import uuid
 from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import duckdb
 
 from src_metadata.models import (
-    JobRun,
-    DownloadTask,
     DownloadResult,
+    ErrorType,
     JobStatus,
     TaskStatus,
-    ErrorType,
-    RunSummary,
 )
-from src_metadata.schema import get_schema_ddl, QUERIES
+from src_metadata.schema import QUERIES, get_schema_ddl
 
 
 class MetadataTracker:
@@ -89,7 +87,7 @@ class MetadataTracker:
         job_type: str = "DOWNLOAD",
         trigger_type: str = "MANUAL",
         triggered_by: str = "system",
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
     ) -> str:
         """
         Create new job run and return run_id.
@@ -137,8 +135,8 @@ class MetadataTracker:
     def complete_run(
         self,
         run_id: str,
-        status: Optional[JobStatus] = None,
-        error_summary: Optional[str] = None,
+        status: JobStatus | None = None,
+        error_summary: str | None = None,
     ):
         """
         Mark job run as complete and calculate aggregated metrics.
@@ -226,7 +224,7 @@ class MetadataTracker:
                 ],
             )
 
-    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
         """
         Get job run details.
 
@@ -259,7 +257,7 @@ class MetadataTracker:
         task_name: str,
         source_url: str,
         target_path: str,
-        period: Optional[str] = None,
+        period: str | None = None,
         max_retries: int = 5,
     ) -> str:
         """
@@ -333,16 +331,16 @@ class MetadataTracker:
         self,
         task_id: str,
         status: TaskStatus,
-        result: Optional[DownloadResult] = None,
+        result: DownloadResult | None = None,
         # Individual parameters (alternative to result object)
-        actual_size_bytes: Optional[int] = None,
-        actual_hash: Optional[str] = None,
-        download_speed_mbps: Optional[float] = None,
-        validation_passed: Optional[bool] = None,
-        error_type: Optional[ErrorType] = None,
-        error_message: Optional[str] = None,
-        duration_seconds: Optional[float] = None,
-        attempt_number: Optional[int] = None,
+        actual_size_bytes: int | None = None,
+        actual_hash: str | None = None,
+        download_speed_mbps: float | None = None,
+        validation_passed: bool | None = None,
+        error_type: ErrorType | None = None,
+        error_message: str | None = None,
+        duration_seconds: float | None = None,
+        attempt_number: int | None = None,
     ):
         """
         Update task with completion results.
@@ -406,16 +404,14 @@ class MetadataTracker:
                     speed,
                     err_type.value if err_type else None,
                     err_msg,
-                    "PASSED"
-                    if validation
-                    else ("FAILED" if validation is False else None),
+                    "PASSED" if validation else ("FAILED" if validation is False else None),
                     attempts,
                     datetime.now(),
                     task_id,
                 ],
             )
 
-    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
         """
         Get task details.
 
@@ -438,7 +434,7 @@ class MetadataTracker:
                 return dict(zip(columns, result))
             return None
 
-    def get_tasks_by_run(self, run_id: str) -> List[Dict[str, Any]]:
+    def get_tasks_by_run(self, run_id: str) -> list[dict[str, Any]]:
         """
         Get all tasks for a job run.
 
@@ -462,8 +458,8 @@ class MetadataTracker:
             return []
 
     def get_failed_tasks(
-        self, run_id: Optional[str] = None, retryable_only: bool = True
-    ) -> List[Dict[str, Any]]:
+        self, run_id: str | None = None, retryable_only: bool = True
+    ) -> list[dict[str, Any]]:
         """
         Get failed tasks that can be retried.
 
@@ -498,8 +494,8 @@ class MetadataTracker:
             return []
 
     def get_tasks_by_status(
-        self, status: TaskStatus, process_status: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, status: TaskStatus, process_status: str | None = None
+    ) -> list[dict[str, Any]]:
         """
         Get tasks by download status and optional process status.
 
@@ -533,7 +529,7 @@ class MetadataTracker:
     # QUERY & REPORTING
     # ========================================================================
 
-    def get_run_summary(self, run_id: str) -> Dict[str, Any]:
+    def get_run_summary(self, run_id: str) -> dict[str, Any]:
         """
         Get comprehensive run statistics.
 
@@ -551,7 +547,7 @@ class MetadataTracker:
                 return dict(zip(columns, result))
             return {}
 
-    def get_recent_runs(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_recent_runs(self, limit: int = 10) -> list[dict[str, Any]]:
         """
         Get recent job runs.
 
@@ -569,7 +565,7 @@ class MetadataTracker:
                 return [dict(zip(columns, row)) for row in results]
             return []
 
-    def get_error_summary(self) -> List[Dict[str, Any]]:
+    def get_error_summary(self) -> list[dict[str, Any]]:
         """
         Get summary of errors grouped by type.
 
@@ -584,7 +580,7 @@ class MetadataTracker:
                 return [dict(zip(columns, row)) for row in results]
             return []
 
-    def get_performance_metrics(self) -> List[Dict[str, Any]]:
+    def get_performance_metrics(self) -> list[dict[str, Any]]:
         """
         Get performance metrics by period.
 
@@ -611,7 +607,7 @@ class MetadataTracker:
         target_location: str,
         source_type: str = "WEB",
         target_type: str = "FILE",
-        bytes_processed: Optional[int] = None,
+        bytes_processed: int | None = None,
     ):
         """
         Record data lineage for audit trail.
@@ -682,7 +678,7 @@ class MetadataTracker:
         try:
             self.complete_run(run_id)
             return True
-        except Exception as e:
+        except Exception:
             # If it still fails, try direct SQL update
             with self._get_connection() as conn:
                 # Get task stats
@@ -750,8 +746,8 @@ class MetadataTracker:
         run_id: str,
         task_name: str,
         source_path: str,
-        period: Optional[str] = None,
-        target_table: Optional[str] = None,
+        period: str | None = None,
+        target_table: str | None = None,
     ) -> str:
         """
         Create new processing task.
@@ -813,12 +809,12 @@ class MetadataTracker:
         self,
         task_id: str,
         status: TaskStatus,
-        rows_extracted: Optional[int] = None,
-        rows_loaded: Optional[int] = None,
-        rows_rejected: Optional[int] = None,
-        file_size_bytes: Optional[int] = None,
-        error_type: Optional[str] = None,
-        error_message: Optional[str] = None,
+        rows_extracted: int | None = None,
+        rows_loaded: int | None = None,
+        rows_rejected: int | None = None,
+        file_size_bytes: int | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
     ):
         """
         Complete process task with results.
@@ -876,9 +872,7 @@ class MetadataTracker:
                 ],
             )
 
-    def get_pending_process_tasks(
-        self, include_failed: bool = False
-    ) -> List[Dict[str, Any]]:
+    def get_pending_process_tasks(self, include_failed: bool = False) -> list[dict[str, Any]]:
         """
         Get list of files pending processing.
 
@@ -893,9 +887,7 @@ class MetadataTracker:
         """
         with self._get_connection() as conn:
             if include_failed:
-                query = (
-                    QUERIES["get_pending_process_tasks"] + " OR pt.status = 'FAILED'"
-                )
+                query = QUERIES["get_pending_process_tasks"] + " OR pt.status = 'FAILED'"
             else:
                 query = QUERIES["get_pending_process_tasks"]
 
@@ -903,7 +895,7 @@ class MetadataTracker:
             columns = ["source_path", "period", "download_task_id"]
             return [dict(zip(columns, row)) for row in result]
 
-    def get_process_task_by_path(self, source_path: str) -> Optional[str]:
+    def get_process_task_by_path(self, source_path: str) -> str | None:
         """
         Find existing process task for a file path.
 
@@ -914,9 +906,7 @@ class MetadataTracker:
             task_id if found, None otherwise
         """
         with self._get_connection() as conn:
-            result = conn.execute(
-                QUERIES["get_process_task_by_path"], [source_path]
-            ).fetchone()
+            result = conn.execute(QUERIES["get_process_task_by_path"], [source_path]).fetchone()
 
             return result[0] if result else None
 
@@ -929,7 +919,7 @@ class MetadataTracker:
         run_id: str,
         task_name: str,
         region_group: str,
-        state_list: List[str],
+        state_list: list[str],
     ) -> str:
         """
         Create new harmonization task.
@@ -992,18 +982,18 @@ class MetadataTracker:
         self,
         task_id: str,
         status: TaskStatus,
-        entities_input: Optional[int] = None,
-        entities_matched: Optional[int] = None,
-        entities_new: Optional[int] = None,
-        master_clees_created: Optional[int] = None,
-        periods_processed: Optional[int] = None,
-        match_confidence_avg: Optional[float] = None,
-        spatial_matches: Optional[int] = None,
-        identity_matches: Optional[int] = None,
-        activity_matches: Optional[int] = None,
-        output_path: Optional[str] = None,
-        error_type: Optional[str] = None,
-        error_message: Optional[str] = None,
+        entities_input: int | None = None,
+        entities_matched: int | None = None,
+        entities_new: int | None = None,
+        master_clees_created: int | None = None,
+        periods_processed: int | None = None,
+        match_confidence_avg: float | None = None,
+        spatial_matches: int | None = None,
+        identity_matches: int | None = None,
+        activity_matches: int | None = None,
+        output_path: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
     ):
         """
         Complete harmonize task with results.
@@ -1083,7 +1073,7 @@ class MetadataTracker:
     # METRICS AND REPORTING
     # ========================================================================
 
-    def get_process_metrics(self) -> List[Dict[str, Any]]:
+    def get_process_metrics(self) -> list[dict[str, Any]]:
         """
         Get processing performance metrics by period.
 
@@ -1101,7 +1091,7 @@ class MetadataTracker:
             ]
             return [dict(zip(columns, row)) for row in result]
 
-    def get_harmonize_metrics(self) -> List[Dict[str, Any]]:
+    def get_harmonize_metrics(self) -> list[dict[str, Any]]:
         """
         Get harmonization performance metrics by region.
 

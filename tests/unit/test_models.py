@@ -10,16 +10,6 @@ Tests for all ORM models including:
 """
 
 import pytest
-from sqlalchemy import inspect
-
-from src_etl.db.models import (
-    Establecimiento,
-    Entidad,
-    Municipio,
-    Localidad,
-    ActividadEconomica,
-)
-
 
 # ============================================================================
 # ESTABLECIMIENTO HELPER METHODS (UNIT TESTS - MANUAL FIXTURES)
@@ -55,9 +45,7 @@ class TestEstablecimientoHelpers:
         address = sample_establecimiento_minimal.get_full_address()
 
         # Should return fallback message
-        assert (
-            "Dirección no disponible" in address or address == "Dirección no disponible"
-        )
+        assert "Dirección no disponible" in address or address == "Dirección no disponible"
 
     def test_get_cross_streets(self, sample_establecimiento):
         """Test extracting intersecting streets."""
@@ -78,9 +66,7 @@ class TestEstablecimientoHelpers:
         """Test coordinate validation for location within Mexico."""
         assert sample_establecimiento.is_valid_location is True
 
-    def test_is_valid_location_outside_mexico(
-        self, sample_establecimiento_invalid_coords
-    ):
+    def test_is_valid_location_outside_mexico(self, sample_establecimiento_invalid_coords):
         """Test coordinate validation for location outside Mexico."""
         assert sample_establecimiento_invalid_coords.is_valid_location is False
 
@@ -240,9 +226,7 @@ class TestCatalogTables:
 
     def test_entidad_count(self, production_db):
         """Verify entidades table has 32 states."""
-        count = production_db.execute(
-            "SELECT COUNT(*) FROM denue_entidades"
-        ).fetchone()[0]
+        count = production_db.execute("SELECT COUNT(*) FROM denue_entidades").fetchone()[0]
 
         assert count == 32
 
@@ -254,9 +238,7 @@ class TestCatalogTables:
 
     def test_municipio_table_exists(self, production_db):
         """Verify denue_municipios table exists."""
-        count = production_db.execute(
-            "SELECT COUNT(*) FROM denue_municipios"
-        ).fetchone()[0]
+        count = production_db.execute("SELECT COUNT(*) FROM denue_municipios").fetchone()[0]
 
         assert count > 0
         assert count > 2000  # Mexico has 2400+ municipalities
@@ -269,9 +251,7 @@ class TestCatalogTables:
 
     def test_localidad_table_exists(self, production_db):
         """Verify denue_localidades table exists."""
-        count = production_db.execute(
-            "SELECT COUNT(*) FROM denue_localidades"
-        ).fetchone()[0]
+        count = production_db.execute("SELECT COUNT(*) FROM denue_localidades").fetchone()[0]
 
         assert count > 0
         assert count > 10000  # Mexico has tens of thousands of localities

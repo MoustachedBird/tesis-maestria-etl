@@ -7,11 +7,10 @@ Provides three-tier logging:
 3. Error logs - Separate file for errors only
 """
 
-import sys
-import structlog
-from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+
+import structlog
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -42,7 +41,7 @@ class StructuredLogger:
     def __init__(
         self,
         log_dir: Path = Path("logs/downloads"),
-        run_id: Optional[str] = None,
+        run_id: str | None = None,
         job_name: str = "etl",
         log_level: str = "INFO",
         enable_console: bool = True,
@@ -303,7 +302,7 @@ class StructuredLogger:
         )
 
 
-def get_logger(name: Optional[str] = None) -> structlog.BoundLogger:
+def get_logger(name: str | None = None) -> structlog.BoundLogger:
     """
     Get a structlog logger instance.
 

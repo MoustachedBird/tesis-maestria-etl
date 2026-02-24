@@ -9,15 +9,13 @@ Uses MetadataTracker for comprehensive tracking and observability,
 following industry-standard patterns from Apache Airflow and Prefect.
 """
 
-from pathlib import Path
-from typing import Optional
 import logging
+from pathlib import Path
 
 from src_etl.core.config import settings
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import JobStatus
-from src_etl.transformers.processor import ProcessorStage
 from src_etl.transformers.harmonizer import HarmonizerStage
+from src_etl.transformers.processor import ProcessorStage
+from src_metadata.tracker import MetadataTracker
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +41,9 @@ class DenueTransformer:
     def __init__(
         self,
         data_root: Path,
-        metadata_db: Optional[Path] = None,
-        processed_output_dir: Optional[Path] = None,
-        curated_output_dir: Optional[Path] = None,
+        metadata_db: Path | None = None,
+        processed_output_dir: Path | None = None,
+        curated_output_dir: Path | None = None,
     ):
         """
         Initialize unified transformer.
@@ -66,14 +64,10 @@ class DenueTransformer:
 
         # Output directories (use env vars or defaults)
         self.processed_output_dir = (
-            Path(processed_output_dir)
-            if processed_output_dir
-            else settings.PROCESSED_OUTPUT_DIR
+            Path(processed_output_dir) if processed_output_dir else settings.PROCESSED_OUTPUT_DIR
         )
         self.curated_output_dir = (
-            Path(curated_output_dir)
-            if curated_output_dir
-            else settings.CURATED_OUTPUT_DIR
+            Path(curated_output_dir) if curated_output_dir else settings.CURATED_OUTPUT_DIR
         )
 
         # Ensure output directories exist
@@ -94,7 +88,7 @@ class DenueTransformer:
             output_dir=self.curated_output_dir,
         )
 
-        logger.info(f"✅ DenueTransformer initialized")
+        logger.info("✅ DenueTransformer initialized")
         logger.info(f"   📊 Metadata: {self.metadata_db}")
         logger.info(f"   📂 Processed output: {self.processed_output_dir}")
         logger.info(f"   📂 Curated output: {self.curated_output_dir}")
@@ -251,8 +245,4 @@ class DenueTransformer:
 
     def __repr__(self) -> str:
         """String representation."""
-        return (
-            f"DenueTransformer("
-            f"data_root={self.data_root}, "
-            f"metadata_db={self.metadata_db})"
-        )
+        return f"DenueTransformer(data_root={self.data_root}, metadata_db={self.metadata_db})"

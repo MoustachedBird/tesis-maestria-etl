@@ -13,12 +13,11 @@ These are pure unit tests with no database dependency.
 import pytest
 
 from src_etl.db.enums import (
-    TipoVial,
+    PersonalOcupado,
     TipoAsentamiento,
     TipoUnidadEconomica,
-    PersonalOcupado,
+    TipoVial,
 )
-
 
 # ============================================================================
 # PERSONAL OCUPADO (EMPLOYEE COUNT ENUM)

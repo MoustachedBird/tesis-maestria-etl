@@ -9,29 +9,29 @@ original DenueHarmonizer class, now integrated with MetadataTracker
 for comprehensive observability.
 """
 
-import polars as pl
-import logging
 import gc
+import logging
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import JobStatus, TaskStatus
-from src_etl.utils.matching import clean_contact_columns
 
-# Import refactored harmonization utilities
-from src_etl.utils.harmonizer_config import (
-    MEGA_REGIONS,
-    SILVER_SCHEMA,
-    COLS_NEEDED_FOR_MATCHING,
-    TEXT_COLS_TO_SANITIZE,
-)
+import polars as pl
+
 from src_etl.utils.entity_resolution import (
+    consolidate_global_catalog_lazy,
     get_region_prefix,
     initialize_knowledge_base,
     resolve_period_logic,
     update_kb_logic,
-    consolidate_global_catalog_lazy,
 )
+
+# Import refactored harmonization utilities
+from src_etl.utils.harmonizer_config import (
+    COLS_NEEDED_FOR_MATCHING,
+    MEGA_REGIONS,
+    TEXT_COLS_TO_SANITIZE,
+)
+from src_etl.utils.matching import clean_contact_columns
+from src_metadata.models import JobStatus, TaskStatus
+from src_metadata.tracker import MetadataTracker
 
 
 class HarmonizerStage:
@@ -86,9 +86,7 @@ class HarmonizerStage:
         self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
-            formatter = logging.Formatter(
-                "%(asctime)s - %(message)s", datefmt="%H:%M:%S"
-            )
+            formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%H:%M:%S")
 
             # Console handler
             console_handler = logging.StreamHandler()
@@ -97,15 +95,13 @@ class HarmonizerStage:
 
             # File handler
             try:
-                file_handler = logging.FileHandler(
-                    self.log_path, mode="a", encoding="utf-8"
-                )
+                file_handler = logging.FileHandler(self.log_path, mode="a", encoding="utf-8")
                 file_handler.setFormatter(formatter)
                 self.logger.addHandler(file_handler)
             except Exception as e:
                 print(f"⚠️ No se pudo crear el archivo de log en {self.log_path}: {e}")
 
-    def get_processing_groups(self) -> List[List[str]]:
+    def get_processing_groups(self) -> list[list[str]]:
         """
         Detect available state folders and organize into processing groups.
 
@@ -125,9 +121,7 @@ class HarmonizerStage:
             current_group = [s for s in states_in_region if s in available_states]
             if current_group:
                 groups.append(current_group)
-                self.logger.info(
-                    f"🔗 Mega-Región detectada ({region_name}): {current_group}"
-                )
+                self.logger.info(f"🔗 Mega-Región detectada ({region_name}): {current_group}")
                 handled_states.update(current_group)
 
         # Add individual states
@@ -137,7 +131,7 @@ class HarmonizerStage:
 
         return groups
 
-    def load_group_history(self, state_list: List[str]) -> pl.DataFrame:
+    def load_group_history(self, state_list: list[str]) -> pl.DataFrame:
         """
         Load historical data for a group of states.
 
@@ -170,9 +164,7 @@ class HarmonizerStage:
                     df_part = pl.read_parquet(
                         file_path, columns=cols_to_read, hive_partitioning=True
                     ).with_columns(
-                        pl.lit(str(file_path.relative_to(self.root))).alias(
-                            "source_paths"
-                        )
+                        pl.lit(str(file_path.relative_to(self.root))).alias("source_paths")
                     )
                     dfs.append(df_part)
 
@@ -187,16 +179,12 @@ class HarmonizerStage:
 
         # Sanitize nulls in text columns
         full_df = full_df.with_columns(
-            [
-                pl.col(c).fill_null("")
-                for c in TEXT_COLS_TO_SANITIZE
-                if c in full_df.columns
-            ]
+            [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in full_df.columns]
         )
 
         return clean_contact_columns(full_df)
 
-    def process_group(self, state_list: List[str]) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    def process_group(self, state_list: list[str]) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
         Process a single group/region for entity harmonization.
 
@@ -226,9 +214,7 @@ class HarmonizerStage:
         dict_dfs = {p: df_group.filter(pl.col("period") == p) for p in periods}
 
         # Initialize knowledge base with most recent period
-        self.logger.info(
-            f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}..."
-        )
+        self.logger.info(f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}...")
         map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
         self.logger.info(f"         📚 Entidades iniciales en memoria: {kb.height:,}")
 
@@ -241,9 +227,7 @@ class HarmonizerStage:
             self.logger.info(
                 f"      🔄 [{i}/{len(periods) - 1}] Analizando periodo {period} ({target_rows:,} negocios)..."
             )
-            self.logger.info(
-                f"         ↳ Propagando CLEEs del futuro hacia {period}..."
-            )
+            self.logger.info(f"         ↳ Propagando CLEEs del futuro hacia {period}...")
 
             # Resolve entity identities
             df_resolved = resolve_period_logic(
@@ -266,16 +250,12 @@ class HarmonizerStage:
             self.logger.info(
                 f"            📈 Nuevas entidades (no estaban en el futuro): +{new_entities:,}"
             )
-            self.logger.info(
-                f"            📚 Total acumulado en KB: {kb.height:,} registros"
-            )
+            self.logger.info(f"            📚 Total acumulado en KB: {kb.height:,} registros")
             self.logger.info(f"         ✅ {period} Terminado.")
 
         return map_accum, kb
 
-    def _save_local_results(
-        self, state_list: List[str], mapping: pl.DataFrame
-    ) -> List[str]:
+    def _save_local_results(self, state_list: list[str], mapping: pl.DataFrame) -> list[str]:
         """
         Save harmonization results to partitioned Parquet files.
 
@@ -362,9 +342,7 @@ class HarmonizerStage:
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             return True
 
-        self.logger.info(
-            f"🚀 Iniciando harmonización: {len(all_groups)} grupos detectados"
-        )
+        self.logger.info(f"🚀 Iniciando harmonización: {len(all_groups)} grupos detectados")
 
         tasks_succeeded = 0
         tasks_failed = 0
@@ -443,8 +421,6 @@ class HarmonizerStage:
         self.tracker.complete_run(run_id, final_status)
 
         self.logger.info("✨ Proceso Finalizado.")
-        self.logger.info(
-            f"   📊 Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos"
-        )
+        self.logger.info(f"   📊 Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos")
 
         return tasks_failed == 0

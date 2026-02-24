@@ -7,7 +7,6 @@ into the DuckDB warehouse.
 
 import logging
 from pathlib import Path
-from typing import Dict
 
 import polars as pl
 from sqlalchemy import Connection, text
@@ -47,7 +46,7 @@ def ensure_table(conn, force: bool = False):
         conn.execute(TABLE_DDL.format(table=TABLE_NAME))
 
 
-def load_seeds(conn, seeds_dir: Path, force: bool = False) -> Dict[str, int]:
+def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
     """
     Load SCIAN activity seeds from Parquet into DuckDB.
 
@@ -83,7 +82,7 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> Dict[str, int]:
 
 def load_seeds_sqlalchemy(
     connection: Connection, seeds_dir: Path, truncate: bool = True
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Load SCIAN seeds via SQLAlchemy connection (for Alembic migrations).
 

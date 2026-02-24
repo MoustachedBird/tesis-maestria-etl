@@ -4,11 +4,12 @@ Configuration management using Pydantic Settings.
 Supports both PostgreSQL and DuckDB backends with proper URL construction.
 """
 
-from pydantic import field_validator, computed_field
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pathlib import Path
-from typing import Literal, Optional
 from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import computed_field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     DATABASE_BACKEND: Literal["duckdb", "postgresql"] = "duckdb"
 
     # DuckDB Configuration
-    DUCKDB_PATH: Optional[Path] = None
+    DUCKDB_PATH: Path | None = None
     DUCKDB_THREADS: int = 8
     DUCKDB_MEMORY_LIMIT: str = "16GB"
 
@@ -77,15 +78,13 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     @field_validator("DUCKDB_PATH", mode="before")
     @classmethod
-    def set_duckdb_path(cls, v: Optional[Path], info) -> Path:
+    def set_duckdb_path(cls, v: Path | None, info) -> Path:
         """Set default DuckDB path if not provided."""
         if v is None:
             # Get GOLD_DIR from the data being validated
             gold_dir = info.data.get("GOLD_DIR")
             if gold_dir is None:
-                data_dir = info.data.get(
-                    "DATA_DIR", Path(__file__).parent.parent.parent / "data"
-                )
+                data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
                 gold_dir = data_dir / "gold"
             return gold_dir / "denue.duckdb"
         return Path(v) if not isinstance(v, Path) else v

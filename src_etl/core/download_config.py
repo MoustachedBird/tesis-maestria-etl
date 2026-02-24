@@ -5,12 +5,13 @@ Provides externalized configuration for download operations with
 validation, environment variable support, and sensible defaults.
 """
 
-from pathlib import Path
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings
-import yaml
 import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings
 
 
 class DownloadConfig(BaseSettings):
@@ -112,7 +113,7 @@ class DownloadConfig(BaseSettings):
         description="Directory for downloaded files",
     )
 
-    temp_directory: Optional[Path] = Field(
+    temp_directory: Path | None = Field(
         default=None,
         description="Directory for temporary downloads (defaults to download_directory/.tmp)",
     )
@@ -134,7 +135,7 @@ class DownloadConfig(BaseSettings):
         description="User-Agent header for HTTP requests",
     )
 
-    headers: Dict[str, str] = Field(
+    headers: dict[str, str] = Field(
         default_factory=dict,
         description="Additional HTTP headers",
     )
@@ -150,11 +151,12 @@ class DownloadConfig(BaseSettings):
         description="Track downloads in metadata.duckdb",
     )
 
-    class Config:
-        env_prefix = "DOWNLOAD_"
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"  # Ignore extra env variables not in schema
+    model_config = {
+        "env_prefix": "DOWNLOAD_",
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     @field_validator("hash_algorithm")
     @classmethod
@@ -174,14 +176,12 @@ class DownloadConfig(BaseSettings):
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         v_upper = v.upper()
         if v_upper not in valid_levels:
-            raise ValueError(
-                f"Invalid log level '{v}'. Valid levels: {', '.join(valid_levels)}"
-            )
+            raise ValueError(f"Invalid log level '{v}'. Valid levels: {', '.join(valid_levels)}")
         return v_upper
 
     @field_validator("download_directory", "temp_directory", "log_directory")
     @classmethod
-    def validate_path(cls, v: Optional[Path]) -> Optional[Path]:
+    def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
         if v is None:
             return None
@@ -218,7 +218,7 @@ class DownloadConfig(BaseSettings):
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {path}")
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         return cls(**data)
@@ -241,13 +241,13 @@ class DownloadConfig(BaseSettings):
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {path}")
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         return cls(**data)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DownloadConfig":
+    def from_dict(cls, data: dict[str, Any]) -> "DownloadConfig":
         """
         Create configuration from dictionary.
 
@@ -262,7 +262,7 @@ class DownloadConfig(BaseSettings):
         """
         return cls(**data)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Export configuration as dictionary.
 

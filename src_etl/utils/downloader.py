@@ -2,7 +2,7 @@
 Generic downloader with retry logic and validation.
 
 Provides reusable download functionality with:
-- Exponential backoff retry logic (tenacity)
+- Exponential backoff retry logic
 - Streaming downloads for memory efficiency
 - Progress callback support (Rich progress bars)
 - Automatic validation
@@ -10,24 +10,19 @@ Provides reusable download functionality with:
 - Parallel batch downloads
 """
 
-import requests
-from pathlib import Path
-from typing import Optional, Callable, List, Dict, Any
-from datetime import datetime
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    RetryError,
-)
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import requests
 import structlog
 
 from src_etl.core.download_config import DownloadConfig
 from src_etl.utils.file_validator import FileValidator, ValidationResult
-from src_metadata.models import ErrorType, TaskStatus
-
+from src_metadata.models import ErrorType
 
 logger = structlog.get_logger(__name__)
 
@@ -51,13 +46,13 @@ class DownloadResult:
     def __init__(
         self,
         success: bool,
-        file_path: Optional[Path] = None,
-        size_bytes: Optional[int] = None,
-        duration_seconds: Optional[float] = None,
-        download_speed_mbps: Optional[float] = None,
-        validation_result: Optional[ValidationResult] = None,
-        error_type: Optional[ErrorType] = None,
-        error_message: Optional[str] = None,
+        file_path: Path | None = None,
+        size_bytes: int | None = None,
+        duration_seconds: float | None = None,
+        download_speed_mbps: float | None = None,
+        validation_result: ValidationResult | None = None,
+        error_type: ErrorType | None = None,
+        error_message: str | None = None,
         attempt_number: int = 1,
     ):
         self.success = success
@@ -70,7 +65,7 @@ class DownloadResult:
         self.error_message = error_message
         self.attempt_number = attempt_number
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "success": self.success,
@@ -116,8 +111,8 @@ class Downloader:
 
     def __init__(
         self,
-        config: Optional[DownloadConfig] = None,
-        validator: Optional[FileValidator] = None,
+        config: DownloadConfig | None = None,
+        validator: FileValidator | None = None,
     ):
         """
         Initialize downloader.
@@ -145,9 +140,9 @@ class Downloader:
         self,
         url: str,
         target_path: Path,
-        expected_size_bytes: Optional[int] = None,
-        expected_hash: Optional[str] = None,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        expected_size_bytes: int | None = None,
+        expected_hash: str | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> DownloadResult:
         """
         Download file with retry logic and validation.
@@ -272,7 +267,7 @@ class Downloader:
         self,
         url: str,
         target_path: Path,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[Path, int, int]:
         """
         Download file with exponential backoff retry.
@@ -288,29 +283,6 @@ class Downloader:
         Raises:
             Exception: If download fails after all retries
         """
-        # Create retry decorator
-        retry_decorator = retry(
-            stop=stop_after_attempt(self.config.max_retries + 1),
-            wait=wait_exponential(
-                multiplier=self.config.retry_backoff_multiplier,
-                min=self.config.retry_delay_seconds,
-            ),
-            retry=retry_if_exception_type(
-                (
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ChunkedEncodingError,
-                )
-            ),
-            reraise=True,
-        )
-
-        # Apply retry decorator to download function
-        @retry_decorator
-        def _download_attempt():
-            return self._download_file(url, target_path, progress_callback)
-
-        # Track attempts manually since tenacity doesn't expose this easily
         attempt = 1
         last_exception = None
 
@@ -327,8 +299,6 @@ class Downloader:
                 if attempt >= self.config.max_retries + 1:
                     raise
                 # Wait before retry
-                import time
-
                 wait_time = self.config.get_retry_delay(attempt - 1)
                 time.sleep(wait_time)
             except Exception:
@@ -344,7 +314,7 @@ class Downloader:
         self,
         url: str,
         target_path: Path,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> tuple[Path, int]:
         """
         Download file to target path (single attempt).
@@ -444,9 +414,9 @@ class Downloader:
 
     def download_batch(
         self,
-        downloads: List[Dict[str, Any]],
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> List[DownloadResult]:
+        downloads: list[dict[str, Any]],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[DownloadResult]:
         """
         Download multiple files in parallel.
 

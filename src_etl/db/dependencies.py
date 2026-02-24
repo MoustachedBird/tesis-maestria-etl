@@ -5,12 +5,12 @@ This module provides dependency injection functions for FastAPI routes.
 """
 
 from typing import Annotated
+
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from src_etl.db.database import get_db
 from src_etl.core.config import Settings, get_settings
-
+from src_etl.db.database import get_db
 
 # Type alias for database dependency
 # Use this in your FastAPI route handlers:

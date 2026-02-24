@@ -8,14 +8,14 @@ import re
 import time
 import unicodedata
 from pathlib import Path
-from typing import List, Tuple
+
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
-from src_metadata.tracker import MetadataTracker
 from src_metadata.models import TaskStatus
+from src_metadata.tracker import MetadataTracker
 
 
 def clean_filename(text: str) -> str:
@@ -44,7 +44,7 @@ def scrape_denue_table(
     output_dir: Path,
     base_url_inegi: str,
     force: bool = False,
-) -> List[Tuple[str, str, str]]:
+) -> list[tuple[str, str, str]]:
     """
     Scrape INEGI DENUE table and synchronize with metadata database.
 
@@ -186,7 +186,7 @@ def scrape_denue_table(
                 )
 
         # Display summary
-        print(f"\n📊 Scraping Summary:")
+        print("\n📊 Scraping Summary:")
 
         if force:
             print(f"   🔄 Force mode - queued for re-download: {counts['forced']}")

@@ -5,11 +5,12 @@ This module provides database connectivity abstraction for both PostgreSQL and D
 It follows FastAPI best practices for database session management.
 """
 
-from sqlalchemy import create_engine, event, Engine
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import StaticPool, NullPool
-from typing import Generator
+from collections.abc import Generator
 from functools import lru_cache
+
+from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from src_etl.core.config import get_settings
 

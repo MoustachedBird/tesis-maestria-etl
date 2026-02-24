@@ -5,17 +5,16 @@ This module sets up the FastAPI application with proper database integration,
 CORS middleware, and API routing.
 """
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-from sqlalchemy.orm import Session
 
-from src_etl.core.config import get_settings, Settings
-from src_etl.db import get_db, init_db
-from src_etl.db.dependencies import DbSession, AppSettings
+from src_etl.core.config import get_settings
+from src_etl.db import init_db
+from src_etl.db.dependencies import AppSettings, DbSession
 
 
 @asynccontextmanager

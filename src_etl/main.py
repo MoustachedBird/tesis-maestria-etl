@@ -1,10 +1,12 @@
-import typer
 from pathlib import Path
+
+import typer
 from rich.console import Console
 from rich.markup import escape
 
 # Importación de orquestadores modulares
 from src_etl.extractors.denue import DenueDownloader
+
 # Legacy imports kept for backward compatibility during migration
 # TODO: Remove after full migration verification
 # from src_etl.transformers.denue_processor import DenueProcessor
@@ -36,12 +38,12 @@ def download_inegi(
 
     Use --force to re-download all files regardless of existing downloads.
     """
-    console.print(f"[bold green]🚀 Iniciando DENUE Downloader (Phase 2)[/bold green]")
+    console.print("[bold green]🚀 Iniciando DENUE Downloader (Phase 2)[/bold green]")
     console.print(f"📂 Destino: {output}")
     console.print(f"👻 Modo Headless: {headless}")
 
     if force:
-        console.print(f"⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]")
+        console.print("⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
     downloader = DenueDownloader(output_dir=output, headless=headless, force=force)
     downloader.download_all()
@@ -54,7 +56,7 @@ def retry_inegi(
     """
     PASO 1.5: Reintenta descargas fallidas basándose en el historial de metadata.duckdb.
     """
-    console.print(f"[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
+    console.print("[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
     downloader = DenueDownloader(output_dir=output, headless=True)
     # Retry functionality will be added separately
     console.print("[yellow]Retry functionality coming soon - use download-inegi to re-run[/yellow]")
@@ -75,7 +77,7 @@ def process_denue(
 
     Usa el nuevo sistema de MetadataTracker para tracking completo.
     """
-    console.print(f"[bold blue]⚙️ Iniciando DENUE Warehouse Processor[/bold blue]")
+    console.print("[bold blue]⚙️ Iniciando DENUE Warehouse Processor[/bold blue]")
     if force:
         console.print(
             "[bold orange3]⚠️ MODO FORCE: Se re-procesarán todos los archivos en disco.[/bold orange3]"
@@ -90,11 +92,11 @@ def process_denue(
 
         if success:
             console.print(
-                f"[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]"
+                "[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]"
             )
         else:
             console.print(
-                f"[bold yellow]⚠️ Proceso completado con errores. Revisa los logs.[/bold yellow]"
+                "[bold yellow]⚠️ Proceso completado con errores. Revisa los logs.[/bold yellow]"
             )
             raise typer.Exit(code=1)
 
@@ -111,7 +113,7 @@ def harmonize():
 
     Usa el nuevo sistema de MetadataTracker para tracking completo.
     """
-    console.print(f"[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]")
+    console.print("[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]")
 
     try:
         # Use new unified transformer
@@ -122,11 +124,11 @@ def harmonize():
 
         if success:
             console.print(
-                f"[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]"
+                "[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]"
             )
         else:
             console.print(
-                f"[bold yellow]⚠️ Harmonización completada con errores. Revisa los logs.[/bold yellow]"
+                "[bold yellow]⚠️ Harmonización completada con errores. Revisa los logs.[/bold yellow]"
             )
             raise typer.Exit(code=1)
 
@@ -150,7 +152,7 @@ def pipeline(
     Ejecuta la cadena completa de transformación de datos DENUE
     con tracking completo en metadata.duckdb.
     """
-    console.print(f"[bold cyan]🚀 Iniciando Pipeline Completo DENUE[/bold cyan]")
+    console.print("[bold cyan]🚀 Iniciando Pipeline Completo DENUE[/bold cyan]")
     console.print("=" * 60)
 
     try:
@@ -161,17 +163,17 @@ def pipeline(
 
         console.print("=" * 60)
         if success:
-            console.print(f"[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]")
+            console.print("[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]")
 
             # Show summary
             status = transformer.get_pipeline_status()
-            console.print(f"\n[bold]📊 Resumen del Pipeline:[/bold]")
+            console.print("\n[bold]📊 Resumen del Pipeline:[/bold]")
             console.print(f"  Processed: {status['processed_output']}")
             console.print(f"  Curated: {status['curated_output']}")
             console.print(f"  Metadata: {status['metadata_db']}")
         else:
             console.print(
-                f"[bold yellow]⚠️ Pipeline completado con errores. Revisa los logs.[/bold yellow]"
+                "[bold yellow]⚠️ Pipeline completado con errores. Revisa los logs.[/bold yellow]"
             )
             raise typer.Exit(code=1)
 

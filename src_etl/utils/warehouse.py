@@ -1,5 +1,7 @@
-import duckdb
 from pathlib import Path
+
+import duckdb
+
 
 class BaseWarehouse:
     def __init__(self, warehouse_path: Path):

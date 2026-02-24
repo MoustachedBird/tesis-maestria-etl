@@ -7,9 +7,9 @@ and serialization in FastAPI endpoints.
 Field names match the SQLAlchemy ORM models in src/db/models.py.
 """
 
-from pydantic import BaseModel, Field, ConfigDict
 from datetime import date
-from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ----------------------------------------------------------------------------
@@ -18,27 +18,21 @@ from typing import Optional
 class EstablecimientoBase(BaseModel):
     """Base schema for Establecimiento with common fields."""
 
-    nom_estab: Optional[str] = Field(
-        None, max_length=500, description="Establishment name"
-    )
-    codigo_act: Optional[str] = Field(
-        None, max_length=10, description="SCIAN economic activity code"
-    )
-    per_ocu: Optional[str] = Field(
+    nom_estab: str | None = Field(None, max_length=500, description="Establishment name")
+    codigo_act: str | None = Field(None, max_length=10, description="SCIAN economic activity code")
+    per_ocu: str | None = Field(
         None, max_length=50, description="Personnel occupied (employee count range)"
     )
-    tipounieco: Optional[str] = Field(
+    tipounieco: str | None = Field(
         None, max_length=20, description="Economic unit type: FIJO, SEMIFIJO, NINGUNO"
     )
-    cve_ent: Optional[str] = Field(None, max_length=2, description="State code")
-    cve_mun: Optional[str] = Field(None, max_length=3, description="Municipality code")
-    cve_loc: Optional[str] = Field(None, max_length=4, description="Locality code")
-    cod_postal: Optional[str] = Field(
-        None, max_length=5, description="5-digit postal code"
-    )
-    latitud: Optional[float] = Field(None, description="Latitude (WGS84)")
-    longitud: Optional[float] = Field(None, description="Longitude (WGS84)")
-    period: Optional[date] = Field(None, description="Data period/snapshot date")
+    cve_ent: str | None = Field(None, max_length=2, description="State code")
+    cve_mun: str | None = Field(None, max_length=3, description="Municipality code")
+    cve_loc: str | None = Field(None, max_length=4, description="Locality code")
+    cod_postal: str | None = Field(None, max_length=5, description="5-digit postal code")
+    latitud: float | None = Field(None, description="Latitude (WGS84)")
+    longitud: float | None = Field(None, description="Longitude (WGS84)")
+    period: date | None = Field(None, description="Data period/snapshot date")
 
 
 class EstablecimientoCreate(EstablecimientoBase):
@@ -50,34 +44,34 @@ class EstablecimientoCreate(EstablecimientoBase):
 class EstablecimientoUpdate(BaseModel):
     """Schema for updating an Establecimiento (all fields optional)."""
 
-    nom_estab: Optional[str] = Field(None, max_length=500)
-    codigo_act: Optional[str] = Field(None, max_length=10)
-    per_ocu: Optional[str] = Field(None, max_length=50)
-    tipounieco: Optional[str] = Field(None, max_length=20)
-    cve_ent: Optional[str] = Field(None, max_length=2)
-    cve_mun: Optional[str] = Field(None, max_length=3)
-    cve_loc: Optional[str] = Field(None, max_length=4)
-    cod_postal: Optional[str] = Field(None, max_length=5)
-    latitud: Optional[float] = None
-    longitud: Optional[float] = None
-    period: Optional[date] = None
+    nom_estab: str | None = Field(None, max_length=500)
+    codigo_act: str | None = Field(None, max_length=10)
+    per_ocu: str | None = Field(None, max_length=50)
+    tipounieco: str | None = Field(None, max_length=20)
+    cve_ent: str | None = Field(None, max_length=2)
+    cve_mun: str | None = Field(None, max_length=3)
+    cve_loc: str | None = Field(None, max_length=4)
+    cod_postal: str | None = Field(None, max_length=5)
+    latitud: float | None = None
+    longitud: float | None = None
+    period: date | None = None
 
 
 class EstablecimientoResponse(EstablecimientoBase):
     """Schema for Establecimiento response with all fields."""
 
     id: str
-    clee: Optional[str] = None
-    raz_social: Optional[str] = None
-    tipo_vial: Optional[str] = None
-    nom_vial: Optional[str] = None
-    numero_ext: Optional[str] = None
-    tipo_asent: Optional[str] = None
-    nomb_asent: Optional[str] = None
-    telefono: Optional[str] = None
-    correoelec: Optional[str] = None
-    www: Optional[str] = None
-    fecha_alta: Optional[str] = None
+    clee: str | None = None
+    raz_social: str | None = None
+    tipo_vial: str | None = None
+    nom_vial: str | None = None
+    numero_ext: str | None = None
+    tipo_asent: str | None = None
+    nomb_asent: str | None = None
+    telefono: str | None = None
+    correoelec: str | None = None
+    www: str | None = None
+    fecha_alta: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -188,16 +182,8 @@ class PaginationParams(BaseModel):
 class EstablecimientoFilter(BaseModel):
     """Schema for filtering Establecimientos."""
 
-    cve_ent: Optional[str] = Field(
-        None, max_length=2, description="Filter by state code"
-    )
-    codigo_act: Optional[str] = Field(
-        None, max_length=10, description="Filter by activity code"
-    )
-    period: Optional[date] = Field(None, description="Filter by data period")
-    cve_mun: Optional[str] = Field(
-        None, max_length=3, description="Filter by municipality code"
-    )
-    per_ocu: Optional[str] = Field(
-        None, max_length=50, description="Filter by employee range"
-    )
+    cve_ent: str | None = Field(None, max_length=2, description="Filter by state code")
+    codigo_act: str | None = Field(None, max_length=10, description="Filter by activity code")
+    period: date | None = Field(None, description="Filter by data period")
+    cve_mun: str | None = Field(None, max_length=3, description="Filter by municipality code")
+    per_ocu: str | None = Field(None, max_length=50, description="Filter by employee range")

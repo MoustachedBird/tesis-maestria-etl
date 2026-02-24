@@ -7,7 +7,6 @@ from Parquet seed files into DuckDB tables.
 
 import logging
 from pathlib import Path
-from typing import Dict
 
 import polars as pl
 from sqlalchemy import Connection, text
@@ -60,7 +59,7 @@ def ensure_tables(conn, force: bool = False):
             conn.execute(TABLE_DDL[table].format(table=table))
 
 
-def load_seeds(conn, seeds_dir: Path, force: bool = False) -> Dict[str, int]:
+def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
     """
     Load geography seeds from Parquet files into DuckDB.
 
@@ -100,7 +99,7 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> Dict[str, int]:
 
 def load_seeds_sqlalchemy(
     connection: Connection, seeds_dir: Path, truncate: bool = True
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Load geography seeds via SQLAlchemy connection (for Alembic migrations).
 

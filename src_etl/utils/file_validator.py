@@ -8,8 +8,8 @@ hash verification, and ZIP integrity checks.
 import hashlib
 import zipfile
 from pathlib import Path
-from typing import Optional, List
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from src_metadata.models import ErrorType
 
@@ -30,20 +30,15 @@ class ValidationResult(BaseModel):
     """
 
     is_valid: bool = Field(description="Overall validation result")
-    checks_passed: List[str] = Field(default_factory=list, description="Passed checks")
-    checks_failed: List[str] = Field(default_factory=list, description="Failed checks")
-    error_type: Optional[ErrorType] = Field(
-        default=None, description="Error classification"
-    )
-    error_message: Optional[str] = Field(default=None, description="Error details")
-    file_path: Optional[Path] = Field(default=None, description="Validated file path")
-    actual_size_bytes: Optional[int] = Field(
-        default=None, description="Actual file size"
-    )
-    actual_hash: Optional[str] = Field(default=None, description="Actual file hash")
+    checks_passed: list[str] = Field(default_factory=list, description="Passed checks")
+    checks_failed: list[str] = Field(default_factory=list, description="Failed checks")
+    error_type: ErrorType | None = Field(default=None, description="Error classification")
+    error_message: str | None = Field(default=None, description="Error details")
+    file_path: Path | None = Field(default=None, description="Validated file path")
+    actual_size_bytes: int | None = Field(default=None, description="Actual file size")
+    actual_hash: str | None = Field(default=None, description="Actual file hash")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class FileValidator:
@@ -96,10 +91,10 @@ class FileValidator:
     def validate(
         self,
         file_path: Path,
-        expected_size_bytes: Optional[int] = None,
-        expected_hash: Optional[str] = None,
+        expected_size_bytes: int | None = None,
+        expected_hash: str | None = None,
         validate_zip: bool = True,
-        expected_zip_files: Optional[List[str]] = None,
+        expected_zip_files: list[str] | None = None,
     ) -> ValidationResult:
         """
         Perform multi-level file validation.
@@ -162,9 +157,7 @@ class FileValidator:
                 else:
                     checks_failed.append("file_hash")
                     error_type = ErrorType.HASH_MISMATCH
-                    error_message = (
-                        f"Hash mismatch: expected {expected_hash}, got {actual_hash}"
-                    )
+                    error_message = f"Hash mismatch: expected {expected_hash}, got {actual_hash}"
             else:
                 # Calculate hash even if not validating for metadata purposes
                 actual_hash = self._calculate_hash(file_path)
@@ -186,9 +179,7 @@ class FileValidator:
                 else:
                     checks_failed.append("zip_contents")
                     error_type = ErrorType.VALIDATION_ERROR
-                    error_message = (
-                        f"ZIP missing expected files: {', '.join(missing_files)}"
-                    )
+                    error_message = f"ZIP missing expected files: {', '.join(missing_files)}"
 
             # Determine overall validation result
             is_valid = len(checks_failed) == 0
@@ -228,11 +219,7 @@ class FileValidator:
             True if file exists and is readable
         """
         try:
-            return (
-                file_path.exists()
-                and file_path.is_file()
-                and file_path.stat().st_size > 0
-            )
+            return file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0
         except (OSError, PermissionError):
             return False
 
@@ -303,9 +290,7 @@ class FileValidator:
         except (zipfile.BadZipFile, OSError):
             return False
 
-    def _check_zip_contents(
-        self, file_path: Path, expected_files: List[str]
-    ) -> List[str]:
+    def _check_zip_contents(self, file_path: Path, expected_files: list[str]) -> list[str]:
         """
         Check if ZIP contains all expected files.
 

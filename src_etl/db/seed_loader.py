@@ -17,14 +17,17 @@ Usage:
 """
 
 from pathlib import Path
-from typing import Dict
 
 from src_etl.loaders.geography import (
     load_seeds_sqlalchemy as load_geography,
+)
+from src_etl.loaders.geography import (
     validate_seeds as validate_geography,
 )
 from src_etl.loaders.scian import (
     load_seeds_sqlalchemy as load_scian,
+)
+from src_etl.loaders.scian import (
     validate_seeds as validate_scian,
 )
 
@@ -38,7 +41,7 @@ class SeedLoadError(Exception):
 def seed_catalog_tables(
     connection,
     seeds_dir: Path,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Load all catalog seed files into their respective tables.
 

@@ -1,22 +1,19 @@
-import zipfile
-import json
 import logging
 import sys
-import traceback
 import time
+import zipfile
 from pathlib import Path
-from datetime import datetime
+
 import polars as pl
 
 from src_etl.loaders.denue import DataStoreManager
 from src_etl.reports.reporter import ReportManager
 from src_etl.utils.denue_schema import (
-    MASTER_COLUMNS,
-    REQUIRED_COLUMNS,
     COLUMN_ALIASES,
     ENTITY_VALUE_NORMALIZATION,
     ENUM_CATALOGS,
-    DB_FACT_COLUMNS,
+    MASTER_COLUMNS,
+    REQUIRED_COLUMNS,
 )
 
 log_file = Path("./data/etl_process.log")
@@ -113,9 +110,7 @@ class DenueProcessor:
 
         with self.datastore._get_connection() as conn:
             if force:
-                logger.warning(
-                    "🗑️ Eliminando tabla de hechos por restricción de integridad..."
-                )
+                logger.warning("🗑️ Eliminando tabla de hechos por restricción de integridad...")
                 conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
 
             # Creación de tipos ENUM
@@ -138,20 +133,14 @@ class DenueProcessor:
                     )
 
                 try:
-                    row_count = (
-                        pl.scan_parquet(seed_path).select(pl.len()).collect().item()
-                    )
+                    row_count = pl.scan_parquet(seed_path).select(pl.len()).collect().item()
                     if row_count == 0:
                         raise ValueError(
                             f"Error Crítico: El archivo '{file_name}' tiene 0 registros."
                         )
-                    logger.info(
-                        f"✅ Semilla validada: {file_name} ({row_count:,} registros)."
-                    )
+                    logger.info(f"✅ Semilla validada: {file_name} ({row_count:,} registros).")
                 except Exception as e:
-                    raise RuntimeError(
-                        f"Error al leer la semilla {file_name}: {str(e)}"
-                    )
+                    raise RuntimeError(f"Error al leer la semilla {file_name}: {str(e)}")
 
                 if force:
                     conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
@@ -176,9 +165,7 @@ class DenueProcessor:
                             f"CREATE TABLE {table} (codigo_act VARCHAR, nombre_act VARCHAR, PRIMARY KEY (codigo_act, nombre_act))"
                         )
 
-                    conn.execute(
-                        f"INSERT INTO {table} SELECT * FROM read_parquet('{seed_path}')"
-                    )
+                    conn.execute(f"INSERT INTO {table} SELECT * FROM read_parquet('{seed_path}')")
 
             conn.execute("CHECKPOINT;")
 
@@ -191,21 +178,15 @@ class DenueProcessor:
 
         # Manejo de periodos con formato solo año (ej. "2015")
         # Se normaliza a "01_YYYY" para cumplir con el formato "%m_%Y"
-        clean_period = (
-            f"01_{period}" if len(period) == 4 and period.isdigit() else period
-        )
+        clean_period = f"01_{period}" if len(period) == 4 and period.isdigit() else period
 
         with zipfile.ZipFile(zip_path, "r") as z:
             csv_candidates = [
-                f
-                for f in z.namelist()
-                if f.endswith(".csv") and "conjunto_de_datos" in f.lower()
+                f for f in z.namelist() if f.endswith(".csv") and "conjunto_de_datos" in f.lower()
             ]
             if not csv_candidates:
                 csv_candidates = [
-                    f
-                    for f in z.namelist()
-                    if f.endswith(".csv") and "metadatos" not in f.lower()
+                    f for f in z.namelist() if f.endswith(".csv") and "metadatos" not in f.lower()
                 ]
 
             csv_name = csv_candidates[0]
@@ -229,9 +210,9 @@ class DenueProcessor:
                         )
                         logs["steps"]["encoding"] = "LATIN-1 (Fallback)"
                     except Exception:
-                        sanitized_data = raw_bytes.decode(
-                            "latin-1", errors="replace"
-                        ).encode("utf-8")
+                        sanitized_data = raw_bytes.decode("latin-1", errors="replace").encode(
+                            "utf-8"
+                        )
                         df = pl.read_csv(
                             sanitized_data,
                             infer_schema_length=0,
@@ -262,9 +243,7 @@ class DenueProcessor:
 
         # 2. Aliases y Validación de estructura
         applied_aliases = {
-            k: v
-            for k, v in COLUMN_ALIASES.items()
-            if k in df.columns and v not in df.columns
+            k: v for k, v in COLUMN_ALIASES.items() if k in df.columns and v not in df.columns
         }
         if applied_aliases:
             df = df.rename(applied_aliases)
@@ -277,8 +256,7 @@ class DenueProcessor:
         initial_count = df.height
         required_mask = pl.all_horizontal(
             [
-                pl.col(c).is_not_null()
-                & (pl.col(c).cast(pl.Utf8).str.strip_chars() != "")
+                pl.col(c).is_not_null() & (pl.col(c).cast(pl.Utf8).str.strip_chars() != "")
                 for c in REQUIRED_COLUMNS
             ]
         )
@@ -288,8 +266,7 @@ class DenueProcessor:
 
         # 5. Selección de MASTER_COLUMNS
         selection = [
-            pl.col(c) if c in df.columns else pl.lit(None).alias(c)
-            for c in MASTER_COLUMNS
+            pl.col(c) if c in df.columns else pl.lit(None).alias(c) for c in MASTER_COLUMNS
         ]
         df = df.select(selection)
 
@@ -364,9 +341,7 @@ class DenueProcessor:
     def run_pipeline(self, force: bool = False):
         """Orquestador con log detallado y métricas de sesión."""
         if force:
-            logger.warning(
-                "⚠️ MODO FORCE ACTIVADO: Se re-procesarán todos los archivos en disco."
-            )
+            logger.warning("⚠️ MODO FORCE ACTIVADO: Se re-procesarán todos los archivos en disco.")
             self._bootstrap_seeds(force=True)
             time.sleep(3)
             tasks = self.report_mgr.download_report.get_raw_tasks(force=True)

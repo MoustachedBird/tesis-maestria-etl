@@ -10,25 +10,25 @@ Environment Variables:
 """
 
 import os
-import pytest
-import duckdb
 from datetime import date
+
+import duckdb
+import pytest
 from sqlalchemy import inspect
 
-from src_etl.db.models import (
-    Establecimiento,
-    Entidad,
-    Municipio,
-    Localidad,
-    ActividadEconomica,
-)
 from src_etl.db.enums import (
-    TipoVial,
+    PersonalOcupado,
     TipoAsentamiento,
     TipoUnidadEconomica,
-    PersonalOcupado,
+    TipoVial,
 )
-
+from src_etl.db.models import (
+    ActividadEconomica,
+    Entidad,
+    Establecimiento,
+    Localidad,
+    Municipio,
+)
 
 # ============================================================================
 # CONFIGURATION
@@ -291,9 +291,7 @@ def sample_localidad() -> Localidad:
     Returns:
         Localidad instance
     """
-    return Localidad(
-        cve_ent="09", cve_mun="015", cve_loc="0001", localidad="CIUDAD DE MÉXICO"
-    )
+    return Localidad(cve_ent="09", cve_mun="015", cve_loc="0001", localidad="CIUDAD DE MÉXICO")
 
 
 @pytest.fixture
@@ -371,9 +369,7 @@ def query_helper(production_db):
 
         def count_establecimientos(self) -> int:
             """Get total count of establishments."""
-            return self.conn.execute(
-                "SELECT COUNT(*) FROM establecimientos"
-            ).fetchone()[0]
+            return self.conn.execute("SELECT COUNT(*) FROM establecimientos").fetchone()[0]
 
         def count_by_state(self, cve_ent: str) -> int:
             """Get count of establishments in specific state."""

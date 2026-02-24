@@ -5,20 +5,18 @@ Integrates Phase 2 components with existing architecture.
 """
 
 import os
-import uuid
 from pathlib import Path
-from typing import List, Tuple, Optional
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
-from src_etl.utils.browser import get_chrome_driver
-from src_etl.utils.denue_scraping import scrape_denue_table
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import TaskStatus, ErrorType
-from src_etl.utils.downloader import Downloader
 from src_etl.core.download_config import DownloadConfig
 from src_etl.core.logging import StructuredLogger
+from src_etl.utils.browser import get_chrome_driver
+from src_etl.utils.denue_scraping import scrape_denue_table
+from src_etl.utils.downloader import Downloader
+from src_metadata.models import TaskStatus
+from src_metadata.tracker import MetadataTracker
 
 
 class DenueDownloader:
@@ -37,7 +35,7 @@ class DenueDownloader:
         self,
         output_dir: Path,
         headless: bool = True,
-        config: Optional[DownloadConfig] = None,
+        config: DownloadConfig | None = None,
         force: bool = False,
     ):
         """Initialize DENUE downloader."""
@@ -70,8 +68,8 @@ class DenueDownloader:
         self.console = Console()
 
         # Run context
-        self.run_id: Optional[str] = None
-        self.logger: Optional[StructuredLogger] = None
+        self.run_id: str | None = None
+        self.logger: StructuredLogger | None = None
 
     def download_all(self) -> dict:
         """
@@ -98,7 +96,7 @@ class DenueDownloader:
         )
         log = self.logger.get_logger()
 
-        self.console.print(f"\n🚀 [bold cyan]DENUE Download System[/bold cyan]")
+        self.console.print("\n🚀 [bold cyan]DENUE Download System[/bold cyan]")
         self.console.print(f"📁 Output: {self.output_dir}")
         self.console.print(f"🆔 Run ID: {self.run_id}\n")
 
@@ -134,7 +132,7 @@ class DenueDownloader:
             self.tracker.complete_run(self.run_id)
             raise
 
-    def _scrape_download_tasks(self, log) -> List[Tuple[str, str, str]]:
+    def _scrape_download_tasks(self, log) -> list[tuple[str, str, str]]:
         """Scrape INEGI website for download tasks."""
         self.console.print("🔍 [yellow]Scraping INEGI website...[/yellow]")
 
@@ -167,7 +165,7 @@ class DenueDownloader:
             if driver:
                 driver.quit()
 
-    def _download_tasks(self, tasks: List[Tuple[str, str, str]], log):
+    def _download_tasks(self, tasks: list[tuple[str, str, str]], log):
         """Download tasks with progress tracking."""
         # Create download tasks in metadata
         task_mappings = []

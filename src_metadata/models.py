@@ -7,9 +7,10 @@ and serialization.
 """
 
 from datetime import datetime
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JobStatus(str, Enum):
@@ -59,12 +60,12 @@ class JobRun(BaseModel):
     job_name: str = Field(..., description="Name of the job (e.g., 'denue_downloader')")
     job_type: str = Field(..., description="Type of job: DOWNLOAD, PROCESS, HARMONIZE")
     run_date: datetime = Field(..., description="Date/time when run was scheduled")
-    start_time: Optional[datetime] = Field(None, description="Actual start time")
-    end_time: Optional[datetime] = Field(None, description="Actual end time")
-    duration_seconds: Optional[float] = Field(None, description="Total execution time")
+    start_time: datetime | None = Field(None, description="Actual start time")
+    end_time: datetime | None = Field(None, description="Actual end time")
+    duration_seconds: float | None = Field(None, description="Total execution time")
     status: JobStatus = Field(..., description="Current run status")
-    trigger_type: Optional[str] = Field(None, description="What triggered this run")
-    triggered_by: Optional[str] = Field(None, description="Who/what triggered this run")
+    trigger_type: str | None = Field(None, description="What triggered this run")
+    triggered_by: str | None = Field(None, description="Who/what triggered this run")
 
     # Aggregated metrics
     total_tasks: int = Field(0, description="Total number of tasks")
@@ -74,13 +75,11 @@ class JobRun(BaseModel):
 
     # Resource metrics
     total_bytes_downloaded: int = Field(0, description="Total bytes downloaded")
-    avg_download_speed_mbps: Optional[float] = Field(
-        None, description="Average download speed"
-    )
+    avg_download_speed_mbps: float | None = Field(None, description="Average download speed")
 
     # Additional context
-    config: Optional[Dict[str, Any]] = Field(None, description="Run configuration")
-    error_summary: Optional[str] = Field(None, description="Summary of errors if any")
+    config: dict[str, Any] | None = Field(None, description="Run configuration")
+    error_summary: str | None = Field(None, description="Summary of errors if any")
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -101,40 +100,36 @@ class DownloadTask(BaseModel):
     # File information
     source_url: str = Field(..., description="URL to download from")
     target_path: str = Field(..., description="Local file path destination")
-    period: Optional[str] = Field(None, description="Data period (e.g., '2024_11')")
+    period: str | None = Field(None, description="Data period (e.g., '2024_11')")
 
     # Execution tracking
     status: TaskStatus = Field(..., description="Current task status")
-    start_time: Optional[datetime] = Field(None, description="Task start time")
-    end_time: Optional[datetime] = Field(None, description="Task end time")
-    duration_seconds: Optional[float] = Field(None, description="Execution duration")
+    start_time: datetime | None = Field(None, description="Task start time")
+    end_time: datetime | None = Field(None, description="Task end time")
+    duration_seconds: float | None = Field(None, description="Execution duration")
 
     # Retry configuration
     attempt_number: int = Field(1, description="Current attempt number")
     max_retries: int = Field(5, description="Maximum retry attempts")
-    retry_strategy: Optional[str] = Field(None, description="Retry strategy used")
-    next_retry_time: Optional[datetime] = Field(
-        None, description="Scheduled next retry"
-    )
+    retry_strategy: str | None = Field(None, description="Retry strategy used")
+    next_retry_time: datetime | None = Field(None, description="Scheduled next retry")
 
     # File validation
-    file_size_bytes: Optional[int] = Field(None, description="Actual file size")
-    expected_size_bytes: Optional[int] = Field(None, description="Expected file size")
-    sha256_hash: Optional[str] = Field(None, description="Calculated SHA256 hash")
-    expected_sha256: Optional[str] = Field(None, description="Expected SHA256 hash")
-    validation_status: Optional[str] = Field(None, description="Validation result")
-    validation_errors: Optional[str] = Field(
-        None, description="Validation error details"
-    )
+    file_size_bytes: int | None = Field(None, description="Actual file size")
+    expected_size_bytes: int | None = Field(None, description="Expected file size")
+    sha256_hash: str | None = Field(None, description="Calculated SHA256 hash")
+    expected_sha256: str | None = Field(None, description="Expected SHA256 hash")
+    validation_status: str | None = Field(None, description="Validation result")
+    validation_errors: str | None = Field(None, description="Validation error details")
 
     # Performance metrics
-    download_speed_mbps: Optional[float] = Field(None, description="Download speed")
-    network_latency_ms: Optional[int] = Field(None, description="Network latency")
+    download_speed_mbps: float | None = Field(None, description="Download speed")
+    network_latency_ms: int | None = Field(None, description="Network latency")
 
     # Error handling
-    error_type: Optional[ErrorType] = Field(None, description="Error classification")
-    error_message: Optional[str] = Field(None, description="Error message")
-    error_traceback: Optional[str] = Field(None, description="Full error traceback")
+    error_type: ErrorType | None = Field(None, description="Error classification")
+    error_message: str | None = Field(None, description="Error message")
+    error_traceback: str | None = Field(None, description="Full error traceback")
     is_retryable: bool = Field(True, description="Whether task can be retried")
 
     model_config = ConfigDict(use_enum_values=True)
@@ -152,9 +147,9 @@ class DownloadResult(BaseModel):
     task_id: str = Field(..., description="Associated task ID")
 
     # File information
-    file_path: Optional[str] = Field(None, description="Path to downloaded file")
+    file_path: str | None = Field(None, description="Path to downloaded file")
     file_size_bytes: int = Field(0, description="File size in bytes")
-    sha256_hash: Optional[str] = Field(None, description="Calculated file hash")
+    sha256_hash: str | None = Field(None, description="Calculated file hash")
 
     # Performance metrics
     duration_seconds: float = Field(0, description="Download duration")
@@ -164,8 +159,8 @@ class DownloadResult(BaseModel):
     attempt_number: int = Field(1, description="Which attempt this was")
 
     # Error information
-    error_type: Optional[ErrorType] = Field(None, description="Error classification")
-    error_message: Optional[str] = Field(None, description="Error details")
+    error_type: ErrorType | None = Field(None, description="Error classification")
+    error_message: str | None = Field(None, description="Error details")
 
     # Validation
     validation_passed: bool = Field(False, description="Whether validation passed")
@@ -183,29 +178,27 @@ class DataLineage(BaseModel):
 
     lineage_id: str = Field(..., description="Unique lineage identifier")
     run_id: str = Field(..., description="Associated job run")
-    task_id: Optional[str] = Field(None, description="Associated task")
+    task_id: str | None = Field(None, description="Associated task")
 
     # Source information
     source_type: str = Field(..., description="Source type: WEB, API, FILE, DATABASE")
     source_location: str = Field(..., description="Source location/URL")
-    source_checksum: Optional[str] = Field(None, description="Source data checksum")
+    source_checksum: str | None = Field(None, description="Source data checksum")
 
     # Target information
     target_type: str = Field(..., description="Target type: FILE, TABLE, OBJECT_STORE")
     target_location: str = Field(..., description="Target location/path")
-    target_checksum: Optional[str] = Field(None, description="Target data checksum")
+    target_checksum: str | None = Field(None, description="Target data checksum")
 
     # Transformation
-    transformation: Optional[str] = Field(None, description="Transformation applied")
+    transformation: str | None = Field(None, description="Transformation applied")
 
     # Metrics
-    rows_read: Optional[int] = Field(None, description="Number of rows read")
-    rows_written: Optional[int] = Field(None, description="Number of rows written")
-    bytes_processed: Optional[int] = Field(None, description="Bytes processed")
+    rows_read: int | None = Field(None, description="Number of rows read")
+    rows_written: int | None = Field(None, description="Number of rows written")
+    bytes_processed: int | None = Field(None, description="Bytes processed")
 
-    created_at: datetime = Field(
-        default_factory=datetime.now, description="Creation time"
-    )
+    created_at: datetime = Field(default_factory=datetime.now, description="Creation time")
 
 
 class ProcessTask(BaseModel):
@@ -220,31 +213,27 @@ class ProcessTask(BaseModel):
     run_id: str = Field(..., description="Parent job run ID")
     task_name: str = Field(..., description="Human-readable task name")
     source_path: str = Field(..., description="Path to source ZIP file")
-    target_table: Optional[str] = Field(None, description="Target warehouse table")
-    period: Optional[str] = Field(None, description="Data period (e.g., '2024_11')")
+    target_table: str | None = Field(None, description="Target warehouse table")
+    period: str | None = Field(None, description="Data period (e.g., '2024_11')")
 
     # Execution tracking
-    start_time: Optional[datetime] = Field(None, description="Task start time")
-    end_time: Optional[datetime] = Field(None, description="Task end time")
-    duration_seconds: Optional[float] = Field(None, description="Execution duration")
+    start_time: datetime | None = Field(None, description="Task start time")
+    end_time: datetime | None = Field(None, description="Task end time")
+    duration_seconds: float | None = Field(None, description="Execution duration")
     status: TaskStatus = Field(..., description="Current task status")
 
     # Processing metrics
-    rows_extracted: Optional[int] = Field(None, description="Rows extracted from ZIP")
-    rows_loaded: Optional[int] = Field(None, description="Rows loaded to warehouse")
-    rows_rejected: Optional[int] = Field(None, description="Rows rejected (validation)")
-    file_size_bytes: Optional[int] = Field(None, description="Source file size")
+    rows_extracted: int | None = Field(None, description="Rows extracted from ZIP")
+    rows_loaded: int | None = Field(None, description="Rows loaded to warehouse")
+    rows_rejected: int | None = Field(None, description="Rows rejected (validation)")
+    file_size_bytes: int | None = Field(None, description="Source file size")
 
     # Error handling
-    error_type: Optional[str] = Field(None, description="Error classification")
-    error_message: Optional[str] = Field(None, description="Error details")
+    error_type: str | None = Field(None, description="Error classification")
+    error_message: str | None = Field(None, description="Error details")
 
-    created_at: datetime = Field(
-        default_factory=datetime.now, description="Creation time"
-    )
-    updated_at: datetime = Field(
-        default_factory=datetime.now, description="Last update time"
-    )
+    created_at: datetime = Field(default_factory=datetime.now, description="Creation time")
+    updated_at: datetime = Field(default_factory=datetime.now, description="Last update time")
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -264,41 +253,33 @@ class HarmonizeTask(BaseModel):
     state_list: str = Field(..., description="JSON array of states")
 
     # Execution tracking
-    start_time: Optional[datetime] = Field(None, description="Task start time")
-    end_time: Optional[datetime] = Field(None, description="Task end time")
-    duration_seconds: Optional[float] = Field(None, description="Execution duration")
+    start_time: datetime | None = Field(None, description="Task start time")
+    end_time: datetime | None = Field(None, description="Task end time")
+    duration_seconds: float | None = Field(None, description="Execution duration")
     status: TaskStatus = Field(..., description="Current task status")
 
     # Harmonization metrics
-    entities_input: Optional[int] = Field(None, description="Input entities")
-    entities_matched: Optional[int] = Field(None, description="Matched entities")
-    entities_new: Optional[int] = Field(None, description="New entities discovered")
-    master_clees_created: Optional[int] = Field(
-        None, description="Master CLEEs created"
-    )
-    periods_processed: Optional[int] = Field(None, description="Number of periods")
-    match_confidence_avg: Optional[float] = Field(
-        None, description="Avg match confidence"
-    )
+    entities_input: int | None = Field(None, description="Input entities")
+    entities_matched: int | None = Field(None, description="Matched entities")
+    entities_new: int | None = Field(None, description="New entities discovered")
+    master_clees_created: int | None = Field(None, description="Master CLEEs created")
+    periods_processed: int | None = Field(None, description="Number of periods")
+    match_confidence_avg: float | None = Field(None, description="Avg match confidence")
 
     # Quality metrics
-    spatial_matches: Optional[int] = Field(None, description="Spatial-based matches")
-    identity_matches: Optional[int] = Field(None, description="Identity-based matches")
-    activity_matches: Optional[int] = Field(None, description="Activity-based matches")
+    spatial_matches: int | None = Field(None, description="Spatial-based matches")
+    identity_matches: int | None = Field(None, description="Identity-based matches")
+    activity_matches: int | None = Field(None, description="Activity-based matches")
 
     # Output
-    output_path: Optional[str] = Field(None, description="Output file path")
+    output_path: str | None = Field(None, description="Output file path")
 
     # Error handling
-    error_type: Optional[str] = Field(None, description="Error classification")
-    error_message: Optional[str] = Field(None, description="Error details")
+    error_type: str | None = Field(None, description="Error classification")
+    error_message: str | None = Field(None, description="Error details")
 
-    created_at: datetime = Field(
-        default_factory=datetime.now, description="Creation time"
-    )
-    updated_at: datetime = Field(
-        default_factory=datetime.now, description="Last update time"
-    )
+    created_at: datetime = Field(default_factory=datetime.now, description="Creation time")
+    updated_at: datetime = Field(default_factory=datetime.now, description="Last update time")
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -315,23 +296,23 @@ class RunSummary(BaseModel):
     job_name: str
     job_type: str
     status: JobStatus
-    duration_seconds: Optional[float] = None
+    duration_seconds: float | None = None
 
     # Task statistics
     total_tasks: int = 0
     tasks_succeeded: int = 0
     tasks_failed: int = 0
     tasks_skipped: int = 0
-    success_rate: Optional[float] = None
+    success_rate: float | None = None
 
     # Performance metrics
     total_bytes_downloaded: int = 0
-    total_size_mb: Optional[float] = None
-    avg_download_speed_mbps: Optional[float] = None
+    total_size_mb: float | None = None
+    avg_download_speed_mbps: float | None = None
 
     # Time information
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
     model_config = ConfigDict(use_enum_values=True)
 

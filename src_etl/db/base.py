@@ -7,8 +7,6 @@ and database engine configuration following FastAPI best practices.
 
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
-from typing import Any
-
 
 # Consistent naming convention for constraints
 # This ensures that constraint names are predictable and follow best practices

@@ -8,31 +8,21 @@ The schema matches the DuckDB warehouse structure with all 38 columns for establ
 and proper catalog tables for geographic and economic classifications.
 """
 
-from sqlalchemy import (
-    Column,
-    Integer,
-    String,
-    Float,
-    Date,
-    DateTime,
-    Boolean,
-    Text,
-    ForeignKey,
-    Index,
-    CheckConstraint,
-)
-from sqlalchemy.orm import mapped_column, Mapped, relationship
-from sqlalchemy.sql import func
-from datetime import datetime, date
-from typing import Optional
 import re
+from datetime import date
+
+from sqlalchemy import (
+    Date,
+    Float,
+    Index,
+    String,
+)
+from sqlalchemy.orm import Mapped, mapped_column
 
 from src_etl.db.base import Base
 from src_etl.db.enums import (
-    TipoVial,
-    TipoAsentamiento,
-    TipoUnidadEconomica,
     PersonalOcupado,
+    TipoUnidadEconomica,
 )
 
 
@@ -58,132 +48,108 @@ class Establecimiento(Base):
     )
 
     # ===== IDENTIFICATION =====
-    clee: Mapped[Optional[str]] = mapped_column(
+    clee: Mapped[str | None] = mapped_column(
         String, index=True, comment="CLEE - Clave Larga de Establecimiento Económico"
     )
-    nom_estab: Mapped[Optional[str]] = mapped_column(
-        String(500), comment="Establishment name"
-    )
-    raz_social: Mapped[Optional[str]] = mapped_column(
+    nom_estab: Mapped[str | None] = mapped_column(String(500), comment="Establishment name")
+    raz_social: Mapped[str | None] = mapped_column(
         String(500), comment="Business legal name (razón social)"
     )
 
     # ===== ECONOMIC ACTIVITY =====
-    codigo_act: Mapped[Optional[str]] = mapped_column(
+    codigo_act: Mapped[str | None] = mapped_column(
         String(10), index=True, comment="SCIAN economic activity code"
     )
 
     # ===== ESTABLISHMENT TYPE & SIZE =====
-    tipounieco: Mapped[Optional[str]] = mapped_column(
+    tipounieco: Mapped[str | None] = mapped_column(
         String(20), comment="Economic unit type: FIJO, SEMIFIJO, NINGUNO"
     )
-    per_ocu: Mapped[Optional[str]] = mapped_column(
+    per_ocu: Mapped[str | None] = mapped_column(
         String(50), comment="Personnel occupied (employee count range)"
     )
 
     # ===== ADDRESS COMPONENTS =====
     # Main street/road
-    tipo_vial: Mapped[Optional[str]] = mapped_column(
+    tipo_vial: Mapped[str | None] = mapped_column(
         String(50), comment="Road type (CALLE, AVENIDA, BOULEVARD, etc.)"
     )
-    nom_vial: Mapped[Optional[str]] = mapped_column(
-        String(200), comment="Road/street name"
-    )
+    nom_vial: Mapped[str | None] = mapped_column(String(200), comment="Road/street name")
 
     # Intersecting streets (up to 3)
-    tipo_v_e_1: Mapped[Optional[str]] = mapped_column(
+    tipo_v_e_1: Mapped[str | None] = mapped_column(
         String(50), comment="Type of 1st intersecting street"
     )
-    nom_v_e_1: Mapped[Optional[str]] = mapped_column(
+    nom_v_e_1: Mapped[str | None] = mapped_column(
         String(200), comment="Name of 1st intersecting street"
     )
-    tipo_v_e_2: Mapped[Optional[str]] = mapped_column(
+    tipo_v_e_2: Mapped[str | None] = mapped_column(
         String(50), comment="Type of 2nd intersecting street"
     )
-    nom_v_e_2: Mapped[Optional[str]] = mapped_column(
+    nom_v_e_2: Mapped[str | None] = mapped_column(
         String(200), comment="Name of 2nd intersecting street"
     )
-    tipo_v_e_3: Mapped[Optional[str]] = mapped_column(
+    tipo_v_e_3: Mapped[str | None] = mapped_column(
         String(50), comment="Type of 3rd intersecting street"
     )
-    nom_v_e_3: Mapped[Optional[str]] = mapped_column(
+    nom_v_e_3: Mapped[str | None] = mapped_column(
         String(200), comment="Name of 3rd intersecting street"
     )
 
     # Building/location details
-    numero_ext: Mapped[Optional[str]] = mapped_column(
-        String(20), comment="External number"
-    )
-    letra_ext: Mapped[Optional[str]] = mapped_column(
+    numero_ext: Mapped[str | None] = mapped_column(String(20), comment="External number")
+    letra_ext: Mapped[str | None] = mapped_column(
         String(10), comment="External number letter/suffix"
     )
-    edificio: Mapped[Optional[str]] = mapped_column(
-        String(100), comment="Building name"
-    )
-    edificio_e: Mapped[Optional[str]] = mapped_column(
-        String(100), comment="Building name (extended)"
-    )
-    numero_int: Mapped[Optional[str]] = mapped_column(
-        String(20), comment="Internal/apartment number"
-    )
-    letra_int: Mapped[Optional[str]] = mapped_column(
+    edificio: Mapped[str | None] = mapped_column(String(100), comment="Building name")
+    edificio_e: Mapped[str | None] = mapped_column(String(100), comment="Building name (extended)")
+    numero_int: Mapped[str | None] = mapped_column(String(20), comment="Internal/apartment number")
+    letra_int: Mapped[str | None] = mapped_column(
         String(10), comment="Internal number letter/suffix"
     )
 
     # Settlement/neighborhood
-    tipo_asent: Mapped[Optional[str]] = mapped_column(
+    tipo_asent: Mapped[str | None] = mapped_column(
         String(50), comment="Settlement type (COLONIA, FRACCIONAMIENTO, etc.)"
     )
-    nomb_asent: Mapped[Optional[str]] = mapped_column(
+    nomb_asent: Mapped[str | None] = mapped_column(
         String(200), comment="Settlement/neighborhood name"
     )
 
     # Shopping center
-    nom_cencom: Mapped[Optional[str]] = mapped_column(
-        String(200), comment="Shopping center name"
-    )
-    num_local: Mapped[Optional[str]] = mapped_column(
+    nom_cencom: Mapped[str | None] = mapped_column(String(200), comment="Shopping center name")
+    num_local: Mapped[str | None] = mapped_column(
         String(20), comment="Local/store number within shopping center"
     )
 
     # Postal code
-    cod_postal: Mapped[Optional[str]] = mapped_column(
+    cod_postal: Mapped[str | None] = mapped_column(
         String(5), index=True, comment="5-digit postal code"
     )
 
     # ===== GEOGRAPHIC CODES (ADMINISTRATIVE DIVISIONS) =====
-    cve_ent: Mapped[Optional[str]] = mapped_column(
+    cve_ent: Mapped[str | None] = mapped_column(
         String(2), index=True, comment="State code (entidad federativa)"
     )
-    cve_mun: Mapped[Optional[str]] = mapped_column(
-        String(3), index=True, comment="Municipality code"
-    )
-    cve_loc: Mapped[Optional[str]] = mapped_column(String(4), comment="Locality code")
-    ageb: Mapped[Optional[str]] = mapped_column(
-        String(4), comment="AGEB - Área Geoestadística Básica"
-    )
-    manzana: Mapped[Optional[str]] = mapped_column(
-        String(3), comment="Block (manzana) code"
-    )
+    cve_mun: Mapped[str | None] = mapped_column(String(3), index=True, comment="Municipality code")
+    cve_loc: Mapped[str | None] = mapped_column(String(4), comment="Locality code")
+    ageb: Mapped[str | None] = mapped_column(String(4), comment="AGEB - Área Geoestadística Básica")
+    manzana: Mapped[str | None] = mapped_column(String(3), comment="Block (manzana) code")
 
     # ===== GEOGRAPHIC COORDINATES =====
-    latitud: Mapped[Optional[float]] = mapped_column(Float, comment="Latitude (WGS84)")
-    longitud: Mapped[Optional[float]] = mapped_column(
-        Float, comment="Longitude (WGS84)"
-    )
+    latitud: Mapped[float | None] = mapped_column(Float, comment="Latitude (WGS84)")
+    longitud: Mapped[float | None] = mapped_column(Float, comment="Longitude (WGS84)")
 
     # ===== CONTACT INFORMATION =====
-    telefono: Mapped[Optional[str]] = mapped_column(String(50), comment="Phone number")
-    correoelec: Mapped[Optional[str]] = mapped_column(
-        String(200), comment="Email address"
-    )
-    www: Mapped[Optional[str]] = mapped_column(String(200), comment="Website URL")
+    telefono: Mapped[str | None] = mapped_column(String(50), comment="Phone number")
+    correoelec: Mapped[str | None] = mapped_column(String(200), comment="Email address")
+    www: Mapped[str | None] = mapped_column(String(200), comment="Website URL")
 
     # ===== TEMPORAL TRACKING =====
-    fecha_alta: Mapped[Optional[str]] = mapped_column(
+    fecha_alta: Mapped[str | None] = mapped_column(
         String(10), comment="Registration date in DENUE (YYYY-MM format)"
     )
-    period: Mapped[Optional[date]] = mapped_column(
+    period: Mapped[date | None] = mapped_column(
         Date, index=True, comment="Data period/snapshot date"
     )
 
@@ -341,7 +307,7 @@ class Establecimiento(Base):
         except ValueError:
             return "Unknown"
 
-    def get_scian_sector(self) -> Optional[str]:
+    def get_scian_sector(self) -> str | None:
         """
         Extract SCIAN sector (2-digit code) from full activity code.
 
@@ -356,7 +322,7 @@ class Establecimiento(Base):
             return None
         return self.codigo_act[:2]
 
-    def get_scian_subsector(self) -> Optional[str]:
+    def get_scian_subsector(self) -> str | None:
         """
         Extract SCIAN subsector (3-digit code) from full activity code.
 
@@ -389,7 +355,7 @@ class Establecimiento(Base):
         """
         return bool(self.telefono or self.correoelec or self.www)
 
-    def get_registration_year(self) -> Optional[int]:
+    def get_registration_year(self) -> int | None:
         """
         Extract year from fecha_alta (registration date).
 
@@ -409,7 +375,7 @@ class Establecimiento(Base):
             return int(match.group(1))
         return None
 
-    def get_geo_hierarchy(self) -> dict[str, Optional[str]]:
+    def get_geo_hierarchy(self) -> dict[str, str | None]:
         """
         Get complete geographic administrative hierarchy.
 
@@ -462,12 +428,8 @@ class Entidad(Base):
 
     __tablename__ = "denue_entidades"
 
-    cve_ent: Mapped[str] = mapped_column(
-        String(2), primary_key=True, comment="State code"
-    )
-    entidad: Mapped[str] = mapped_column(
-        String(100), nullable=False, comment="State name"
-    )
+    cve_ent: Mapped[str] = mapped_column(String(2), primary_key=True, comment="State code")
+    entidad: Mapped[str] = mapped_column(String(100), nullable=False, comment="State name")
 
     def __repr__(self) -> str:
         return f"<Entidad(cve={self.cve_ent}, nombre={self.entidad})>"
@@ -483,21 +445,17 @@ class Municipio(Base):
     __tablename__ = "denue_municipios"
 
     # Composite Primary Key
-    cve_ent: Mapped[str] = mapped_column(
-        String(2), primary_key=True, comment="State code"
-    )
-    cve_mun: Mapped[str] = mapped_column(
-        String(3), primary_key=True, comment="Municipality code"
-    )
+    cve_ent: Mapped[str] = mapped_column(String(2), primary_key=True, comment="State code")
+    cve_mun: Mapped[str] = mapped_column(String(3), primary_key=True, comment="Municipality code")
 
-    municipio: Mapped[str] = mapped_column(
-        String(100), nullable=False, comment="Municipality name"
-    )
+    municipio: Mapped[str] = mapped_column(String(100), nullable=False, comment="Municipality name")
 
     __table_args__ = (Index("ix_municipio_nombre", "municipio"),)
 
     def __repr__(self) -> str:
-        return f"<Municipio(cve_ent={self.cve_ent}, cve_mun={self.cve_mun}, nombre={self.municipio})>"
+        return (
+            f"<Municipio(cve_ent={self.cve_ent}, cve_mun={self.cve_mun}, nombre={self.municipio})>"
+        )
 
 
 class Localidad(Base):
@@ -510,19 +468,11 @@ class Localidad(Base):
     __tablename__ = "denue_localidades"
 
     # Composite Primary Key
-    cve_ent: Mapped[str] = mapped_column(
-        String(2), primary_key=True, comment="State code"
-    )
-    cve_mun: Mapped[str] = mapped_column(
-        String(3), primary_key=True, comment="Municipality code"
-    )
-    cve_loc: Mapped[str] = mapped_column(
-        String(4), primary_key=True, comment="Locality code"
-    )
+    cve_ent: Mapped[str] = mapped_column(String(2), primary_key=True, comment="State code")
+    cve_mun: Mapped[str] = mapped_column(String(3), primary_key=True, comment="Municipality code")
+    cve_loc: Mapped[str] = mapped_column(String(4), primary_key=True, comment="Locality code")
 
-    localidad: Mapped[str] = mapped_column(
-        String(100), nullable=False, comment="Locality name"
-    )
+    localidad: Mapped[str] = mapped_column(String(100), nullable=False, comment="Locality name")
 
     __table_args__ = (Index("ix_localidad_nombre", "localidad"),)
 

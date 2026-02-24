@@ -1,24 +1,25 @@
-import polars as pl
-import logging
 import gc
+import logging
 from pathlib import Path
-from src_etl.reports.reporter import ReportManager
-from src_etl.utils.matching import clean_contact_columns
 
-# Importamos la refactorización
-from src_etl.utils.harmonizer_config import (
-    MEGA_REGIONS,
-    SILVER_SCHEMA,
-    COLS_NEEDED_FOR_MATCHING,
-    TEXT_COLS_TO_SANITIZE,
-)
+import polars as pl
+
+from src_etl.reports.reporter import ReportManager
 from src_etl.utils.entity_resolution import (
+    consolidate_global_catalog_lazy,
     get_region_prefix,
     initialize_knowledge_base,
     resolve_period_logic,
     update_kb_logic,
-    consolidate_global_catalog_lazy,
 )
+
+# Importamos la refactorización
+from src_etl.utils.harmonizer_config import (
+    COLS_NEEDED_FOR_MATCHING,
+    MEGA_REGIONS,
+    TEXT_COLS_TO_SANITIZE,
+)
+from src_etl.utils.matching import clean_contact_columns
 
 
 class DenueHarmonizer:
@@ -48,9 +49,7 @@ class DenueHarmonizer:
         self.logger.setLevel(logging.INFO)
 
         if not self.logger.handlers:
-            formatter = logging.Formatter(
-                "%(asctime)s - %(message)s", datefmt="%H:%M:%S"
-            )
+            formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%H:%M:%S")
 
             # Handler para Consola
             console_handler = logging.StreamHandler()
@@ -60,9 +59,7 @@ class DenueHarmonizer:
             # Handler para Archivo (Ubicado en data/curated/denue/)
             # El modo 'a' (append) permite continuar el log si el proceso se reinicia
             try:
-                file_handler = logging.FileHandler(
-                    self.log_path, mode="a", encoding="utf-8"
-                )
+                file_handler = logging.FileHandler(self.log_path, mode="a", encoding="utf-8")
                 file_handler.setFormatter(formatter)
                 self.logger.addHandler(file_handler)
             except Exception as e:
@@ -83,9 +80,7 @@ class DenueHarmonizer:
             current_group = [s for s in states_in_region if s in available_states]
             if current_group:
                 groups.append(current_group)
-                self.logger.info(
-                    f"🔗 Mega-Región detectada ({region_name}): {current_group}"
-                )
+                self.logger.info(f"🔗 Mega-Región detectada ({region_name}): {current_group}")
                 handled_states.update(current_group)
 
         for state in sorted(list(available_states)):
@@ -120,9 +115,7 @@ class DenueHarmonizer:
                         file_path, columns=cols_to_read, hive_partitioning=True
                     ).with_columns(
                         # Guardamos la ruta relativa al proyecto para trazabilidad limpia
-                        pl.lit(str(file_path.relative_to(self.root))).alias(
-                            "source_paths"
-                        )
+                        pl.lit(str(file_path.relative_to(self.root))).alias("source_paths")
                     )
                     dfs.append(df_part)
 
@@ -137,11 +130,7 @@ class DenueHarmonizer:
 
         # Sanitización de nulos en columnas de texto
         full_df = full_df.with_columns(
-            [
-                pl.col(c).fill_null("")
-                for c in TEXT_COLS_TO_SANITIZE
-                if c in full_df.columns
-            ]
+            [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in full_df.columns]
         )
 
         return clean_contact_columns(full_df)
@@ -168,9 +157,7 @@ class DenueHarmonizer:
         dict_dfs = {p: df_group.filter(pl.col("period") == p) for p in periods}
 
         # --- Llamadas al Core ---
-        self.logger.info(
-            f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}..."
-        )
+        self.logger.info(f"      🌱 Sembrando Knowledge Base (KB) con año base: {periods[0]}...")
         map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
         self.logger.info(f"         📚 Entidades iniciales en memoria: {kb.height:,}")
 
@@ -183,9 +170,7 @@ class DenueHarmonizer:
             self.logger.info(
                 f"      🔄 [{i}/{len(periods) - 1}] Analizando periodo {period} ({target_rows:,} negocios)..."
             )
-            self.logger.info(
-                f"         ↳ Propagando CLEEs del futuro hacia {period}..."
-            )
+            self.logger.info(f"         ↳ Propagando CLEEs del futuro hacia {period}...")
 
             # Delegamos la matemática a harmonizer_core
             df_resolved = resolve_period_logic(
@@ -208,9 +193,7 @@ class DenueHarmonizer:
             self.logger.info(
                 f"            📈 Nuevas entidades (no estaban en el futuro): +{new_entities:,}"
             )
-            self.logger.info(
-                f"            📚 Total acumulado en KB: {kb.height:,} registros"
-            )
+            self.logger.info(f"            📚 Total acumulado en KB: {kb.height:,} registros")
             self.logger.info(f"         ✅ {period} Terminado.")
 
         return map_accum, kb
@@ -226,9 +209,7 @@ class DenueHarmonizer:
         all_groups = self.get_processing_groups()
 
         if incremental:
-            processed_partitions = (
-                self.report_mgr.process_report.get_harmonized_partitions()
-            )
+            processed_partitions = self.report_mgr.process_report.get_harmonized_partitions()
             groups_to_process = []
             for group in all_groups:
                 is_group_done = True
@@ -249,9 +230,7 @@ class DenueHarmonizer:
         for i, group in enumerate(groups_to_process, 1):
             prefix = get_region_prefix(group)
             group_name = "+".join(group)
-            self.logger.info(
-                f"🚀 [{i}/{len(groups_to_process)}] Procesando: {group_name}"
-            )
+            self.logger.info(f"🚀 [{i}/{len(groups_to_process)}] Procesando: {group_name}")
 
             group_map, group_kb = self.process_group(group)
 
@@ -266,12 +245,9 @@ class DenueHarmonizer:
 
                 if updated_paths:
                     status_updates = [
-                        {"partition_path": p, "status": "HARMONIZED"}
-                        for p in updated_paths
+                        {"partition_path": p, "status": "HARMONIZED"} for p in updated_paths
                     ]
-                    self.report_mgr.process_report.update_harmonization_status(
-                        status_updates
-                    )
+                    self.report_mgr.process_report.update_harmonization_status(status_updates)
 
             del group_map
             del group_kb
@@ -300,13 +276,9 @@ class DenueHarmonizer:
         master_kb = consolidate_global_catalog_lazy(lazy_frames).collect()
 
         master_kb.write_parquet(self.master_catalog_path)
-        self.logger.info(
-            f"🏆 Catálogo Maestro Guardado: {master_kb.height} entidades únicas."
-        )
+        self.logger.info(f"🏆 Catálogo Maestro Guardado: {master_kb.height} entidades únicas.")
 
-    def _save_local_results(
-        self, group: list[str], group_map: pl.DataFrame
-    ) -> list[str]:
+    def _save_local_results(self, group: list[str], group_map: pl.DataFrame) -> list[str]:
         """Helper privado. Retorna lista de partition_paths relativos actualizados."""
         lz_map = group_map.lazy()
         target_files = []
@@ -334,9 +306,7 @@ class DenueHarmonizer:
                 cols = ["clee"] + [c for c in df_curated.columns if c != "clee"]
                 df_curated.select(cols).write_parquet(dest_path, compression="snappy")
 
-                full_rel_path = str(
-                    file_path.relative_to(self.root)
-                )  # data/processed/denue/...
+                full_rel_path = str(file_path.relative_to(self.root))  # data/processed/denue/...
                 updated_paths.append(full_rel_path)
 
             except Exception as e:

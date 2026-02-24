@@ -4,9 +4,11 @@ Integration tests for DenueTransformer.
 Tests the unified transformer with real components (but mocked data).
 """
 
-import pytest
 import shutil
 from pathlib import Path
+
+import pytest
+
 from src_etl.transformers.denue import DenueTransformer
 
 # Path to the real seed files in the project

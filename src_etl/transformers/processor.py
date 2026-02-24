@@ -9,27 +9,26 @@ original DenueProcessor class, now integrated with MetadataTracker
 for comprehensive observability.
 """
 
-import zipfile
 import logging
 import sys
+import zipfile
 from pathlib import Path
-from datetime import datetime
-from typing import Optional, Dict, Any, Tuple
+from typing import Any
+
 import polars as pl
 
 from src_etl.loaders.denue import DataStoreManager
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import JobStatus, TaskStatus
 from src_etl.utils.denue_schema import (
-    MASTER_COLUMNS,
-    REQUIRED_COLUMNS,
     COLUMN_ALIASES,
     ENTITY_VALUE_NORMALIZATION,
     ENUM_CATALOGS,
-    DB_FACT_COLUMNS,
+    MASTER_COLUMNS,
+    REQUIRED_COLUMNS,
 )
+from src_metadata.models import JobStatus, TaskStatus
+from src_metadata.tracker import MetadataTracker
 
 # Setup logging
 log_file = Path("./data/etl_process.log")
@@ -57,7 +56,7 @@ class ProcessorStage:
         self,
         data_root: Path,
         tracker: MetadataTracker,
-        output_dir: Optional[Path] = None,
+        output_dir: Path | None = None,
     ):
         """
         Initialize processor stage.
@@ -167,7 +166,7 @@ class ProcessorStage:
             load_geography_seeds(conn, seeds_dir, force=force)
             load_scian_seeds(conn, seeds_dir, force=force)
 
-    def _clean_raw_data(self, zip_path: Path, period: str) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+    def _clean_raw_data(self, zip_path: Path, period: str) -> tuple[pl.DataFrame, dict[str, Any]]:
         """
         Clean and normalize data from a ZIP file.
 
@@ -259,7 +258,7 @@ class ProcessorStage:
         logs["stats"]["rows_final"] = df.height
         return df, logs
 
-    def process_zip(self, zip_path: Path, period: str) -> Tuple[str, str, int]:
+    def process_zip(self, zip_path: Path, period: str) -> tuple[str, str, int]:
         """
         Process a single ZIP file.
 

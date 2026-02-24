@@ -1,6 +1,8 @@
 import polars as pl
-from src_etl.utils.warehouse import BaseWarehouse
+
 from src_etl.utils.denue_schema import DB_FACT_COLUMNS, ENUM_CATALOGS
+from src_etl.utils.warehouse import BaseWarehouse
+
 
 class DataStoreManager(BaseWarehouse):
     def __init__(self, warehouse_path):
@@ -10,9 +12,18 @@ class DataStoreManager(BaseWarehouse):
     def validate_integrity(self, df: pl.DataFrame):
         """Validador Fail-fast en Polars."""
         for col, allowed in ENUM_CATALOGS.items():
-            invalid = df.select(col).unique().filter(~pl.col(col).is_in(allowed)).to_series().drop_nulls().to_list()
+            invalid = (
+                df.select(col)
+                .unique()
+                .filter(~pl.col(col).is_in(allowed))
+                .to_series()
+                .drop_nulls()
+                .to_list()
+            )
             if invalid:
-                raise ValueError(f"❌ Error de integridad en '{col}': valores {invalid} no permitidos.")
+                raise ValueError(
+                    f"❌ Error de integridad en '{col}': valores {invalid} no permitidos."
+                )
 
     def upsert(self, df: pl.DataFrame):
         self.validate_integrity(df)
@@ -45,4 +56,6 @@ class DataStoreManager(BaseWarehouse):
 
             cols_sql = ", ".join(DB_FACT_COLUMNS)
             # DuckDB ahora encontrará 'tipo_vial' en 'df' porque ya no buscamos 'id_tipo_vial'
-            conn.execute(f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {cols_sql} FROM df")
+            conn.execute(
+                f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {cols_sql} FROM df"
+            )

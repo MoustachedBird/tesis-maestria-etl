@@ -13,12 +13,12 @@ Provides:
 """
 
 from src_metadata.models import (
-    JobRun,
-    DownloadTask,
     DownloadResult,
+    DownloadTask,
+    ErrorType,
+    JobRun,
     JobStatus,
     TaskStatus,
-    ErrorType,
 )
 from src_metadata.tracker import MetadataTracker
 
