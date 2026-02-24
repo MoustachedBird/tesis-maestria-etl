@@ -12,7 +12,7 @@ Tests for all ORM models including:
 import pytest
 from sqlalchemy import inspect
 
-from src.db.models import (
+from src_etl.db.models import (
     Establecimiento,
     Entidad,
     Municipio,

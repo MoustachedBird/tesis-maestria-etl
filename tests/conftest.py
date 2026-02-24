@@ -15,14 +15,14 @@ import duckdb
 from datetime import date
 from sqlalchemy import inspect
 
-from src.db.models import (
+from src_etl.db.models import (
     Establecimiento,
     Entidad,
     Municipio,
     Localidad,
     ActividadEconomica,
 )
-from src.db.enums import (
+from src_etl.db.enums import (
     TipoVial,
     TipoAsentamiento,
     TipoUnidadEconomica,

@@ -7,8 +7,8 @@ Tests the new process_tasks and harmonize_tasks tracking.
 import pytest
 from pathlib import Path
 from datetime import datetime
-from src.metadata.tracker import MetadataTracker
-from src.metadata.models import JobStatus, TaskStatus
+from src_metadata.tracker import MetadataTracker
+from src_metadata.models import JobStatus, TaskStatus
 
 
 @pytest.fixture
@@ -108,7 +108,7 @@ def test_get_pending_process_tasks(temp_tracker):
         period="2024_11",
     )
     temp_tracker.start_task(download_task_id)
-    from src.metadata.models import DownloadResult
+    from src_metadata.models import DownloadResult
 
     temp_tracker.complete_task(
         task_id=download_task_id, status=TaskStatus.SUCCESS, actual_size_bytes=1000000

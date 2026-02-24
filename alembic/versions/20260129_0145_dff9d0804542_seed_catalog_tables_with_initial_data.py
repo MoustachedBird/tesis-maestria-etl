@@ -54,12 +54,12 @@ def upgrade() -> None:
     On success, all catalog tables will be populated with fresh data.
     """
     # Import here to avoid module loading issues with Alembic
-    from src.db.seed_loader import (
+    from src_etl.db.seed_loader import (
         seed_catalog_tables,
         validate_seed_data,
         SeedLoadError,
     )
-    from src.core.config import get_settings
+    from src_etl.core.config import get_settings
 
     settings = get_settings()
     connection = op.get_bind()

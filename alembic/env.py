@@ -16,12 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import configuration and models
-from src.core.config import get_settings
-from src.db.database import get_engine
-from src.db.base import Base
+from src_etl.core.config import get_settings
+from src_etl.db.database import get_engine
+from src_etl.db.base import Base
 
 # Import all models to ensure they're registered with Base.metadata
-from src.db import models  # noqa: F401
+from src_etl.db import models  # noqa: F401
 
 
 # ------------------------------------------------------------------------------

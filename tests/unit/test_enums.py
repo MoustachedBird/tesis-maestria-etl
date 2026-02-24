@@ -12,7 +12,7 @@ These are pure unit tests with no database dependency.
 
 import pytest
 
-from src.db.enums import (
+from src_etl.db.enums import (
     TipoVial,
     TipoAsentamiento,
     TipoUnidadEconomica,
