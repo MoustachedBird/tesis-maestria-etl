@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import polars as pl
 
-from src_etl.loaders.denue_stores import DataStoreManager
+from src_etl.loaders.denue import DataStoreManager
 from src_etl.reports.reporter import ReportManager
 from src_etl.utils.constants import (
     MASTER_COLUMNS,

@@ -55,7 +55,7 @@ metadata-query: ## Query metadata database
 
 metadata-stats: ## Show metadata statistics
 	@echo "Pipeline Statistics:"
-	@$(PYTHON) -c "from src_etl.transformers.denue_transformer import DenueTransformer; from pathlib import Path; t = DenueTransformer(Path('data')); import json; status = t.get_pipeline_status(); print(json.dumps(status, indent=2, default=str))"
+	@$(PYTHON) -c "from src_etl.transformers.denue import DenueTransformer; from pathlib import Path; t = DenueTransformer(Path('data')); import json; status = t.get_pipeline_status(); print(json.dumps(status, indent=2, default=str))"
 
 logs: ## Show latest logs
 	@echo "Latest download logs:"

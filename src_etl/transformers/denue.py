@@ -16,8 +16,8 @@ import logging
 from src_etl.core.config import settings
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import JobStatus
-from src_etl.transformers.processor_stage import ProcessorStage
-from src_etl.transformers.harmonizer_stage import HarmonizerStage
+from src_etl.transformers.processor import ProcessorStage
+from src_etl.transformers.harmonizer import HarmonizerStage
 
 logger = logging.getLogger(__name__)
 

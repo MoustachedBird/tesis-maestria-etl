@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.markup import escape
 
 # Importación de orquestadores modulares
-from src_etl.extractors.denue_downloader import DenueDownloader
+from src_etl.extractors.denue import DenueDownloader
 # Legacy imports kept for backward compatibility during migration
 # TODO: Remove after full migration verification
 # from src_etl.transformers.denue_processor import DenueProcessor
@@ -83,7 +83,7 @@ def process_denue(
 
     try:
         # Use new unified transformer
-        from src_etl.transformers.denue_transformer import DenueTransformer
+        from src_etl.transformers.denue import DenueTransformer
 
         transformer = DenueTransformer(data_root=DATA_ROOT)
         success = transformer.run_process_stage(force=force)
@@ -115,7 +115,7 @@ def harmonize():
 
     try:
         # Use new unified transformer
-        from src_etl.transformers.denue_transformer import DenueTransformer
+        from src_etl.transformers.denue import DenueTransformer
 
         transformer = DenueTransformer(data_root=DATA_ROOT)
         success = transformer.run_harmonize_stage()
@@ -154,7 +154,7 @@ def pipeline(
     console.print("=" * 60)
 
     try:
-        from src_etl.transformers.denue_transformer import DenueTransformer
+        from src_etl.transformers.denue import DenueTransformer
 
         transformer = DenueTransformer(data_root=DATA_ROOT)
         success = transformer.run_full_pipeline(force=force)

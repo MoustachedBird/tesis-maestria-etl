@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 import polars as pl
 
-from src_etl.loaders.denue_stores import DataStoreManager
+from src_etl.loaders.denue import DataStoreManager
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import JobStatus, TaskStatus
 from src_etl.utils.constants import (

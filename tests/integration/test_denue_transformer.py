@@ -7,7 +7,7 @@ Tests the unified transformer with real components (but mocked data).
 import pytest
 import shutil
 from pathlib import Path
-from src_etl.transformers.denue_transformer import DenueTransformer
+from src_etl.transformers.denue import DenueTransformer
 
 # Path to the real seed files in the project
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
