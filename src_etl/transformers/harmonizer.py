@@ -25,7 +25,7 @@ from src_etl.utils.harmonizer_config import (
     COLS_NEEDED_FOR_MATCHING,
     TEXT_COLS_TO_SANITIZE,
 )
-from src_etl.utils.harmonizer_core import (
+from src_etl.utils.entity_resolution import (
     get_region_prefix,
     initialize_knowledge_base,
     resolve_period_logic,

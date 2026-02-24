@@ -22,7 +22,7 @@ from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import JobStatus, TaskStatus
-from src_etl.utils.constants import (
+from src_etl.utils.denue_schema import (
     MASTER_COLUMNS,
     REQUIRED_COLUMNS,
     COLUMN_ALIASES,

@@ -21,24 +21,36 @@
 etl-core/
 ├── src_etl/                       # ETL application code
 │   ├── main.py                    # CLI entry point (Typer)
-│   ├── core/                      # Configuration (pydantic-settings), structured logging
+│   ├── core/                      # Configuration and infrastructure
+│   │   ├── config.py              # App settings (pydantic-settings)
+│   │   ├── download_config.py     # Download settings (retries, timeouts)
+│   │   └── logging.py             # Structured logging (structlog)
 │   ├── db/                        # Database layer
 │   │   ├── models.py              # SQLAlchemy ORM models (5 tables, 38 cols)
 │   │   ├── database.py            # Engine/session management
 │   │   ├── enums.py               # DENUE enums (TipoVial, PersonalOcupado, etc.)
-│   │   └── seed_loader.py         # Parquet seed data loading
-│   ├── extractors/                # Download/scraping layer
-│   │   ├── denue_downloader.py    # DENUE orchestrator (Selenium + parallel)
-│   │   ├── downloader.py          # Generic base with retry (tenacity)
-│   │   ├── download_config.py     # Configuration dataclass
-│   │   └── file_validator.py      # SHA256, size, ZIP validation
+│   │   └── seed_loader.py         # Seed orchestrator (delegates to loaders/)
+│   ├── extractors/                # Domain-specific data extraction
+│   │   └── denue.py               # DENUE orchestrator (Selenium + parallel)
 │   ├── transformers/              # Transformation layer
-│   │   ├── denue_transformer.py   # Unified orchestrator
-│   │   ├── processor_stage.py     # ZIP -> Warehouse processing
-│   │   ├── harmonizer_stage.py    # Entity resolution across time
+│   │   ├── denue.py               # Unified orchestrator
+│   │   ├── processor.py           # ZIP -> Warehouse processing
+│   │   ├── harmonizer.py          # Entity resolution across time
 │   │   └── _legacy/               # Archived old processor/harmonizer
 │   ├── loaders/                   # Data store management
-│   └── utils/                     # Shared utilities (text, matching, browser)
+│   │   ├── denue.py               # Establecimientos fact table (DataStoreManager)
+│   │   ├── geography.py           # Geography seeds (entidades, municipios, localidades)
+│   │   └── scian.py               # SCIAN economic activity seeds
+│   └── utils/                     # Shared utilities
+│       ├── browser.py             # Selenium Chrome driver setup
+│       ├── denue_schema.py        # DENUE column mappings, enums, aliases
+│       ├── denue_scraping.py      # DENUE web scraping + filename sanitization
+│       ├── downloader.py          # Generic HTTP downloader with retry
+│       ├── entity_resolution.py   # Cascade matching algorithm engine
+│       ├── file_validator.py      # SHA256, size, ZIP validation
+│       ├── harmonizer_config.py   # Harmonizer regions/schema config
+│       ├── matching.py            # Spatial + fuzzy matching utilities
+│       └── warehouse.py           # DuckDB BaseWarehouse class
 │
 ├── src_api/                       # FastAPI REST API (separated)
 │   ├── __init__.py

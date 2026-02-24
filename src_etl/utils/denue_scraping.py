@@ -6,6 +6,7 @@ Scrapes the INEGI DENUE download page and synchronizes with metadata database.
 
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import List, Tuple
 from bs4 import BeautifulSoup
@@ -13,9 +14,26 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from src_etl.utils.text import clean_filename
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import TaskStatus
+
+
+def clean_filename(text: str) -> str:
+    """
+    Convert a raw string into a filesystem-safe filename.
+
+    Example: 'Comercio al por Menor (2024).zip' -> 'comercio_al_por_menor_2024.zip'
+    """
+    if not text:
+        return "unnamed_file"
+
+    text = text.lower()
+    text = text.replace(" ", "_").replace(".", "_")
+    nfd_form = unicodedata.normalize("NFD", text)
+    text_without_accents = "".join(c for c in nfd_form if unicodedata.category(c) != "Mn")
+    clean_text = re.sub(r"[^a-z0-9_-]", "", text_without_accents)
+    clean_text = re.sub(r"__+", "_", clean_text)
+    return clean_text.strip("_")
 
 
 def scrape_denue_table(

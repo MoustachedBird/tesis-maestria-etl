@@ -10,7 +10,7 @@ import polars as pl
 
 from src_etl.loaders.denue import DataStoreManager
 from src_etl.reports.reporter import ReportManager
-from src_etl.utils.constants import (
+from src_etl.utils.denue_schema import (
     MASTER_COLUMNS,
     REQUIRED_COLUMNS,
     COLUMN_ALIASES,
