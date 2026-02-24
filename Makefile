@@ -18,6 +18,9 @@ help: ## Show help
 setup: ## Install dependencies
 	uv sync
 
+api: ## Run FastAPI dev server
+	uv run fastapi dev src_api/main.py
+
 download: ## Download INEGI data
 	$(PYTHON) -m src_etl.main download-inegi $(ARGS)
 
@@ -140,10 +143,10 @@ test-fast: ## Fast tests (unit only, no slow)
 	uv run pytest -m "unit and not slow"
 
 lint: ## Run ruff linter
-	uv run ruff check src_etl/ src_metadata/ tests/
+	uv run ruff check src_etl/ src_metadata/ src_api/ tests/
 
 lint-fix: ## Auto-fix lint issues
-	uv run ruff check src_etl/ src_metadata/ tests/ --fix
+	uv run ruff check src_etl/ src_metadata/ src_api/ tests/ --fix
 
 format: ## Format code with ruff
-	uv run ruff format src_etl/ src_metadata/ tests/
+	uv run ruff format src_etl/ src_metadata/ src_api/ tests/

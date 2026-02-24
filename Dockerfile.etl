@@ -26,6 +26,7 @@ RUN uv sync --group etl --frozen
 # 7. Copy application source code
 COPY src_etl/ ./src_etl/
 COPY src_metadata/ ./src_metadata/
+COPY src_api/ ./src_api/
 
 # 8. Entrypoint
 ENTRYPOINT ["uv", "run", "python", "-m", "src_etl.main"]

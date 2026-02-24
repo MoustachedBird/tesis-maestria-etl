@@ -5,6 +5,7 @@ source =
     src_etl/extractors
     src_etl/core
     src_metadata
+    src_api
 omit =
     */tests/*
     */migrations/*

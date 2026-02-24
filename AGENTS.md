@@ -22,9 +22,6 @@ etl-core/
 ├── src_etl/                       # ETL application code
 │   ├── main.py                    # CLI entry point (Typer)
 │   ├── core/                      # Configuration (pydantic-settings), structured logging
-│   ├── api/                       # FastAPI REST API (health checks, CRUD stubs)
-│   │   ├── main.py                # FastAPI app with lifespan, CORS
-│   │   └── schemas.py             # Pydantic request/response models
 │   ├── db/                        # Database layer
 │   │   ├── models.py              # SQLAlchemy ORM models (5 tables, 38 cols)
 │   │   ├── database.py            # Engine/session management
@@ -42,6 +39,11 @@ etl-core/
 │   │   └── _legacy/               # Archived old processor/harmonizer
 │   ├── loaders/                   # Data store management
 │   └── utils/                     # Shared utilities (text, matching, browser)
+│
+├── src_api/                       # FastAPI REST API (separated)
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI app with lifespan, CORS
+│   └── schemas.py                 # Pydantic request/response models
 │
 ├── src_metadata/                  # Metadata tracking service (separated)
 │   ├── __init__.py
@@ -85,12 +87,12 @@ uv sync --group etl                        # Install ETL group (Selenium, etc.)
 
 # Run CLI
 uv run python -m src_etl.main             # Main CLI entry point
-uv run fastapi dev src_etl/api/main.py    # Dev server (FastAPI)
+uv run fastapi dev src_api/main.py        # Dev server (FastAPI)
 
 # Linting
-uv run ruff check src_etl/ src_metadata/ tests/        # Lint
-uv run ruff check src_etl/ src_metadata/ tests/ --fix   # Auto-fix
-uv run ruff format src_etl/ src_metadata/ tests/        # Format
+uv run ruff check src_etl/ src_metadata/ src_api/ tests/        # Lint
+uv run ruff check src_etl/ src_metadata/ src_api/ tests/ --fix   # Auto-fix
+uv run ruff format src_etl/ src_metadata/ src_api/ tests/        # Format
 
 # Testing
 uv run pytest                              # All tests

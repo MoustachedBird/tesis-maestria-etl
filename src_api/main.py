@@ -153,7 +153,7 @@ async def api_info(settings: AppSettings):
 # Example CRUD Endpoints (commented out - implement as needed)
 # ------------------------------------------------------------------------------
 # from src_etl.db.models import Establecimiento
-# from src_etl.api.schemas import EstablecimientoResponse
+# from src_api.schemas import EstablecimientoResponse
 # from typing import List
 
 # @app.get(f"{get_settings().API_PREFIX}/establecimientos", response_model=List[EstablecimientoResponse])
@@ -181,7 +181,7 @@ if __name__ == "__main__":
 
     settings = get_settings()
     uvicorn.run(
-        "src.api.main:app",
+        "src_api.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,
