@@ -24,8 +24,8 @@ from tenacity import (
 )
 import structlog
 
-from src_etl.extractors.download_config import DownloadConfig
-from src_etl.extractors.file_validator import FileValidator, ValidationResult
+from src_etl.core.download_config import DownloadConfig
+from src_etl.utils.file_validator import FileValidator, ValidationResult
 from src_metadata.models import ErrorType, TaskStatus
 
 
@@ -361,9 +361,7 @@ class Downloader:
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Download to temp file first
-        assert self.config.temp_directory is not None, (
-            "temp_directory should be set in config"
-        )
+        assert self.config.temp_directory is not None, "temp_directory should be set in config"
         temp_path = self.config.temp_directory / f"{target_path.name}.tmp"
         temp_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -474,9 +472,7 @@ class Downloader:
         completed = 0
         total = len(downloads)
 
-        with ThreadPoolExecutor(
-            max_workers=self.config.max_parallel_downloads
-        ) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.max_parallel_downloads) as executor:
             # Submit all downloads
             future_to_download = {
                 executor.submit(

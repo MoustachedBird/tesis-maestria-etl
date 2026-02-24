@@ -16,8 +16,8 @@ from src_etl.utils.browser import get_chrome_driver
 from src_etl.utils.denue_scraping import scrape_denue_table
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import TaskStatus, ErrorType
-from src_etl.extractors.downloader import Downloader
-from src_etl.extractors.download_config import DownloadConfig
+from src_etl.utils.downloader import Downloader
+from src_etl.core.download_config import DownloadConfig
 from src_etl.core.logging import StructuredLogger
 
 
@@ -193,9 +193,7 @@ class DenueDownloader:
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             console=self.console,
         ) as progress:
-            download_task = progress.add_task(
-                "[cyan]Downloading...", total=len(task_mappings)
-            )
+            download_task = progress.add_task("[cyan]Downloading...", total=len(task_mappings))
 
             # Create downloader
             downloader = Downloader(self.config)
@@ -245,15 +243,11 @@ class DenueDownloader:
                 status=TaskStatus.SUCCESS,
                 actual_size_bytes=result.size_bytes,
                 actual_hash=(
-                    result.validation_result.actual_hash
-                    if result.validation_result
-                    else None
+                    result.validation_result.actual_hash if result.validation_result else None
                 ),
                 download_speed_mbps=result.download_speed_mbps,
                 validation_passed=(
-                    result.validation_result.is_valid
-                    if result.validation_result
-                    else None
+                    result.validation_result.is_valid if result.validation_result else None
                 ),
                 duration_seconds=result.duration_seconds,
             )
