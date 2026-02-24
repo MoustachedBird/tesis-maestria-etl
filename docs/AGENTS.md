@@ -19,10 +19,10 @@ uv sync --group etl
 uv run python -m src.main
 
 # Development server (FastAPI)
-uv run fastapi dev src/tesis_core/interface/api/main.py
+uv run fastapi dev src/api/main.py
 
 # Run ETL pipeline
-uv run python -m src.tesis_core.interface.cli.etl --input data/raw --output data/processed
+uv run python -m src.main pipeline
 ```
 
 ### Testing
@@ -48,15 +48,14 @@ uv run pytest --cov=src
 # Clean cache and compiled files
 make clean
 
-# Format code (if configured)
-uv run black src/ tests/
+# Lint with ruff
+uv run ruff check src/ tests/
 
-# Type checking (if configured)  
-uv run mypy src/
+# Auto-fix lint issues
+uv run ruff check src/ tests/ --fix
 
-# Linting (if configured)
-uv run flake8 src/
-uv run ruff check src/
+# Format code with ruff
+uv run ruff format src/ tests/
 ```
 
 ### Makefile Commands
@@ -109,9 +108,19 @@ src/
 ├── core/           # Core configuration and settings
 ├── extractors/     # Data extraction modules (APIs, DBs, CSVs)
 ├── transformers/   # Business logic and data transformation
+│   ├── denue_transformer.py   # Unified orchestrator
+│   ├── processor_stage.py     # ZIP → Warehouse processing
+│   ├── harmonizer_stage.py    # Entity resolution (Silver → Gold)
+│   └── _legacy/               # Archived old processor/harmonizer
 ├── loaders/        # Data loading modules (Warehouse, S3)
-├── reports/        # Reporting and monitoring utilities
+├── metadata/       # ETL observability (Airflow-style tracking)
+│   ├── schema.py   # DDL for metadata.duckdb
+│   ├── models.py   # Pydantic models (JobRun, tasks, lineage)
+│   └── tracker.py  # MetadataTracker class
 ├── utils/          # Shared utilities (loggers, connections)
+├── api/            # FastAPI REST API (health checks, CRUD stubs)
+│   ├── main.py     # FastAPI app with lifespan, CORS
+│   └── schemas.py  # Pydantic request/response models
 ├── db/             # Database models, Alembic migrations, seed loading
 │   ├── models.py   # SQLAlchemy ORM models
 │   ├── database.py # Database engine and session management
@@ -168,9 +177,9 @@ from fastapi import FastAPI
 # Local imports (following the new structure)
 from src.core.config import settings
 from src.utils.database import BaseWarehouse
-from src.transformers.denue_processor import DenueProcessor
+from src.transformers.denue_transformer import DenueTransformer
 from src.loaders.denue_stores import DataStoreManager
-from src.reports.reporter import ReportManager
+from src.metadata.tracker import MetadataTracker
 ```
 
 ### Naming Conventions
@@ -1037,6 +1046,197 @@ tasks = report_mgr.download_report.get_raw_tasks()
 from src.metadata.tracker import MetadataTracker
 tasks = tracker.get_tasks_by_status(TaskStatus.SUCCESS)
 ```
+
+---
+
+## Unified Transformer Architecture (Feb 2026)
+
+### Overview
+
+The ETL pipeline has been unified under a single `DenueTransformer` orchestrator that coordinates all transformation stages with complete metadata tracking.
+
+### Architecture: Unified Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 DENUE TRANSFORMER                           │
+│                 (Unified Orchestrator)                      │
+│  ┌──────────────────┬─────────────────┬───────────────────┐│
+│  │ ProcessorStage   │ HarmonizerStage │ MetadataTracker   ││
+│  │ (ZIP→Warehouse)  │ (Entity Resolution) │ (Observability) ││
+│  └──────────────────┴─────────────────┴───────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Core Components
+
+#### 1. DenueTransformer (`src/transformers/denue_transformer.py`)
+
+**Unified orchestrator for all transformation stages**:
+
+```python
+from src.transformers.denue_transformer import DenueTransformer
+
+# Initialize
+transformer = DenueTransformer(data_root=Path("data"))
+
+# Run individual stages
+transformer.run_process_stage(force=False)     # ZIP → Warehouse
+transformer.run_harmonize_stage()              # Entity Resolution
+
+# Or run complete pipeline
+transformer.run_full_pipeline(force=False)     # Process + Harmonize
+
+# Get status
+status = transformer.get_pipeline_status()
+```
+
+#### 2. ProcessorStage (`src/transformers/processor_stage.py`)
+
+**Transforms raw ZIP files into warehouse**:
+- ZIP extraction and CSV parsing
+- Data cleaning and normalization
+- Schema validation
+- Warehouse loading (DuckDB)
+- Seed catalog bootstrapping
+
+#### 3. HarmonizerStage (`src/transformers/harmonizer_stage.py`)
+
+**Resolves entity identities across time**:
+- Entity matching across periods
+- Master CLEE generation
+- Knowledge base management
+- Region-based processing
+- Snapshot consolidation
+
+#### 4. Extended MetadataTracker
+
+**New tracking capabilities**:
+
+```python
+# Process task tracking
+task_id = tracker.create_process_task(run_id, task_name, source_path, period)
+tracker.start_process_task(task_id)
+tracker.complete_process_task(task_id, status, rows_loaded=1000)
+
+# Harmonize task tracking
+task_id = tracker.create_harmonize_task(run_id, task_name, region, states)
+tracker.complete_harmonize_task(task_id, status, entities_matched=8000)
+
+# Metrics
+process_metrics = tracker.get_process_metrics()
+harmonize_metrics = tracker.get_harmonize_metrics()
+```
+
+### Data Flow
+
+```
+1. DOWNLOAD → download_tasks (metadata.duckdb)
+              ↓ data_lineage: WEB → FILE
+              
+2. PROCESS →  process_tasks (metadata.duckdb)
+              ↓ data_lineage: FILE → TABLE
+              
+3. HARMONIZE → harmonize_tasks (metadata.duckdb)
+               ↓ data_lineage: TABLE → FILE (curated)
+```
+
+### Database Schema
+
+**New tables in `metadata.duckdb`**:
+
+```sql
+-- Process tracking
+CREATE TABLE process_tasks (
+    task_id VARCHAR(36) PRIMARY KEY,
+    run_id VARCHAR(36) NOT NULL,
+    source_path VARCHAR NOT NULL,
+    period VARCHAR(20),
+    status VARCHAR(20),
+    rows_loaded BIGINT,
+    rows_rejected BIGINT,
+    duration_seconds DOUBLE,
+    ...
+);
+
+-- Harmonization tracking
+CREATE TABLE harmonize_tasks (
+    task_id VARCHAR(36) PRIMARY KEY,
+    run_id VARCHAR(36) NOT NULL,
+    region_group VARCHAR(100),
+    state_list VARCHAR,
+    status VARCHAR(20),
+    entities_matched BIGINT,
+    entities_new BIGINT,
+    master_clees_created BIGINT,
+    ...
+);
+```
+
+### CLI Commands (Updated)
+
+```bash
+# Process stage
+python -m src.main process-denue              # Incremental
+python -m src.main process-denue --force      # Force reprocess all
+
+# Harmonize stage
+python -m src.main harmonize
+
+# Complete pipeline
+python -m src.main pipeline                   # Unified pipeline
+python -m src.main pipeline --force           # Pipeline with force mode
+```
+
+### Makefile Commands (Updated)
+
+```bash
+# Individual stages
+make process                  # Process ZIPs → Warehouse
+make process-force            # Force reprocess all
+make harmonize                # Entity resolution
+
+# Complete pipeline
+make pipeline                 # Unified pipeline command
+make pipeline-force           # Pipeline with force mode
+make pipeline-steps           # Step-by-step execution
+
+# Metrics
+make metadata-stats           # Show pipeline statistics
+```
+
+### Environment Configuration
+
+**New environment variables**:
+
+```bash
+# Processing output directories
+PROCESSED_OUTPUT_DIR=data/processed    # ZIP → Warehouse transformed data
+CURATED_OUTPUT_DIR=data/curated        # Harmonized/Gold layer data
+```
+
+### Migration from Legacy System
+
+**COMPLETED (Feb 3, 2026)**:
+
+```
+✅ Legacy files ARCHIVED:
+   - src/transformers/_legacy/denue_processor.py
+   - src/transformers/_legacy/denue_harmonizer.py
+   - data/archive/reports.db.backup
+
+❌ Legacy files REMOVED:
+   - src/reports/reporter.py (fully replaced by MetadataTracker)
+
+✅ New unified system:
+   - src/transformers/denue_transformer.py
+   - src/transformers/processor_stage.py
+   - src/transformers/harmonizer_stage.py
+```
+
+**Backward compatibility**: CLI commands still work, now using new backend.
+
+**Migration documentation**: See `docs/TRANSFORMER_MIGRATION_SUMMARY.md`
 
 ### Future Enhancements
 

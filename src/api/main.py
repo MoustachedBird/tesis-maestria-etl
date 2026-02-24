@@ -66,9 +66,15 @@ def create_app() -> FastAPI:
     )
 
     # CORS middleware
+    cors_origins = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure this for production
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -147,7 +153,7 @@ async def api_info(settings: AppSettings):
 # Example CRUD Endpoints (commented out - implement as needed)
 # ------------------------------------------------------------------------------
 # from src.db.models import Establecimiento
-# from src.api.schemas import EstablecimientoCreate, EstablecimientoResponse
+# from src.api.schemas import EstablecimientoResponse
 # from typing import List
 
 # @app.get(f"{get_settings().API_PREFIX}/establecimientos", response_model=List[EstablecimientoResponse])
@@ -161,10 +167,10 @@ async def api_info(settings: AppSettings):
 #     return establecimientos
 
 
-# @app.get(f"{get_settings().API_PREFIX}/establecimientos/{{clave}}", response_model=EstablecimientoResponse)
-# async def get_establecimiento(clave: str, db: DbSession):
-#     """Get a single establecimiento by clave."""
-#     establecimiento = db.query(Establecimiento).filter(Establecimiento.clave == clave).first()
+# @app.get(f"{get_settings().API_PREFIX}/establecimientos/{{est_id}}", response_model=EstablecimientoResponse)
+# async def get_establecimiento(est_id: str, db: DbSession):
+#     """Get a single establecimiento by id."""
+#     establecimiento = db.query(Establecimiento).filter(Establecimiento.id == est_id).first()
 #     if not establecimiento:
 #         raise HTTPException(status_code=404, detail="Establecimiento not found")
 #     return establecimiento

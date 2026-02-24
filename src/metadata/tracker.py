@@ -740,3 +740,382 @@ class MetadataTracker:
 
                 conn.commit()
                 return True
+
+    # ========================================================================
+    # PROCESS TASK MANAGEMENT
+    # ========================================================================
+
+    def create_process_task(
+        self,
+        run_id: str,
+        task_name: str,
+        source_path: str,
+        period: Optional[str] = None,
+        target_table: Optional[str] = None,
+    ) -> str:
+        """
+        Create new processing task.
+
+        Args:
+            run_id: Parent job run ID
+            task_name: Human-readable task name
+            source_path: Path to source ZIP file
+            period: Optional data period (e.g., "2024_11")
+            target_table: Target warehouse table name
+
+        Returns:
+            str: Unique task_id (UUID)
+        """
+        task_id = str(uuid.uuid4())
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO process_tasks (
+                    task_id, run_id, task_name, source_path, target_table,
+                    period, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                [
+                    task_id,
+                    run_id,
+                    task_name,
+                    source_path,
+                    target_table,
+                    period,
+                    TaskStatus.PENDING.value,
+                    datetime.now(),
+                ],
+            )
+
+        return task_id
+
+    def start_process_task(self, task_id: str):
+        """
+        Mark process task as running.
+
+        Args:
+            task_id: Task identifier
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE process_tasks SET
+                    status = ?,
+                    start_time = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
+            )
+
+    def complete_process_task(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        rows_extracted: Optional[int] = None,
+        rows_loaded: Optional[int] = None,
+        rows_rejected: Optional[int] = None,
+        file_size_bytes: Optional[int] = None,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ):
+        """
+        Complete process task with results.
+
+        Args:
+            task_id: Task identifier
+            status: Final task status
+            rows_extracted: Number of rows extracted from ZIP
+            rows_loaded: Number of rows loaded to warehouse
+            rows_rejected: Number of rows rejected (validation)
+            file_size_bytes: Source file size
+            error_type: Error classification if failed
+            error_message: Error details if failed
+        """
+        end_time = datetime.now()
+
+        with self._get_connection() as conn:
+            # Get start time to calculate duration
+            result = conn.execute(
+                "SELECT start_time FROM process_tasks WHERE task_id = ?", [task_id]
+            ).fetchone()
+
+            duration = None
+            if result and result[0]:
+                start_time = datetime.fromisoformat(str(result[0]))
+                duration = (end_time - start_time).total_seconds()
+
+            conn.execute(
+                """
+                UPDATE process_tasks SET
+                    end_time = ?,
+                    duration_seconds = ?,
+                    status = ?,
+                    rows_extracted = ?,
+                    rows_loaded = ?,
+                    rows_rejected = ?,
+                    file_size_bytes = ?,
+                    error_type = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [
+                    end_time,
+                    duration,
+                    status.value,
+                    rows_extracted,
+                    rows_loaded,
+                    rows_rejected,
+                    file_size_bytes,
+                    error_type,
+                    error_message,
+                    datetime.now(),
+                    task_id,
+                ],
+            )
+
+    def get_pending_process_tasks(
+        self, include_failed: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Get list of files pending processing.
+
+        Queries download_tasks joined with process_tasks to find
+        successfully downloaded files that haven't been processed yet.
+
+        Args:
+            include_failed: Include previously failed tasks for retry
+
+        Returns:
+            List of dicts with keys: source_path, period, download_task_id
+        """
+        with self._get_connection() as conn:
+            if include_failed:
+                query = (
+                    QUERIES["get_pending_process_tasks"] + " OR pt.status = 'FAILED'"
+                )
+            else:
+                query = QUERIES["get_pending_process_tasks"]
+
+            result = conn.execute(query).fetchall()
+            columns = ["source_path", "period", "download_task_id"]
+            return [dict(zip(columns, row)) for row in result]
+
+    def get_process_task_by_path(self, source_path: str) -> Optional[str]:
+        """
+        Find existing process task for a file path.
+
+        Args:
+            source_path: Source file path to search for
+
+        Returns:
+            task_id if found, None otherwise
+        """
+        with self._get_connection() as conn:
+            result = conn.execute(
+                QUERIES["get_process_task_by_path"], [source_path]
+            ).fetchone()
+
+            return result[0] if result else None
+
+    # ========================================================================
+    # HARMONIZE TASK MANAGEMENT
+    # ========================================================================
+
+    def create_harmonize_task(
+        self,
+        run_id: str,
+        task_name: str,
+        region_group: str,
+        state_list: List[str],
+    ) -> str:
+        """
+        Create new harmonization task.
+
+        Args:
+            run_id: Parent job run ID
+            task_name: Human-readable task name
+            region_group: Region/state group identifier
+            state_list: List of state codes in this group
+
+        Returns:
+            str: Unique task_id (UUID)
+        """
+        import json
+
+        task_id = str(uuid.uuid4())
+        state_list_json = json.dumps(state_list)
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO harmonize_tasks (
+                    task_id, run_id, task_name, region_group, state_list,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+                [
+                    task_id,
+                    run_id,
+                    task_name,
+                    region_group,
+                    state_list_json,
+                    TaskStatus.PENDING.value,
+                    datetime.now(),
+                ],
+            )
+
+        return task_id
+
+    def start_harmonize_task(self, task_id: str):
+        """
+        Mark harmonize task as running.
+
+        Args:
+            task_id: Task identifier
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE harmonize_tasks SET
+                    status = ?,
+                    start_time = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
+            )
+
+    def complete_harmonize_task(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        entities_input: Optional[int] = None,
+        entities_matched: Optional[int] = None,
+        entities_new: Optional[int] = None,
+        master_clees_created: Optional[int] = None,
+        periods_processed: Optional[int] = None,
+        match_confidence_avg: Optional[float] = None,
+        spatial_matches: Optional[int] = None,
+        identity_matches: Optional[int] = None,
+        activity_matches: Optional[int] = None,
+        output_path: Optional[str] = None,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ):
+        """
+        Complete harmonize task with results.
+
+        Args:
+            task_id: Task identifier
+            status: Final task status
+            entities_input: Number of input entities
+            entities_matched: Number of matched entities
+            entities_new: Number of new entities discovered
+            master_clees_created: Number of master CLEEs created
+            periods_processed: Number of time periods processed
+            match_confidence_avg: Average match confidence score
+            spatial_matches: Number of spatial-based matches
+            identity_matches: Number of identity-based matches
+            activity_matches: Number of activity-based matches
+            output_path: Path to output files
+            error_type: Error classification if failed
+            error_message: Error details if failed
+        """
+        end_time = datetime.now()
+
+        with self._get_connection() as conn:
+            # Get start time to calculate duration
+            result = conn.execute(
+                "SELECT start_time FROM harmonize_tasks WHERE task_id = ?", [task_id]
+            ).fetchone()
+
+            duration = None
+            if result and result[0]:
+                start_time = datetime.fromisoformat(str(result[0]))
+                duration = (end_time - start_time).total_seconds()
+
+            conn.execute(
+                """
+                UPDATE harmonize_tasks SET
+                    end_time = ?,
+                    duration_seconds = ?,
+                    status = ?,
+                    entities_input = ?,
+                    entities_matched = ?,
+                    entities_new = ?,
+                    master_clees_created = ?,
+                    periods_processed = ?,
+                    match_confidence_avg = ?,
+                    spatial_matches = ?,
+                    identity_matches = ?,
+                    activity_matches = ?,
+                    output_path = ?,
+                    error_type = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [
+                    end_time,
+                    duration,
+                    status.value,
+                    entities_input,
+                    entities_matched,
+                    entities_new,
+                    master_clees_created,
+                    periods_processed,
+                    match_confidence_avg,
+                    spatial_matches,
+                    identity_matches,
+                    activity_matches,
+                    output_path,
+                    error_type,
+                    error_message,
+                    datetime.now(),
+                    task_id,
+                ],
+            )
+
+    # ========================================================================
+    # METRICS AND REPORTING
+    # ========================================================================
+
+    def get_process_metrics(self) -> List[Dict[str, Any]]:
+        """
+        Get processing performance metrics by period.
+
+        Returns:
+            List of dicts with metrics per period
+        """
+        with self._get_connection() as conn:
+            result = conn.execute(QUERIES["get_process_metrics"]).fetchall()
+            columns = [
+                "period",
+                "total_processed",
+                "total_rows",
+                "avg_duration_sec",
+                "avg_rows_loaded",
+            ]
+            return [dict(zip(columns, row)) for row in result]
+
+    def get_harmonize_metrics(self) -> List[Dict[str, Any]]:
+        """
+        Get harmonization performance metrics by region.
+
+        Returns:
+            List of dicts with metrics per region
+        """
+        with self._get_connection() as conn:
+            result = conn.execute(QUERIES["get_harmonize_metrics"]).fetchall()
+            columns = [
+                "region_group",
+                "total_harmonizations",
+                "total_entities",
+                "total_matched",
+                "total_new",
+                "avg_confidence",
+            ]
+            return [dict(zip(columns, row)) for row in result]

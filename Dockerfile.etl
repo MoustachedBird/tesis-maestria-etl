@@ -27,10 +27,10 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies from the 'etl' group (Selenium, Typer, etc.)
 RUN uv sync --group etl --frozen
 
-# 7. Copy ETL scripts
-COPY scripts/ ./scripts/
+# 7. Copy application source code
+COPY src/ ./src/
 
 # 8. ENTRYPOINT
-# Configures the container to run as the 'main.py' CLI.
+# Configures the container to run as the Typer CLI.
 # Arguments passed to 'docker run' will be appended here.
-ENTRYPOINT ["uv", "run", "python", "scripts/main.py"]
+ENTRYPOINT ["uv", "run", "python", "-m", "src.main"]

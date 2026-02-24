@@ -5,8 +5,10 @@ from rich.markup import escape
 
 # Importación de orquestadores modulares
 from src.extractors.denue_downloader import DenueDownloader
-from src.transformers.denue_processor import DenueProcessor
-from src.transformers.denue_harmonizer import DenueHarmonizer
+# Legacy imports kept for backward compatibility during migration
+# TODO: Remove after full migration verification
+# from src.transformers.denue_processor import DenueProcessor
+# from src.transformers.denue_harmonizer import DenueHarmonizer
 
 # Configuración de la CLI
 app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")
@@ -80,6 +82,8 @@ def process_denue(
     """
     PASO 2: Procesar ZIPs Raw -> Warehouse Centralizado (DuckDB).
     Limpia, normaliza encodings (UTF-8/Latin-1) y sincroniza catálogos de actividades y entidades.
+
+    Usa el nuevo sistema de MetadataTracker para tracking completo.
     """
     console.print(f"[bold blue]⚙️ Iniciando DENUE Warehouse Processor[/bold blue]")
     if force:
@@ -88,15 +92,21 @@ def process_denue(
         )
 
     try:
-        # DenueProcessor localiza automáticamente reports.db y denue_warehouse.db en DATA_ROOT
-        processor = DenueProcessor(data_root=DATA_ROOT)
+        # Use new unified transformer
+        from src.transformers.denue_transformer import DenueTransformer
 
-        # Ejecuta el pipeline (Limpieza -> Sincronización de Catálogos -> Carga de Hechos)
-        processor.run_pipeline(force=force)
+        transformer = DenueTransformer(data_root=DATA_ROOT)
+        success = transformer.run_process_stage(force=force)
 
-        console.print(
-            f"[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]"
-        )
+        if success:
+            console.print(
+                f"[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]"
+            )
+        else:
+            console.print(
+                f"[bold yellow]⚠️ Proceso completado con errores. Revisa los logs.[/bold yellow]"
+            )
+            raise typer.Exit(code=1)
 
     except Exception as e:
         console.print(
@@ -110,24 +120,81 @@ def harmonize():
     """
     PASO 3: Resolución de Identidad (Capa Gold).
     Vincula establecimientos a través del tiempo generando el catálogo maestro de identidades.
+
+    Usa el nuevo sistema de MetadataTracker para tracking completo.
     """
     console.print(
         f"[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]"
     )
 
     try:
-        # El Harmonizer ahora leerá directamente de las tablas de DuckDB en el Warehouse
-        harmonizer = DenueHarmonizer(project_root=PROJECT_ROOT)
-        harmonizer.run()
+        # Use new unified transformer
+        from src.transformers.denue_transformer import DenueTransformer
 
-        console.print(
-            f"[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]"
-        )
+        transformer = DenueTransformer(data_root=DATA_ROOT)
+        success = transformer.run_harmonize_stage()
+
+        if success:
+            console.print(
+                f"[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]"
+            )
+        else:
+            console.print(
+                f"[bold yellow]⚠️ Harmonización completada con errores. Revisa los logs.[/bold yellow]"
+            )
+            raise typer.Exit(code=1)
 
     except Exception as e:
         console.print(
             f"[bold red]❌ Error en armonización: {escape(str(e))}[/bold red]"
         )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def pipeline(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Forzar el procesamiento de todos los archivos ZIP.",
+    ),
+):
+    """
+    EJECUTAR PIPELINE COMPLETO: Download -> Process -> Harmonize
+
+    Ejecuta la cadena completa de transformación de datos DENUE
+    con tracking completo en metadata.duckdb.
+    """
+    console.print(f"[bold cyan]🚀 Iniciando Pipeline Completo DENUE[/bold cyan]")
+    console.print("=" * 60)
+
+    try:
+        from src.transformers.denue_transformer import DenueTransformer
+
+        transformer = DenueTransformer(data_root=DATA_ROOT)
+        success = transformer.run_full_pipeline(force=force)
+
+        console.print("=" * 60)
+        if success:
+            console.print(
+                f"[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]"
+            )
+
+            # Show summary
+            status = transformer.get_pipeline_status()
+            console.print(f"\n[bold]📊 Resumen del Pipeline:[/bold]")
+            console.print(f"  Processed: {status['processed_output']}")
+            console.print(f"  Curated: {status['curated_output']}")
+            console.print(f"  Metadata: {status['metadata_db']}")
+        else:
+            console.print(
+                f"[bold yellow]⚠️ Pipeline completado con errores. Revisa los logs.[/bold yellow]"
+            )
+            raise typer.Exit(code=1)
+
+    except Exception as e:
+        console.print(f"[bold red]❌ Error en pipeline: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
 
 

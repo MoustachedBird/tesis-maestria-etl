@@ -8,7 +8,7 @@ and serialization.
 
 from datetime import datetime
 from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
 
 
@@ -82,8 +82,7 @@ class JobRun(BaseModel):
     config: Optional[Dict[str, Any]] = Field(None, description="Run configuration")
     error_summary: Optional[str] = Field(None, description="Summary of errors if any")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class DownloadTask(BaseModel):
@@ -138,8 +137,7 @@ class DownloadTask(BaseModel):
     error_traceback: Optional[str] = Field(None, description="Full error traceback")
     is_retryable: bool = Field(True, description="Whether task can be retried")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class DownloadResult(BaseModel):
@@ -172,8 +170,7 @@ class DownloadResult(BaseModel):
     # Validation
     validation_passed: bool = Field(False, description="Whether validation passed")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class DataLineage(BaseModel):
@@ -211,6 +208,101 @@ class DataLineage(BaseModel):
     )
 
 
+class ProcessTask(BaseModel):
+    """
+    Represents a data processing task (ZIP → Warehouse).
+
+    Tracks the transformation of raw ZIP files into the DuckDB warehouse,
+    including data cleaning, normalization, and loading.
+    """
+
+    task_id: str = Field(..., description="Unique task identifier (UUID)")
+    run_id: str = Field(..., description="Parent job run ID")
+    task_name: str = Field(..., description="Human-readable task name")
+    source_path: str = Field(..., description="Path to source ZIP file")
+    target_table: Optional[str] = Field(None, description="Target warehouse table")
+    period: Optional[str] = Field(None, description="Data period (e.g., '2024_11')")
+
+    # Execution tracking
+    start_time: Optional[datetime] = Field(None, description="Task start time")
+    end_time: Optional[datetime] = Field(None, description="Task end time")
+    duration_seconds: Optional[float] = Field(None, description="Execution duration")
+    status: TaskStatus = Field(..., description="Current task status")
+
+    # Processing metrics
+    rows_extracted: Optional[int] = Field(None, description="Rows extracted from ZIP")
+    rows_loaded: Optional[int] = Field(None, description="Rows loaded to warehouse")
+    rows_rejected: Optional[int] = Field(None, description="Rows rejected (validation)")
+    file_size_bytes: Optional[int] = Field(None, description="Source file size")
+
+    # Error handling
+    error_type: Optional[str] = Field(None, description="Error classification")
+    error_message: Optional[str] = Field(None, description="Error details")
+
+    created_at: datetime = Field(
+        default_factory=datetime.now, description="Creation time"
+    )
+    updated_at: datetime = Field(
+        default_factory=datetime.now, description="Last update time"
+    )
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class HarmonizeTask(BaseModel):
+    """
+    Represents an entity harmonization task (Silver → Gold).
+
+    Tracks entity resolution across temporal snapshots, matching
+    establishments over time and generating master identifiers.
+    """
+
+    task_id: str = Field(..., description="Unique task identifier (UUID)")
+    run_id: str = Field(..., description="Parent job run ID")
+    task_name: str = Field(..., description="Human-readable task name")
+    region_group: str = Field(..., description="Region/state group processed")
+    state_list: str = Field(..., description="JSON array of states")
+
+    # Execution tracking
+    start_time: Optional[datetime] = Field(None, description="Task start time")
+    end_time: Optional[datetime] = Field(None, description="Task end time")
+    duration_seconds: Optional[float] = Field(None, description="Execution duration")
+    status: TaskStatus = Field(..., description="Current task status")
+
+    # Harmonization metrics
+    entities_input: Optional[int] = Field(None, description="Input entities")
+    entities_matched: Optional[int] = Field(None, description="Matched entities")
+    entities_new: Optional[int] = Field(None, description="New entities discovered")
+    master_clees_created: Optional[int] = Field(
+        None, description="Master CLEEs created"
+    )
+    periods_processed: Optional[int] = Field(None, description="Number of periods")
+    match_confidence_avg: Optional[float] = Field(
+        None, description="Avg match confidence"
+    )
+
+    # Quality metrics
+    spatial_matches: Optional[int] = Field(None, description="Spatial-based matches")
+    identity_matches: Optional[int] = Field(None, description="Identity-based matches")
+    activity_matches: Optional[int] = Field(None, description="Activity-based matches")
+
+    # Output
+    output_path: Optional[str] = Field(None, description="Output file path")
+
+    # Error handling
+    error_type: Optional[str] = Field(None, description="Error classification")
+    error_message: Optional[str] = Field(None, description="Error details")
+
+    created_at: datetime = Field(
+        default_factory=datetime.now, description="Creation time"
+    )
+    updated_at: datetime = Field(
+        default_factory=datetime.now, description="Last update time"
+    )
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
 class RunSummary(BaseModel):
     """
     Summary statistics for a job run.
@@ -241,8 +333,7 @@ class RunSummary(BaseModel):
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
     @property
     def success_rate_pct(self) -> float:

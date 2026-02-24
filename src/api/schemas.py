@@ -3,10 +3,12 @@ Pydantic Schemas for API Request/Response Validation.
 
 This module contains all Pydantic models used for data validation
 and serialization in FastAPI endpoints.
+
+Field names match the SQLAlchemy ORM models in src/db/models.py.
 """
 
 from pydantic import BaseModel, Field, ConfigDict
-from datetime import datetime
+from datetime import date
 from typing import Optional
 
 
@@ -16,54 +18,66 @@ from typing import Optional
 class EstablecimientoBase(BaseModel):
     """Base schema for Establecimiento with common fields."""
 
-    nombre_establecimiento: str = Field(
-        ..., max_length=500, description="Establishment name"
+    nom_estab: Optional[str] = Field(
+        None, max_length=500, description="Establishment name"
     )
-    codigo_actividad: str = Field(
-        ..., max_length=10, description="SCIAN economic activity code"
+    codigo_act: Optional[str] = Field(
+        None, max_length=10, description="SCIAN economic activity code"
     )
-    personal_ocupado: int = Field(default=0, ge=0, description="Number of employees")
-    tamano_empresa: str = Field(..., max_length=20, description="Company size category")
-    cve_entidad: str = Field(..., max_length=2, description="State code")
-    entidad: str = Field(..., max_length=100, description="State name")
-    municipio: Optional[str] = Field(
-        None, max_length=100, description="Municipality name"
+    per_ocu: Optional[str] = Field(
+        None, max_length=50, description="Personnel occupied (employee count range)"
     )
-    latitud: Optional[float] = Field(None, description="Latitude")
-    longitud: Optional[float] = Field(None, description="Longitude")
-    coords_validas: bool = Field(
-        default=False, description="Coordinates validation flag"
+    tipounieco: Optional[str] = Field(
+        None, max_length=20, description="Economic unit type: FIJO, SEMIFIJO, NINGUNO"
     )
-    year_carga: int = Field(..., description="Year of data load")
+    cve_ent: Optional[str] = Field(None, max_length=2, description="State code")
+    cve_mun: Optional[str] = Field(None, max_length=3, description="Municipality code")
+    cve_loc: Optional[str] = Field(None, max_length=4, description="Locality code")
+    cod_postal: Optional[str] = Field(
+        None, max_length=5, description="5-digit postal code"
+    )
+    latitud: Optional[float] = Field(None, description="Latitude (WGS84)")
+    longitud: Optional[float] = Field(None, description="Longitude (WGS84)")
+    period: Optional[date] = Field(None, description="Data period/snapshot date")
 
 
 class EstablecimientoCreate(EstablecimientoBase):
     """Schema for creating a new Establecimiento."""
 
-    clave: str = Field(..., max_length=50, description="Unique establishment key")
+    id: str = Field(..., description="Unique establishment identifier (hash)")
 
 
 class EstablecimientoUpdate(BaseModel):
     """Schema for updating an Establecimiento (all fields optional)."""
 
-    nombre_establecimiento: Optional[str] = Field(None, max_length=500)
-    codigo_actividad: Optional[str] = Field(None, max_length=10)
-    personal_ocupado: Optional[int] = Field(None, ge=0)
-    tamano_empresa: Optional[str] = Field(None, max_length=20)
-    cve_entidad: Optional[str] = Field(None, max_length=2)
-    entidad: Optional[str] = Field(None, max_length=100)
-    municipio: Optional[str] = Field(None, max_length=100)
+    nom_estab: Optional[str] = Field(None, max_length=500)
+    codigo_act: Optional[str] = Field(None, max_length=10)
+    per_ocu: Optional[str] = Field(None, max_length=50)
+    tipounieco: Optional[str] = Field(None, max_length=20)
+    cve_ent: Optional[str] = Field(None, max_length=2)
+    cve_mun: Optional[str] = Field(None, max_length=3)
+    cve_loc: Optional[str] = Field(None, max_length=4)
+    cod_postal: Optional[str] = Field(None, max_length=5)
     latitud: Optional[float] = None
     longitud: Optional[float] = None
-    coords_validas: Optional[bool] = None
-    year_carga: Optional[int] = None
+    period: Optional[date] = None
 
 
 class EstablecimientoResponse(EstablecimientoBase):
     """Schema for Establecimiento response with all fields."""
 
-    clave: str
-    fecha_procesamiento: datetime
+    id: str
+    clee: Optional[str] = None
+    raz_social: Optional[str] = None
+    tipo_vial: Optional[str] = None
+    nom_vial: Optional[str] = None
+    numero_ext: Optional[str] = None
+    tipo_asent: Optional[str] = None
+    nomb_asent: Optional[str] = None
+    telefono: Optional[str] = None
+    correoelec: Optional[str] = None
+    www: Optional[str] = None
+    fecha_alta: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -174,16 +188,16 @@ class PaginationParams(BaseModel):
 class EstablecimientoFilter(BaseModel):
     """Schema for filtering Establecimientos."""
 
-    cve_entidad: Optional[str] = Field(
+    cve_ent: Optional[str] = Field(
         None, max_length=2, description="Filter by state code"
     )
-    codigo_actividad: Optional[str] = Field(
+    codigo_act: Optional[str] = Field(
         None, max_length=10, description="Filter by activity code"
     )
-    year_carga: Optional[int] = Field(None, description="Filter by load year")
-    municipio: Optional[str] = Field(
-        None, max_length=100, description="Filter by municipality"
+    period: Optional[date] = Field(None, description="Filter by data period")
+    cve_mun: Optional[str] = Field(
+        None, max_length=3, description="Filter by municipality code"
     )
-    tamano_empresa: Optional[str] = Field(
-        None, max_length=20, description="Filter by company size"
+    per_ocu: Optional[str] = Field(
+        None, max_length=50, description="Filter by employee range"
     )

@@ -25,7 +25,10 @@ retry: ## 🔄 Reintenta descargas fallidas
 	$(PYTHON) -m src.main retry-inegi
 
 process: ## ⚙️  Procesa archivos RAW → Warehouse
-	$(PYTHON) -m src.main process-denue
+	$(PYTHON) -m src.main process-denue $(ARGS)
+
+process-force: ## ⚙️  Procesa TODOS los archivos (ignora estado)
+	$(PYTHON) -m src.main process-denue --force
 
 harmonize: ## 🔗 Ejecuta harmonización (Identity Resolution)
 	$(PYTHON) -m src.main harmonize
@@ -48,8 +51,8 @@ metadata-query: ## 📊 Query metadata database
 	@$(PYTHON) -c "from src.metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); import json; print(json.dumps(t.get_recent_runs(5), indent=2, default=str))"
 
 metadata-stats: ## 📈 Show metadata statistics
-	@echo "📈 Download Statistics:"
-	@$(PYTHON) -c "from src.metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); runs = t.get_recent_runs(1); print(f'Recent runs: {len(runs)}'); [print(f\"  - {r.get('job_name')}: {r.get('status')} ({r.get('total_tasks')} tasks)\") for r in runs]"
+	@echo "📈 Pipeline Statistics:"
+	@$(PYTHON) -c "from src.transformers.denue_transformer import DenueTransformer; from pathlib import Path; t = DenueTransformer(Path('data')); import json; status = t.get_pipeline_status(); print(json.dumps(status, indent=2, default=str))"
 
 logs: ## 📝 Show latest logs
 	@echo "📝 Latest download logs:"
@@ -98,7 +101,13 @@ db-status: ## 📊 Muestra estado de migraciones
 	$(ALEMBIC) history
 
 # Pipeline completo
-pipeline: download process harmonize ## 🚀 Pipeline completo (Phase 2)
+pipeline: ## 🚀 Pipeline completo (Download → Process → Harmonize)
+	$(PYTHON) -m src.main pipeline
+
+pipeline-force: ## 🚀 Pipeline completo con force mode
+	$(PYTHON) -m src.main pipeline --force
+
+pipeline-steps: download process harmonize ## 🚀 Pipeline paso a paso
 	@echo "✨ Pipeline completado"
 
 pipeline-full: setup download process harmonize validate ## 🎯 Pipeline completo con setup

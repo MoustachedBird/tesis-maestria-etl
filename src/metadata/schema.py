@@ -148,6 +148,98 @@ CREATE INDEX IF NOT EXISTS idx_tasks_attempt ON download_tasks(attempt_number);
 CREATE INDEX IF NOT EXISTS idx_lineage_run_id ON data_lineage(run_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_task_id ON data_lineage(task_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_source_type ON data_lineage(source_type);
+
+-- ============================================================================
+-- PROCESS TASKS: ZIP → Warehouse transformation tracking
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS process_tasks (
+    task_id VARCHAR(36) PRIMARY KEY,
+    run_id VARCHAR(36) NOT NULL,
+    
+    -- Task identification
+    task_name VARCHAR(200) NOT NULL,
+    source_path VARCHAR NOT NULL,
+    target_table VARCHAR(100),
+    period VARCHAR(20),
+    
+    -- Execution tracking
+    start_time TIMESTAMP,
+    end_time TIMESTAMP,
+    duration_seconds DOUBLE,
+    status VARCHAR(20) NOT NULL,             -- PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
+    
+    -- Processing metrics
+    rows_extracted BIGINT,
+    rows_loaded BIGINT,
+    rows_rejected BIGINT,
+    file_size_bytes BIGINT,
+    
+    -- Error handling
+    error_type VARCHAR(50),
+    error_message VARCHAR,
+    
+    -- Audit
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================================
+-- HARMONIZE TASKS: Entity resolution tracking
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS harmonize_tasks (
+    task_id VARCHAR(36) PRIMARY KEY,
+    run_id VARCHAR(36) NOT NULL,
+    
+    -- Task identification
+    task_name VARCHAR(200) NOT NULL,
+    region_group VARCHAR(100),              -- e.g., "NORTE", "SUR", or single state
+    state_list VARCHAR,                     -- JSON array of states
+    
+    -- Execution tracking
+    start_time TIMESTAMP,
+    end_time TIMESTAMP,
+    duration_seconds DOUBLE,
+    status VARCHAR(20) NOT NULL,            -- PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
+    
+    -- Harmonization metrics
+    entities_input BIGINT,
+    entities_matched BIGINT,
+    entities_new BIGINT,
+    master_clees_created BIGINT,
+    periods_processed INTEGER,
+    match_confidence_avg DOUBLE,
+    
+    -- Quality metrics
+    spatial_matches INTEGER,
+    identity_matches INTEGER,
+    activity_matches INTEGER,
+    
+    -- Output
+    output_path VARCHAR,
+    
+    -- Error handling
+    error_type VARCHAR(50),
+    error_message VARCHAR,
+    
+    -- Audit
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================================
+-- PROCESS TASKS INDEXES
+-- ============================================================================
+CREATE INDEX IF NOT EXISTS idx_process_tasks_run_id ON process_tasks(run_id);
+CREATE INDEX IF NOT EXISTS idx_process_tasks_status ON process_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_process_tasks_period ON process_tasks(period);
+CREATE INDEX IF NOT EXISTS idx_process_tasks_source ON process_tasks(source_path);
+
+-- ============================================================================
+-- HARMONIZE TASKS INDEXES
+-- ============================================================================
+CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_run_id ON harmonize_tasks(run_id);
+CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_status ON harmonize_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_region ON harmonize_tasks(region_group);
 """
 
 
@@ -232,5 +324,48 @@ QUERIES = {
         AND period IS NOT NULL
         GROUP BY period
         ORDER BY period DESC
+    """,
+    "get_pending_process_tasks": """
+        SELECT 
+            dt.target_path as source_path,
+            dt.period,
+            dt.task_id as download_task_id
+        FROM download_tasks dt
+        LEFT JOIN process_tasks pt ON dt.target_path = pt.source_path
+        WHERE dt.status = 'SUCCESS'
+          AND (pt.task_id IS NULL OR pt.status = 'FAILED')
+        ORDER BY dt.period DESC, dt.created_at DESC
+    """,
+    "get_process_task_by_path": """
+        SELECT task_id FROM process_tasks
+        WHERE source_path = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+    """,
+    "get_process_metrics": """
+        SELECT 
+            period,
+            COUNT(*) as total_processed,
+            SUM(rows_loaded) as total_rows,
+            AVG(duration_seconds) as avg_duration_sec,
+            AVG(rows_loaded) as avg_rows_loaded
+        FROM process_tasks
+        WHERE status = 'SUCCESS'
+        AND period IS NOT NULL
+        GROUP BY period
+        ORDER BY period DESC
+    """,
+    "get_harmonize_metrics": """
+        SELECT 
+            region_group,
+            COUNT(*) as total_harmonizations,
+            SUM(entities_input) as total_entities,
+            SUM(entities_matched) as total_matched,
+            SUM(entities_new) as total_new,
+            AVG(match_confidence_avg) as avg_confidence
+        FROM harmonize_tasks
+        WHERE status = 'SUCCESS'
+        GROUP BY region_group
+        ORDER BY region_group
     """,
 }

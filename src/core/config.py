@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     GOLD_DIR: Path = DATA_DIR / "gold"
     SEEDS_DIR: Path = DATA_DIR / "seeds"
 
+    # Processing output directories
+    PROCESSED_OUTPUT_DIR: Path = DATA_DIR / "processed"
+    CURATED_OUTPUT_DIR: Path = DATA_DIR / "curated"
+
     # Logs
     LOGS_DIR: Path = PROJECT_ROOT / "logs"
 

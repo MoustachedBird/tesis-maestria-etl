@@ -1,5 +1,10 @@
 [run]
-source = src/db
+source =
+    src/db
+    src/metadata
+    src/transformers
+    src/extractors
+    src/core
 omit =
     */tests/*
     */migrations/*
@@ -7,6 +12,7 @@ omit =
     */__pycache__/*
     */.venv/*
     */conftest.py
+    src/transformers/_legacy/*
 
 [report]
 precision = 2
