@@ -21,7 +21,7 @@ def temp_transformer(tmp_path):
     data_root.mkdir()
 
     # Create required subdirectories
-    (data_root / "raw" / "denue").mkdir(parents=True)
+    (data_root / "bronze" / "denue").mkdir(parents=True)
     seeds_dir = data_root / "seeds"
     seeds_dir.mkdir(parents=True)
     (data_root / "processed").mkdir(parents=True)

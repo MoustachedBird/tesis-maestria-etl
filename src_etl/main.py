@@ -17,17 +17,13 @@ console = Console()
 # Definición de rutas raíz (basadas en la ubicación de este archivo)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data"
-RAW_DIR = DATA_ROOT / "raw" / "denue"
+BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 
 
 @app.command()
 def download_inegi(
-    headless: bool = typer.Option(
-        True, help="Ejecutar navegador en modo headless (sin ventana)"
-    ),
-    output: Path = typer.Option(
-        RAW_DIR, help="Carpeta de destino para los archivos ZIP"
-    ),
+    headless: bool = typer.Option(True, help="Ejecutar navegador en modo headless (sin ventana)"),
+    output: Path = typer.Option(BRONZE_DIR, help="Carpeta de destino para los archivos ZIP"),
     force: bool = typer.Option(
         False,
         "--force",
@@ -45,9 +41,7 @@ def download_inegi(
     console.print(f"👻 Modo Headless: {headless}")
 
     if force:
-        console.print(
-            f"⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]"
-        )
+        console.print(f"⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
     downloader = DenueDownloader(output_dir=output, headless=headless, force=force)
     downloader.download_all()
@@ -55,9 +49,7 @@ def download_inegi(
 
 @app.command()
 def retry_inegi(
-    output: Path = typer.Option(
-        RAW_DIR, help="Carpeta que contiene los ZIPs y el reporte a reintentar"
-    ),
+    output: Path = typer.Option(BRONZE_DIR, help="Carpeta de destino para los archivos ZIP"),
 ):
     """
     PASO 1.5: Reintenta descargas fallidas basándose en el historial de metadata.duckdb.
@@ -65,9 +57,7 @@ def retry_inegi(
     console.print(f"[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
     downloader = DenueDownloader(output_dir=output, headless=True)
     # Retry functionality will be added separately
-    console.print(
-        "[yellow]Retry functionality coming soon - use download-inegi to re-run[/yellow]"
-    )
+    console.print("[yellow]Retry functionality coming soon - use download-inegi to re-run[/yellow]")
 
 
 @app.command()
@@ -109,9 +99,7 @@ def process_denue(
             raise typer.Exit(code=1)
 
     except Exception as e:
-        console.print(
-            f"[bold red]❌ Error en el procesamiento: {escape(str(e))}[/bold red]"
-        )
+        console.print(f"[bold red]❌ Error en el procesamiento: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -123,9 +111,7 @@ def harmonize():
 
     Usa el nuevo sistema de MetadataTracker para tracking completo.
     """
-    console.print(
-        f"[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]"
-    )
+    console.print(f"[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]")
 
     try:
         # Use new unified transformer
@@ -145,9 +131,7 @@ def harmonize():
             raise typer.Exit(code=1)
 
     except Exception as e:
-        console.print(
-            f"[bold red]❌ Error en armonización: {escape(str(e))}[/bold red]"
-        )
+        console.print(f"[bold red]❌ Error en armonización: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -177,9 +161,7 @@ def pipeline(
 
         console.print("=" * 60)
         if success:
-            console.print(
-                f"[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]"
-            )
+            console.print(f"[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]")
 
             # Show summary
             status = transformer.get_pipeline_status()

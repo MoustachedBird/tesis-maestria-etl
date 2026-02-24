@@ -28,7 +28,7 @@ def test_create_process_task(temp_tracker):
     task_id = temp_tracker.create_process_task(
         run_id=run_id,
         task_name="test_file.zip",
-        source_path="/data/raw/test_file.zip",
+        source_path="/data/bronze/test_file.zip",
         period="2024_11",
     )
 
@@ -40,7 +40,7 @@ def test_complete_process_task(temp_tracker):
     """Test completing a process task with metrics."""
     run_id = temp_tracker.create_run("test_processor", "PROCESS")
     task_id = temp_tracker.create_process_task(
-        run_id=run_id, task_name="test_file.zip", source_path="/data/raw/test_file.zip"
+        run_id=run_id, task_name="test_file.zip", source_path="/data/bronze/test_file.zip"
     )
 
     # Start and complete task
@@ -104,7 +104,7 @@ def test_get_pending_process_tasks(temp_tracker):
         run_id=run_id,
         task_name="test_download",
         source_url="http://test.com/file.zip",
-        target_path="/data/raw/file.zip",
+        target_path="/data/bronze/file.zip",
         period="2024_11",
     )
     temp_tracker.start_task(download_task_id)
