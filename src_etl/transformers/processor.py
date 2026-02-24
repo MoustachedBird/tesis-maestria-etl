@@ -18,6 +18,8 @@ from typing import Optional, Dict, Any, Tuple
 import polars as pl
 
 from src_etl.loaders.denue import DataStoreManager
+from src_etl.loaders.geography import load_seeds as load_geography_seeds
+from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_metadata.tracker import MetadataTracker
 from src_metadata.models import JobStatus, TaskStatus
 from src_etl.utils.constants import (
@@ -138,20 +140,21 @@ class ProcessorStage:
         )
 
     def _bootstrap_seeds(self, force: bool = False):
-        """Carga semillas y asegura integridad referencial con validación estricta."""
-        seeds = {
-            "denue_entidades": "seed_entidades.parquet",
-            "denue_municipios": "seed_municipios.parquet",
-            "denue_localidades": "seed_localidades.parquet",
-            "denue_actividades_economicas": "seed_actividades.parquet",
-        }
+        """
+        Bootstrap seed catalog tables for referential integrity.
+
+        Delegates to domain-specific loaders:
+        - geography: entidades, municipios, localidades
+        - scian: actividades_economicas
+        """
+        seeds_dir = self.data_root / "seeds"
 
         with self.datastore._get_connection() as conn:
             if force:
-                logger.warning("🗑️ Eliminando tabla de hechos por restricción de integridad...")
+                logger.warning("Dropping fact table for integrity constraint reset...")
                 conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
 
-            # Creación de tipos ENUM
+            # Create ENUM types
             for name, values in ENUM_CATALOGS.items():
                 type_name = f"{name}_type"
                 if not conn.execute(
@@ -160,52 +163,9 @@ class ProcessorStage:
                     vals_sql = ", ".join([f"'{v}'" for v in values])
                     conn.execute(f"CREATE TYPE {type_name} AS ENUM ({vals_sql})")
 
-            # Validación y Carga de Dimensiones
-            for table, file_name in seeds.items():
-                seed_path = self.data_root / "seeds" / file_name
-
-                if not seed_path.exists():
-                    logger.error(f"❌ Archivo no encontrado en: {seed_path}")
-                    raise FileNotFoundError(
-                        f"Error Crítico: La semilla '{file_name}' es obligatoria para la integridad referencial."
-                    )
-
-                try:
-                    row_count = pl.scan_parquet(seed_path).select(pl.len()).collect().item()
-                    if row_count == 0:
-                        raise ValueError(
-                            f"Error Crítico: El archivo '{file_name}' tiene 0 registros."
-                        )
-                    logger.info(f"✅ Semilla validada: {file_name} ({row_count:,} registros).")
-                except Exception as e:
-                    raise RuntimeError(f"Error al leer la semilla {file_name}: {str(e)}")
-
-                if force:
-                    conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-
-                if not conn.execute(
-                    f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table}'"
-                ).fetchone():
-                    if table == "denue_entidades":
-                        conn.execute(
-                            f"CREATE TABLE {table} (cve_ent VARCHAR PRIMARY KEY, entidad VARCHAR)"
-                        )
-                    elif table == "denue_municipios":
-                        conn.execute(
-                            f"CREATE TABLE {table} (cve_ent VARCHAR, cve_mun VARCHAR, municipio VARCHAR, PRIMARY KEY (cve_ent, cve_mun))"
-                        )
-                    elif table == "denue_localidades":
-                        conn.execute(
-                            f"CREATE TABLE {table} (cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR, localidad VARCHAR, PRIMARY KEY (cve_ent, cve_mun, cve_loc))"
-                        )
-                    elif table == "denue_actividades_economicas":
-                        conn.execute(
-                            f"CREATE TABLE {table} (codigo_act VARCHAR, nombre_act VARCHAR, PRIMARY KEY (codigo_act, nombre_act))"
-                        )
-
-                    # Cargar data desde parquet
-                    conn.execute(f"INSERT INTO {table} SELECT * FROM '{seed_path}'")
-                    logger.info(f"✅ Semilla cargada: {table} desde {file_name}")
+            # Load seed catalogs via loaders
+            load_geography_seeds(conn, seeds_dir, force=force)
+            load_scian_seeds(conn, seeds_dir, force=force)
 
     def _clean_raw_data(self, zip_path: Path, period: str) -> Tuple[pl.DataFrame, Dict[str, Any]]:
         """
