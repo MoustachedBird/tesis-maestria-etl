@@ -24,6 +24,8 @@ dependencies = [
     "tenacity>=8.2.3",
     "structlog>=24.1.0",
     "pyyaml>=6.0.0",
+    "rich>=14.2.0",
+    "typer>=0.21.1",
 ]
 
 [dependency-groups]

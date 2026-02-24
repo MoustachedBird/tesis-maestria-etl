@@ -65,3 +65,10 @@ htmlcov/
 .pytype/
 .dmypy.json
 dmypy.json
+.ruff_cache/
+
+# --- Logs ---
+logs/
+
+# --- Data Archive (backups, one-time files) ---
+data/archive/
