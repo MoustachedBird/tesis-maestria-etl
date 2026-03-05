@@ -103,7 +103,7 @@ COLUMN_ALIASES = {
     "nombre_ent": "entidad",
     "nombre_entidad": "entidad",
     "cve_ent": "entidad",
-    "clave entidad": "entidad",  # Histórico 2015
+    "clave entidad": "cve_ent",  # Histórico 2015 (código numérico)
     # Municipio
     "nom_mun": "municipio",
     "municipio_del_domicilio": "municipio",
@@ -114,11 +114,11 @@ COLUMN_ALIASES = {
     "municipio_delegacion": "municipio",
     "municipio_o_delegacion": "municipio",
     "cve_mun": "municipio",
-    "clave municipio": "municipio",  # Histórico 2015
+    "clave municipio": "cve_mun",  # Histórico 2015 (código numérico)
     # Localidad
     "nom_loc": "localidad",
     "loc": "localidad",
-    "clave localidad": "localidad",  # Histórico 2015
+    "clave localidad": "cve_loc",  # Histórico 2015 (código numérico)
     "cve_loc": "localidad",
     # Actividad Económica (SCIAN)
     "código de la clase de actividad scian": "codigo_act",  # Histórico 2015
@@ -146,6 +146,27 @@ COLUMN_ALIASES = {
     # Fecha e Integración
     "fecha_alta_base": "fecha_alta",
     "fecha de incorporación al denue": "fecha_alta",  # Histórico 2015
+    # Vialidades cruzadas (entre vialidad) - Histórico 2015
+    "tipo de entre vialidad 1": "tipo_v_e_1",
+    "nombre de entre vialidad 1": "nom_v_e_1",
+    "tipo de entre vialidad 2": "tipo_v_e_2",
+    "nombre de entre vialidad 2": "nom_v_e_2",
+    "tipo de entre vialidad 3": "tipo_v_e_3",
+    "nombre de entre vialidad 3": "nom_v_e_3",
+    # Edificio y letras - Histórico 2015
+    "letra exterior": "letra_ext",
+    "edificio piso": "edificio_e",
+    "letra interior": "letra_int",
+    # Centro comercial - Histórico 2015
+    "corredor industrial, centro comercial o mercado público": "nom_cencom",
+    # Contacto - Histórico 2015
+    "número de teléfono": "telefono",
+    "correo electrónico": "correoelec",
+    "sitio en internet": "www",
+    # Tipo establecimiento - Histórico 2015
+    "tipo de establecimiento": "tipounieco",
+    # Nombre de entidad federativa - Histórico 2015
+    "entidad federativa": "entidad",
 }
 
 # ENTITY VALUE NORMALIZATION: Corrección de nombres de estados para uniformidad.

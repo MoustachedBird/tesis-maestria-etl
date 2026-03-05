@@ -190,21 +190,71 @@ class TransformStage:
 
         # Extract and read CSV
         with zipfile.ZipFile(zip_path) as z:
-            csv_name = z.namelist()[0]
+            # Prefer 'conjunto_de_datos' CSVs, exclude metadata files
+            csv_candidates = [
+                f for f in z.namelist() if f.endswith(".csv") and "conjunto_de_datos" in f.lower()
+            ]
+            if not csv_candidates:
+                csv_candidates = [
+                    f for f in z.namelist() if f.endswith(".csv") and "metadatos" not in f.lower()
+                ]
+            if not csv_candidates:
+                csv_candidates = z.namelist()[:1]
+
+            csv_name = csv_candidates[0]
             logs["stats"]["csv_file"] = csv_name
 
             with z.open(csv_name) as f:
-                # Try UTF-8 first, fallback to latin1
+                raw_bytes = f.read()
+
+            # Read all columns as Utf8 (infer_schema_length=0) to match
+            # the ORM model where every column is String except latitud/longitud.
+            # Three encoding fallbacks: UTF-8 -> Latin-1 -> Sanitized Latin-1
+            try:
+                df = pl.read_csv(
+                    raw_bytes,
+                    infer_schema_length=0,
+                    ignore_errors=True,
+                    encoding="utf-8",
+                )
+            except Exception:
                 try:
-                    df = pl.read_csv(f, encoding="utf-8")
-                except:
-                    f.seek(0)
-                    df = pl.read_csv(f, encoding="latin1")
+                    df = pl.read_csv(
+                        raw_bytes,
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        encoding="latin-1",
+                    )
+                except Exception:
+                    sanitized = raw_bytes.decode("latin-1", errors="replace").encode("utf-8")
+                    df = pl.read_csv(
+                        sanitized,
+                        infer_schema_length=0,
+                        ignore_errors=True,
+                        encoding="utf-8",
+                    )
 
         logs["stats"]["rows_raw"] = df.height
 
-        # Rename columns using aliases
-        rename_map = {old: new for old, new in COLUMN_ALIASES.items() if old in df.columns}
+        # Normalize column headers: lowercase, strip whitespace and BOM
+        df = df.rename({c: c.lower().strip().replace("\ufeff", "") for c in df.columns})
+
+        # Handle duplicate column names (e.g., from encoding issues)
+        if len(df.columns) != len(set(df.columns)):
+            new_cols: list[str] = []
+            seen: dict[str, int] = {}
+            for c in df.columns:
+                count = seen.get(c, 0) + 1
+                seen[c] = count
+                new_cols.append(f"{c}_{count}" if count > 1 else c)
+            df.columns = new_cols
+
+        # Rename columns using aliases (skip if target already exists to avoid conflicts)
+        rename_map = {
+            old: new
+            for old, new in COLUMN_ALIASES.items()
+            if old in df.columns and new not in df.columns
+        }
         if rename_map:
             df = df.rename(rename_map)
             logs["schema_changes"]["duplicates_renamed"] = list(rename_map.keys())
@@ -225,14 +275,15 @@ class TransformStage:
             if col in df.columns:
                 df = df.with_columns(pl.col(col).replace(norm_map))
 
-        # Normalize text columns
+        # Normalize ENUM text columns (names must match post-alias MASTER_COLUMNS)
         text_cols = [
             "tipo_vial",
-            "tipo_asentamiento",
-            "nombre_asentamiento",
-            "tipo_vial_1",
-            "tipo_vial_2",
-            "tipo_vial_3",
+            "tipo_asent",
+            "tipounieco",
+            "per_ocu",
+            "tipo_v_e_1",
+            "tipo_v_e_2",
+            "tipo_v_e_3",
         ]
         for col in text_cols:
             if col in df.columns:
@@ -244,21 +295,15 @@ class TransformStage:
         # Select only needed columns
         df = df.select([c for c in MASTER_COLUMNS if c in df.columns])
 
-        # Generate unique ID
+        # Generate unique ID (use available columns, with fallbacks for missing ones)
+        id_components = ["clee", "nom_estab", "raz_social", "codigo_act", "period"]
+        id_exprs = [
+            pl.col(c).fill_null(f"no_{c}").cast(pl.Utf8) if c in df.columns else pl.lit(f"no_{c}")
+            for c in id_components
+        ]
+
         df = df.with_columns(
-            pl.concat_str(
-                [
-                    pl.col("clee").cast(pl.Utf8),
-                    pl.col("nom_estab"),
-                    pl.col("raz_social"),
-                    pl.col("codigo_act"),
-                    pl.col("period"),
-                ],
-                separator="|",
-            )
-            .hash()
-            .cast(pl.Utf8)
-            .alias("id")
+            pl.concat_str(id_exprs, separator="|").hash().cast(pl.Utf8).alias("id")
         )
 
         logs["stats"]["rows_final"] = df.height
