@@ -407,11 +407,11 @@ class BronzeToSilverProcessor:
                 )
                 continue
 
-            # Create process task
+            # Create process task (use relative path to match download_tasks.target_path for JOIN)
             task_id = self.tracker.create_process_task(
                 run_id=run_id,
                 task_name=zip_path.name,
-                source_path=str(zip_path),
+                source_path=task_info["source_path"],
                 period=task_info.get("period"),
                 target_table="denue_establecimientos",
             )
