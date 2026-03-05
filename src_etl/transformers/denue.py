@@ -13,15 +13,15 @@ import logging
 from pathlib import Path
 
 from src_etl.core.config import settings
-from src_etl.loaders.loader import LoaderStage
-from src_etl.transformers.harmonizer import HarmonizerStage
-from src_etl.transformers.processor import TransformStage
+from src_etl.loaders.loader import SilverToGoldLoader
+from src_etl.transformers.harmonizer import EntityResolutionHarmonizer
+from src_etl.transformers.processor import BronzeToSilverProcessor
 from src_metadata.tracker import MetadataTracker
 
 logger = logging.getLogger(__name__)
 
 
-class DenueTransformer:
+class DenuePipelineOrchestrator:
     """
     Unified transformer for DENUE data pipeline.
 
@@ -29,7 +29,7 @@ class DenueTransformer:
     metadata tracking and observability.
 
     Usage:
-        transformer = DenueTransformer(data_root=Path("data"))
+        transformer = DenuePipelineOrchestrator(data_root=Path("data"))
 
         # Run individual stages
         transformer.run_transform_stage(force=False)
@@ -78,26 +78,26 @@ class DenueTransformer:
         self.curated_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize stages
-        self.transformer = TransformStage(
+        self.transformer = BronzeToSilverProcessor(
             data_root=self.data_root,
             tracker=self.tracker,
             silver_db_path=self.silver_db_path,
         )
 
-        self.harmonizer = HarmonizerStage(
+        self.harmonizer = EntityResolutionHarmonizer(
             data_root=self.data_root,
             tracker=self.tracker,
             input_dir=settings.PROCESSED_OUTPUT_DIR,
             output_dir=self.curated_output_dir,
         )
 
-        self.loader = LoaderStage(
+        self.loader = SilverToGoldLoader(
             tracker=self.tracker,
             silver_path=self.silver_db_path,
             gold_path=self.gold_db_path,
         )
 
-        logger.info("DenueTransformer initialized")
+        logger.info("DenuePipelineOrchestrator initialized")
         logger.info(f"   Silver DB: {self.silver_db_path}")
         logger.info(f"   Gold DB: {self.gold_db_path}")
         logger.info(f"   Metadata: {self.metadata_db}")
@@ -300,6 +300,6 @@ class DenueTransformer:
     def __repr__(self) -> str:
         """String representation."""
         return (
-            f"DenueTransformer(data_root={self.data_root}, "
+            f"DenuePipelineOrchestrator(data_root={self.data_root}, "
             f"silver={self.silver_db_path}, gold={self.gold_db_path})"
         )

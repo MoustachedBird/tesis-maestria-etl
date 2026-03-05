@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 
-class StructuredLogger:
+class PipelineLogger:
     """
     Structured logger with Rich console output and run-specific directories.
 
@@ -28,7 +28,7 @@ class StructuredLogger:
     - Error file: ERROR and CRITICAL only
 
     Example:
-        >>> logger = StructuredLogger(
+        >>> logger = PipelineLogger(
         ...     log_dir=Path("logs/downloads"),
         ...     run_id="550e8400-e29b-41d4-a716-446655440000",
         ...     job_name="denue_downloader",
@@ -206,7 +206,7 @@ class StructuredLogger:
             Bound logger with run context
 
         Example:
-            >>> logger_manager = StructuredLogger(run_id="abc123")
+            >>> logger_manager = PipelineLogger(run_id="abc123")
             >>> log = logger_manager.get_logger()
             >>> log.info("task_started", task_id="xyz789")
         """
@@ -265,7 +265,7 @@ class StructuredLogger:
         job_name: str,
         log_dir: Path = Path("logs/downloads"),
         log_level: str = "INFO",
-    ) -> "StructuredLogger":
+    ) -> "PipelineLogger":
         """
         Factory method to create logger for a specific job run.
 
@@ -276,10 +276,10 @@ class StructuredLogger:
             log_level: Logging level
 
         Returns:
-            Configured StructuredLogger instance
+            Configured PipelineLogger instance
 
         Example:
-            >>> logger = StructuredLogger.create_for_run(
+            >>> logger = PipelineLogger.create_for_run(
             ...     run_id="550e8400-e29b-41d4-a716-446655440000",
             ...     job_name="denue_downloader",
             ... )
@@ -294,7 +294,7 @@ class StructuredLogger:
     def __repr__(self) -> str:
         """String representation."""
         return (
-            f"StructuredLogger("
+            f"PipelineLogger("
             f"job={self.job_name}, "
             f"run_id={self.run_id}, "
             f"level={self.log_level}, "
@@ -307,7 +307,7 @@ def get_logger(name: str | None = None) -> structlog.BoundLogger:
     Get a structlog logger instance.
 
     Convenience function for getting a basic logger without
-    StructuredLogger setup.
+    PipelineLogger setup.
 
     Args:
         name: Logger name (optional)

@@ -4,7 +4,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-from src_etl.extractors.denue import DenueDownloader
+from src_etl.extractors.denue import DenueExtractor
 
 app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")
 console = Console()
@@ -41,7 +41,7 @@ def extract(
     if force:
         console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
-    downloader = DenueDownloader(output_dir=output, headless=headless, force=force)
+    downloader = DenueExtractor(output_dir=output, headless=headless, force=force)
     downloader.download_all()
 
 
@@ -73,9 +73,9 @@ def transform(
         console.print("[bold orange3]   FORCE MODE: Reprocessing all files[/bold orange3]")
 
     try:
-        from src_etl.transformers.denue import DenueTransformer
+        from src_etl.transformers.denue import DenuePipelineOrchestrator
 
-        transformer = DenueTransformer(data_root=DATA_ROOT)
+        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
         success = True
 
         if process:
@@ -121,9 +121,9 @@ def load(
     console.print("[bold cyan]Starting DENUE Loader[/bold cyan]")
 
     try:
-        from src_etl.transformers.denue import DenueTransformer
+        from src_etl.transformers.denue import DenuePipelineOrchestrator
 
-        transformer = DenueTransformer(data_root=DATA_ROOT)
+        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
         success = transformer.run_load_stage(force=force)
 
         if success:
@@ -160,9 +160,9 @@ def pipeline(
     console.print("=" * 60)
 
     try:
-        from src_etl.transformers.denue import DenueTransformer
+        from src_etl.transformers.denue import DenuePipelineOrchestrator
 
-        transformer = DenueTransformer(data_root=DATA_ROOT)
+        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
         success = transformer.run_full_pipeline(force=force)
 
         console.print("=" * 60)

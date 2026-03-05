@@ -1,5 +1,5 @@
 """
-Integration tests for DenueTransformer.
+Integration tests for DenuePipelineOrchestrator.
 
 Tests the unified transformer with real components (but mocked data).
 """
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src_etl.transformers.denue import DenueTransformer
+from src_etl.transformers.denue import DenuePipelineOrchestrator
 
 # Path to the real seed files in the project
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +38,7 @@ def temp_transformer(tmp_path):
     silver_db = data_root / "silver" / "denue.duckdb"
     gold_db = data_root / "gold" / "denue.duckdb"
 
-    transformer = DenueTransformer(
+    transformer = DenuePipelineOrchestrator(
         data_root=data_root,
         metadata_db=metadata_db,
         silver_db_path=silver_db,
@@ -75,7 +75,7 @@ def test_get_pipeline_status(temp_transformer):
 def test_transformer_repr(temp_transformer):
     """Test string representation."""
     repr_str = repr(temp_transformer)
-    assert "DenueTransformer" in repr_str
+    assert "DenuePipelineOrchestrator" in repr_str
     assert "data_root" in repr_str
     assert "silver" in repr_str
     assert "gold" in repr_str

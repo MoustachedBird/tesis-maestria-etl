@@ -1,10 +1,10 @@
 import polars as pl
 
 from src_etl.utils.denue_schema import DB_FACT_COLUMNS, ENUM_CATALOGS
-from src_etl.utils.warehouse import BaseWarehouse
+from src_etl.utils.warehouse import DuckDBWarehouse
 
 
-class DataStoreManager(BaseWarehouse):
+class EstablecimientoWriter(DuckDBWarehouse):
     def __init__(self, warehouse_path):
         super().__init__(warehouse_path)
         self.table_id = "establecimientos"

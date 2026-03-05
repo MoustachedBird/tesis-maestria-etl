@@ -3,7 +3,7 @@ from pathlib import Path
 import duckdb
 
 
-class BaseWarehouse:
+class DuckDBWarehouse:
     def __init__(self, warehouse_path: Path):
         self.warehouse_path = warehouse_path
 

@@ -34,7 +34,7 @@ from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
 
-class HarmonizerStage:
+class EntityResolutionHarmonizer:
     """
     Resolves entity identities across temporal snapshots.
 

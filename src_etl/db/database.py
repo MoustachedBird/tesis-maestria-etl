@@ -173,4 +173,4 @@ def drop_db() -> None:
 
 
 # For backward compatibility with existing code
-BaseWarehouse = get_db
+DuckDBWarehouse = get_db

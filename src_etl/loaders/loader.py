@@ -17,7 +17,7 @@ from src_metadata.tracker import MetadataTracker
 logger = logging.getLogger(__name__)
 
 
-class LoaderStage:
+class SilverToGoldLoader:
     """
     Promotes Silver DuckDB to Gold DuckDB via file copy.
 

@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
 from src_etl.core.download_config import DownloadConfig
-from src_etl.core.logging import StructuredLogger
+from src_etl.core.logging import PipelineLogger
 from src_etl.utils.browser import get_chrome_driver
 from src_etl.utils.denue_scraping import scrape_denue_table
 from src_etl.utils.downloader import Downloader
@@ -19,12 +19,12 @@ from src_metadata.models import TaskStatus
 from src_metadata.tracker import MetadataTracker
 
 
-class DenueDownloader:
+class DenueExtractor:
     """
     Simplified DENUE downloader using Phase 2 components.
 
     Example:
-        >>> downloader = DenueDownloader(
+        >>> downloader = DenueExtractor(
         ...     output_dir=Path("data/bronze/denue"),
         ...     headless=True,
         ... )
@@ -69,7 +69,7 @@ class DenueDownloader:
 
         # Run context
         self.run_id: str | None = None
-        self.logger: StructuredLogger | None = None
+        self.logger: PipelineLogger | None = None
 
     def download_all(self) -> dict:
         """
@@ -88,7 +88,7 @@ class DenueDownloader:
         )
 
         # Initialize logging
-        self.logger = StructuredLogger.create_for_run(
+        self.logger = PipelineLogger.create_for_run(
             run_id=self.run_id,
             job_name="denue_downloader",
             log_dir=self.config.log_directory,

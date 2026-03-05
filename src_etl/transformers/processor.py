@@ -17,7 +17,7 @@ from typing import Any
 import polars as pl
 
 from src_etl.core.config import settings
-from src_etl.loaders.denue import DataStoreManager
+from src_etl.loaders.denue import EstablecimientoWriter
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_etl.utils.denue_schema import (
@@ -40,7 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class TransformStage:
+class BronzeToSilverProcessor:
     """
     Transforms raw DENUE ZIP files (Bronze) into the Silver DuckDB warehouse.
 
@@ -77,7 +77,7 @@ class TransformStage:
         # Ensure Silver directory exists
         self.warehouse_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.datastore = DataStoreManager(self.warehouse_path)
+        self.datastore = EstablecimientoWriter(self.warehouse_path)
         self._bootstrap_seeds()
 
     def _normalize_text_col(self, col_name: str):
