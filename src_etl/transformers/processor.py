@@ -207,6 +207,12 @@ class BronzeToSilverProcessor:
             with z.open(csv_name) as f:
                 raw_bytes = f.read()
 
+            # Fix INEGI 01_2016 bug: 5 CSVs have a missing newline between
+            # the header row and the first data row, causing the header to
+            # fuse with the first record and produce 81 columns instead of 41.
+            if b'"fecha_alta""' in raw_bytes[:2000]:
+                raw_bytes = raw_bytes.replace(b'"fecha_alta""', b'"fecha_alta"\n"', 1)
+
             # Read all columns as Utf8 (infer_schema_length=0) to match
             # the ORM model where every column is String except latitud/longitud.
             # Three encoding fallbacks: UTF-8 -> Latin-1 -> Sanitized Latin-1
