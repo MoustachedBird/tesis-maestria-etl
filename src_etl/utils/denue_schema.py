@@ -46,6 +46,7 @@ MASTER_COLUMNS = [
     "latitud",
     "longitud",
     "fecha_alta_str",
+    "period",
 ]
 
 # Columnas que realmente se guardarán en la tabla 'establecimientos'
@@ -92,7 +93,7 @@ DB_FACT_COLUMNS = [
 ]
 
 # REQUIRED COLUMNS: Columnas indispensables para que el registro sea procesado.
-REQUIRED_COLUMNS = ["id", "codigo_act", "entidad", "municipio"]
+REQUIRED_COLUMNS = ["codigo_act", "entidad", "municipio"]
 
 # COLUMN ALIASES: Mapeo de nombres variables del INEGI a nombres estandarizados.
 COLUMN_ALIASES = {
