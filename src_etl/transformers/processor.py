@@ -289,6 +289,13 @@ class TransformStage:
             if col in df.columns:
                 df = df.with_columns(self._normalize_text_col(col))
 
+        # Pad geographic codes to match seed catalogs (e.g., "1" -> "01")
+        for col, width in [("cve_ent", 2), ("cve_mun", 3), ("cve_loc", 4)]:
+            if col in df.columns:
+                df = df.with_columns(
+                    pl.col(col).cast(pl.Utf8).str.strip_chars().str.pad_start(width, "0")
+                )
+
         # Add period column
         df = df.with_columns(pl.lit(period).alias("period"))
 

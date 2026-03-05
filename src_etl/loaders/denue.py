@@ -12,6 +12,8 @@ class DataStoreManager(BaseWarehouse):
     def validate_integrity(self, df: pl.DataFrame):
         """Validador Fail-fast en Polars."""
         for col, allowed in ENUM_CATALOGS.items():
+            if col not in df.columns:
+                continue
             invalid = (
                 df.select(col)
                 .unique()
@@ -54,8 +56,12 @@ class DataStoreManager(BaseWarehouse):
                 )
             """)
 
+            # Build column list and SELECT expressions, using NULL for missing columns
             cols_sql = ", ".join(DB_FACT_COLUMNS)
-            # DuckDB ahora encontrará 'tipo_vial' en 'df' porque ya no buscamos 'id_tipo_vial'
+            select_exprs = [
+                col if col in df.columns else f"NULL AS {col}" for col in DB_FACT_COLUMNS
+            ]
+            select_sql = ", ".join(select_exprs)
             conn.execute(
-                f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {cols_sql} FROM df"
+                f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {select_sql} FROM df"
             )
