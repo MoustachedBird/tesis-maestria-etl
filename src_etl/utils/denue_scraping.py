@@ -141,7 +141,7 @@ def scrape_denue_table(
 
                 if dest_path.exists():
                     # File exists on disk - create metadata record
-                    print(f"📝 Syncing from disk: {filename}")
+                    print(f"📝 Syncing from disk: {period}/{filename}")
 
                     task_id = tracker.create_task(
                         run_id=run_id,
