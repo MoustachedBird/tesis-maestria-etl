@@ -30,9 +30,6 @@ extract: ## Extract data from source (Bronze)
 transform: ## Transform raw data (Bronze -> Silver)
 	$(PYTHON) -m src_etl.main transform $(ARGS)
 
-transform-force: ## Transform ALL files (force mode)
-	$(PYTHON) -m src_etl.main transform --force
-
 load: ## Load Silver -> Gold
 	$(PYTHON) -m src_etl.main load $(ARGS)
 
@@ -44,9 +41,6 @@ retry: ## Retry failed extractions
 
 pipeline: ## Full pipeline (Extract -> Transform -> Load)
 	$(PYTHON) -m src_etl.main pipeline $(ARGS)
-
-pipeline-force: ## Full pipeline with force mode
-	$(PYTHON) -m src_etl.main pipeline --force
 
 pipeline-steps: extract transform load ## Pipeline step by step
 	@echo "Pipeline completed"
