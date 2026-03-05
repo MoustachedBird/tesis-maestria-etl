@@ -296,8 +296,13 @@ class BronzeToSilverProcessor:
                     pl.col(col).cast(pl.Utf8).str.strip_chars().str.pad_start(width, "0")
                 )
 
-        # Add period column
-        df = df.with_columns(pl.lit(period).alias("period"))
+        # Add period column as DATE (period format: "MM_YYYY" or "YYYY")
+        if "_" in period:
+            month, year = period.split("_", 1)
+            period_date = f"{year}-{month.zfill(2)}-01"
+        else:
+            period_date = f"{period}-01-01"
+        df = df.with_columns(pl.lit(period_date).str.to_date("%Y-%m-%d").alias("period"))
 
         # Select only needed columns
         df = df.select([c for c in MASTER_COLUMNS if c in df.columns])
