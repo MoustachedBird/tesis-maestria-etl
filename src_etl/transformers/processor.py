@@ -302,6 +302,15 @@ class BronzeToSilverProcessor:
                     pl.col(col).cast(pl.Utf8).str.strip_chars().str.pad_start(width, "0")
                 )
 
+        # Parse fecha_alta_str -> fecha_alta_date (YYYY-MM format only, others -> NULL)
+        if "fecha_alta_str" in df.columns:
+            df = df.with_columns(
+                pl.col("fecha_alta_str")
+                .str.strip_chars()
+                .str.to_date("%Y-%m", strict=False)
+                .alias("fecha_alta_date")
+            )
+
         # Add period column as DATE (period format: "MM_YYYY" or "YYYY")
         if "_" in period:
             month, year = period.split("_", 1)

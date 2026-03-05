@@ -24,7 +24,7 @@ def initialize_knowledge_base(
             pl.col("entidad").cast(pl.Utf8).fill_null(""),
             pl.col("municipio").cast(pl.Utf8).fill_null(""),
             pl.col("localidad").cast(pl.Utf8).fill_null(""),
-            pl.col("fecha_alta").cast(pl.Utf8).fill_null(""),
+            pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
             pl.col("source_paths").cast(pl.Utf8).fill_null(""),
             # --- NUEVOS CAMPOS ---
             pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
@@ -55,7 +55,7 @@ def initialize_knowledge_base(
             pl.col("entidad").alias("entidades"),
             pl.col("municipio").alias("municipios"),
             pl.col("localidad").alias("localidades"),
-            pl.col("fecha_alta").alias("fechas_alta"),
+            pl.col("fecha_alta_str").alias("fechas_alta"),
             pl.col("source_paths").alias("source_paths"),
             # --- AGREGACIÓN DE NUEVAS LISTAS ---
             pl.col("per_ocu").alias("estratos_personal"),
@@ -172,7 +172,7 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
                 pl.col("entidad").cast(pl.Utf8).fill_null(""),
                 pl.col("municipio").cast(pl.Utf8).fill_null(""),
                 pl.col("localidad").cast(pl.Utf8).fill_null(""),
-                pl.col("fecha_alta").cast(pl.Utf8).fill_null(""),
+                pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
                 pl.col("source_paths").cast(pl.Utf8).fill_null(""),
                 pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
                 pl.col("tipo_asent").cast(pl.Utf8).fill_null(""),
@@ -191,7 +191,7 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
                 pl.col("entidad").alias("entidades"),
                 pl.col("municipio").alias("municipios"),
                 pl.col("localidad").alias("localidades"),
-                pl.col("fecha_alta").alias("fechas_alta"),
+                pl.col("fecha_alta_str").alias("fechas_alta"),
                 pl.col("source_paths").alias("source_paths"),
                 # --- LISTAS NUEVAS ---
                 pl.col("per_ocu").alias("estratos_personal"),

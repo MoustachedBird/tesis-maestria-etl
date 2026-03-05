@@ -106,6 +106,23 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     @computed_field
     @property
+    def SILVER_DATABASE_URL(self) -> str:
+        """
+        Get the Silver DuckDB URL for Alembic migrations.
+
+        Returns:
+            str: SQLAlchemy-compatible database URL pointing to Silver
+        """
+        if self.DATABASE_BACKEND == "duckdb":
+            if self.SILVER_DUCKDB_PATH:
+                self.SILVER_DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
+                return f"duckdb:///{self.SILVER_DUCKDB_PATH}"
+            raise ValueError("SILVER_DUCKDB_PATH must be set for DuckDB backend")
+        # For PostgreSQL, Silver and Gold share the same database
+        return self.DATABASE_URL
+
+    @computed_field
+    @property
     def DATABASE_URL(self) -> str:
         """
         Get the database URL based on the selected backend.

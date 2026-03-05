@@ -5,23 +5,23 @@ This module configures Alembic migrations to work with both PostgreSQL and DuckD
 It uses the settings from src/core/config.py to determine the database backend.
 """
 
+import sys
 from logging.config import fileConfig
-from sqlalchemy import pool
+from pathlib import Path
+
 from alembic import context
 from alembic.ddl.impl import DefaultImpl
-import sys
-from pathlib import Path
+from sqlalchemy import Engine
 
 # Add project root to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import configuration and models
 from src_etl.core.config import get_settings
-from src_etl.db.database import get_engine
-from src_etl.db.base import Base
 
 # Import all models to ensure they're registered with Base.metadata
 from src_etl.db import models  # noqa: F401
+from src_etl.db.base import Base
 
 
 # ------------------------------------------------------------------------------
@@ -109,7 +109,7 @@ def run_migrations_offline() -> None:
 
     This is useful for generating SQL scripts without a database connection.
     """
-    url = settings.DATABASE_URL
+    url = settings.SILVER_DATABASE_URL
 
     # Configure context based on backend
     config_dict = {
@@ -141,14 +141,34 @@ def run_migrations_offline() -> None:
 # ------------------------------------------------------------------------------
 # Migration Logic (Online Mode)
 # ------------------------------------------------------------------------------
+def _get_silver_engine() -> Engine:
+    """
+    Create a SQLAlchemy engine pointing to the Silver DuckDB.
+
+    Alembic manages the Silver warehouse schema. Gold is a file copy of Silver
+    (handled by SilverToGoldLoader), so it inherits the same schema.
+    """
+    from sqlalchemy import create_engine as sa_create_engine
+    from sqlalchemy.pool import NullPool
+
+    return sa_create_engine(
+        settings.SILVER_DATABASE_URL,
+        poolclass=NullPool,
+        connect_args={"read_only": False},
+        future=True,
+    )
+
+
 def run_migrations_online() -> None:
     """
     Run migrations in 'online' mode.
 
     In this scenario we create an Engine and associate a connection with the context.
     This is the normal mode for running migrations against a live database.
+
+    Note: Alembic targets the Silver DuckDB. Gold gets its schema via file copy.
     """
-    connectable = get_engine()
+    connectable = _get_silver_engine()
 
     with connectable.connect() as connection:
         # Configure context based on backend

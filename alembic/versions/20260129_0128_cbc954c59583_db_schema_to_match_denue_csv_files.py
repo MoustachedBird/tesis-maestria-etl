@@ -4,7 +4,7 @@ This migration creates the complete database schema for DENUE (Directorio Estad�
 Nacional de Unidades Económicas) data from INEGI.
 
 The schema includes:
-- Main establishments table with all 38 columns from DENUE CSV files
+- Main establishments table with all 39 columns from DENUE CSV files
 - Geographic catalog tables (states, municipalities, localities)
 - Economic activity catalog table (SCIAN classification)
 
@@ -50,7 +50,7 @@ def upgrade() -> None:
     # complete details including identification, location, economic activity,
     # and contact information.
     #
-    # Total columns: 38 (matching DENUE CSV schema)
+    # Total columns: 39 (matching DENUE CSV schema)
     # Primary key: id (hash generated from establishment data)
     # =========================================================================
 
@@ -124,9 +124,7 @@ def upgrade() -> None:
             nullable=True,
             comment="Road type (CALLE, AVENIDA, BOULEVARD, etc.)",
         ),
-        sa.Column(
-            "nom_vial", sa.String(length=200), nullable=True, comment="Road/street name"
-        ),
+        sa.Column("nom_vial", sa.String(length=200), nullable=True, comment="Road/street name"),
         # Intersecting streets (up to 3)
         # Used to provide precise location: "between street X and street Y"
         sa.Column(
@@ -166,18 +164,14 @@ def upgrade() -> None:
             comment="Name of 3rd intersecting street",
         ),
         # Building/location details
-        sa.Column(
-            "numero_ext", sa.String(length=20), nullable=True, comment="External number"
-        ),
+        sa.Column("numero_ext", sa.String(length=20), nullable=True, comment="External number"),
         sa.Column(
             "letra_ext",
             sa.String(length=10),
             nullable=True,
             comment="External number letter/suffix",
         ),
-        sa.Column(
-            "edificio", sa.String(length=100), nullable=True, comment="Building name"
-        ),
+        sa.Column("edificio", sa.String(length=100), nullable=True, comment="Building name"),
         sa.Column(
             "edificio_e",
             sa.String(length=100),
@@ -243,13 +237,9 @@ def upgrade() -> None:
             comment="State code (entidad federativa)",
         ),
         # cve_mun: 3-digit municipality code (unique within state)
-        sa.Column(
-            "cve_mun", sa.String(length=3), nullable=True, comment="Municipality code"
-        ),
+        sa.Column("cve_mun", sa.String(length=3), nullable=True, comment="Municipality code"),
         # cve_loc: 4-digit locality code (unique within municipality)
-        sa.Column(
-            "cve_loc", sa.String(length=4), nullable=True, comment="Locality code"
-        ),
+        sa.Column("cve_loc", sa.String(length=4), nullable=True, comment="Locality code"),
         # ageb: Área Geoestadística Básica (Basic Geostatistical Area)
         # AGEB is INEGI's fundamental geographic unit for census data
         sa.Column(
@@ -271,27 +261,28 @@ def upgrade() -> None:
         sa.Column("latitud", sa.Float(), nullable=True, comment="Latitude (WGS84)"),
         sa.Column("longitud", sa.Float(), nullable=True, comment="Longitude (WGS84)"),
         # === CONTACT INFORMATION ===
-        sa.Column(
-            "telefono", sa.String(length=50), nullable=True, comment="Phone number"
-        ),
-        sa.Column(
-            "correoelec", sa.String(length=200), nullable=True, comment="Email address"
-        ),
+        sa.Column("telefono", sa.String(length=50), nullable=True, comment="Phone number"),
+        sa.Column("correoelec", sa.String(length=200), nullable=True, comment="Email address"),
         sa.Column("www", sa.String(length=200), nullable=True, comment="Website URL"),
         # === TEMPORAL TRACKING ===
-        # fecha_alta: Registration date in DENUE (format: "YYYY-MM")
-        # When the establishment was first added to DENUE
+        # fecha_alta_str: Raw registration date string from the CSV.
+        # Modern files use "YYYY-MM"; 2015 files contain Spanish text like "MARZO 2011".
         sa.Column(
-            "fecha_alta",
+            "fecha_alta_str",
             sa.String(length=10),
             nullable=True,
-            comment="Registration date in DENUE (YYYY-MM format)",
+            comment="Registration date raw string from CSV",
         ),
-        # period: Data period/snapshot date
-        # The date when this data was collected/published (format: DATE)
+        # fecha_alta_date: Parsed date for YYYY-MM values (NULL when unparseable).
         sa.Column(
-            "period", sa.Date(), nullable=True, comment="Data period/snapshot date"
+            "fecha_alta_date",
+            sa.Date(),
+            nullable=True,
+            comment="Parsed registration date (NULL for non-YYYY-MM values)",
         ),
+        # period: Data period/snapshot date.
+        # Every establishment must belong to a data snapshot period.
+        sa.Column("period", sa.Date(), nullable=False, comment="Data period/snapshot date"),
         # === PRIMARY KEY CONSTRAINT ===
         sa.PrimaryKeyConstraint("id", name=op.f("pk_establecimientos")),
     )
@@ -333,9 +324,7 @@ def upgrade() -> None:
     )
 
     # Postal code lookups
-    op.create_index(
-        op.f("ix_estab_postal"), "establecimientos", ["cod_postal"], unique=False
-    )
+    op.create_index(op.f("ix_estab_postal"), "establecimientos", ["cod_postal"], unique=False)
 
     # Spatial queries (GIS analysis)
     # Query pattern: "Find establishments near coordinates (lat, lon)"
@@ -425,9 +414,7 @@ def upgrade() -> None:
     op.create_table(
         "denue_entidades",
         sa.Column("cve_ent", sa.String(length=2), nullable=False, comment="State code"),
-        sa.Column(
-            "entidad", sa.String(length=100), nullable=False, comment="State name"
-        ),
+        sa.Column("entidad", sa.String(length=100), nullable=False, comment="State name"),
         sa.PrimaryKeyConstraint("cve_ent", name=op.f("pk_denue_entidades")),
     )
 
@@ -442,9 +429,7 @@ def upgrade() -> None:
     op.create_table(
         "denue_municipios",
         sa.Column("cve_ent", sa.String(length=2), nullable=False, comment="State code"),
-        sa.Column(
-            "cve_mun", sa.String(length=3), nullable=False, comment="Municipality code"
-        ),
+        sa.Column("cve_mun", sa.String(length=3), nullable=False, comment="Municipality code"),
         sa.Column(
             "municipio",
             sa.String(length=100),
@@ -457,9 +442,7 @@ def upgrade() -> None:
 
     # Index for name-based lookups
     # Query pattern: "Find municipality by name"
-    op.create_index(
-        op.f("ix_municipio_nombre"), "denue_municipios", ["municipio"], unique=False
-    )
+    op.create_index(op.f("ix_municipio_nombre"), "denue_municipios", ["municipio"], unique=False)
 
     # =========================================================================
     # TABLE 5: denue_localidades (Localities Catalog)
@@ -472,26 +455,16 @@ def upgrade() -> None:
     op.create_table(
         "denue_localidades",
         sa.Column("cve_ent", sa.String(length=2), nullable=False, comment="State code"),
-        sa.Column(
-            "cve_mun", sa.String(length=3), nullable=False, comment="Municipality code"
-        ),
-        sa.Column(
-            "cve_loc", sa.String(length=4), nullable=False, comment="Locality code"
-        ),
-        sa.Column(
-            "localidad", sa.String(length=100), nullable=False, comment="Locality name"
-        ),
+        sa.Column("cve_mun", sa.String(length=3), nullable=False, comment="Municipality code"),
+        sa.Column("cve_loc", sa.String(length=4), nullable=False, comment="Locality code"),
+        sa.Column("localidad", sa.String(length=100), nullable=False, comment="Locality name"),
         # Composite primary key: state + municipality + locality code
-        sa.PrimaryKeyConstraint(
-            "cve_ent", "cve_mun", "cve_loc", name=op.f("pk_denue_localidades")
-        ),
+        sa.PrimaryKeyConstraint("cve_ent", "cve_mun", "cve_loc", name=op.f("pk_denue_localidades")),
     )
 
     # Index for name-based lookups
     # Query pattern: "Find locality by name"
-    op.create_index(
-        op.f("ix_localidad_nombre"), "denue_localidades", ["localidad"], unique=False
-    )
+    op.create_index(op.f("ix_localidad_nombre"), "denue_localidades", ["localidad"], unique=False)
 
 
 def downgrade() -> None:

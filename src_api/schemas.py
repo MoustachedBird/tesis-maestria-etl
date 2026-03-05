@@ -71,7 +71,8 @@ class EstablecimientoResponse(EstablecimientoBase):
     telefono: str | None = None
     correoelec: str | None = None
     www: str | None = None
-    fecha_alta: str | None = None
+    fecha_alta_str: str | None = None
+    fecha_alta_date: date | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -45,7 +45,7 @@ MASTER_COLUMNS = [
     "tipounieco",
     "latitud",
     "longitud",
-    "fecha_alta",
+    "fecha_alta_str",
 ]
 
 # Columnas que realmente se guardarán en la tabla 'establecimientos'
@@ -86,7 +86,8 @@ DB_FACT_COLUMNS = [
     "www",
     "latitud",
     "longitud",
-    "fecha_alta",
+    "fecha_alta_str",
+    "fecha_alta_date",
     "period",
 ]
 
@@ -144,8 +145,9 @@ COLUMN_ALIASES = {
     "codigo_postal": "cod_postal",
     "código postal": "cod_postal",  # Histórico 2015
     # Fecha e Integración
-    "fecha_alta_base": "fecha_alta",
-    "fecha de incorporación al denue": "fecha_alta",  # Histórico 2015
+    "fecha_alta": "fecha_alta_str",  # Renombrar columna CSV estándar
+    "fecha_alta_base": "fecha_alta_str",
+    "fecha de incorporación al denue": "fecha_alta_str",  # Histórico 2015
     # Vialidades cruzadas (entre vialidad) - Histórico 2015
     "tipo de entre vialidad 1": "tipo_v_e_1",
     "nombre de entre vialidad 1": "nom_v_e_1",

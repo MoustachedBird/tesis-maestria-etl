@@ -36,7 +36,7 @@ class EstablecimientoWriter(DuckDBWarehouse):
                 CREATE TABLE IF NOT EXISTS {self.table_id} (
                     id VARCHAR PRIMARY KEY,
                     clee VARCHAR, nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
-                    tipo_vial tipo_vial_type, 
+                    tipo_vial tipo_vial_type,
                     tipo_asent tipo_asent_type,
                     tipounieco tipounieco_type,
                     per_ocu per_ocu_type,
@@ -49,7 +49,8 @@ class EstablecimientoWriter(DuckDBWarehouse):
                     cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR,
                     ageb VARCHAR, manzana VARCHAR, telefono VARCHAR,
                     correoelec VARCHAR, www VARCHAR,
-                    latitud DOUBLE, longitud DOUBLE, fecha_alta VARCHAR, period DATE,
+                    latitud DOUBLE, longitud DOUBLE,
+                    fecha_alta_str VARCHAR, fecha_alta_date DATE, period DATE NOT NULL,
                     FOREIGN KEY (cve_ent) REFERENCES denue_entidades(cve_ent),
                     FOREIGN KEY (cve_ent, cve_mun) REFERENCES denue_municipios(cve_ent, cve_mun),
                     FOREIGN KEY (cve_ent, cve_mun, cve_loc) REFERENCES denue_localidades(cve_ent, cve_mun, cve_loc)

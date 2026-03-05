@@ -146,12 +146,13 @@ class Establecimiento(Base):
     www: Mapped[str | None] = mapped_column(String(200), comment="Website URL")
 
     # ===== TEMPORAL TRACKING =====
-    fecha_alta: Mapped[str | None] = mapped_column(
-        String(10), comment="Registration date in DENUE (YYYY-MM format)"
+    fecha_alta_str: Mapped[str | None] = mapped_column(
+        String(10), comment="Registration date in DENUE (any format) as string"
     )
-    period: Mapped[date | None] = mapped_column(
-        Date, index=True, comment="Data period/snapshot date"
+    fecha_alta_date: Mapped[Date | None] = mapped_column(
+        Date, comment="Registration date in DENUE (YYYY-MM-01) as Date"
     )
+    period: Mapped[date] = mapped_column(Date, index=True, comment="Data period/snapshot date")
 
     # ===== INDEXES FOR PERFORMANCE =====
     __table_args__ = (
@@ -357,20 +358,20 @@ class Establecimiento(Base):
 
     def get_registration_year(self) -> int | None:
         """
-        Extract year from fecha_alta (registration date).
+        Extract year from fecha_alta_str (registration date).
 
         Returns:
             Registration year as integer or None
 
         Examples:
-            >>> estab.get_registration_year()  # fecha_alta = "2010-07"
+            >>> estab.get_registration_year()  # fecha_alta_str = "2010-07"
             2010
         """
-        if not self.fecha_alta:
+        if not self.fecha_alta_str:
             return None
 
-        # fecha_alta format is typically "YYYY-MM"
-        match = re.match(r"(\d{4})", self.fecha_alta)
+        # fecha_alta_str format is typically "YYYY-MM"
+        match = re.match(r"(\d{4})", self.fecha_alta_str)
         if match:
             return int(match.group(1))
         return None

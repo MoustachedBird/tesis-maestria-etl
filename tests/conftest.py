@@ -91,8 +91,8 @@ def real_sample_establecimiento(production_db) -> Establecimiento:
     # Get sample establishment with good data coverage
     query = """
     SELECT *
-    FROM establecimientos 
-    WHERE nom_estab IS NOT NULL 
+    FROM establecimientos
+    WHERE nom_estab IS NOT NULL
       AND nom_vial IS NOT NULL
       AND latitud IS NOT NULL
       AND per_ocu IS NOT NULL
@@ -216,7 +216,8 @@ def sample_establecimiento() -> Establecimiento:
         correoelec="test@example.com",
         www="https://www.testbusiness.com",
         # Temporal
-        fecha_alta="2020-06",
+        fecha_alta_str="2020-06",
+        fecha_alta_date=date(2020, 6, 1),
         period=date(2023, 11, 1),
     )
 
