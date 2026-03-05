@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     DATABASE_BACKEND: Literal["duckdb", "postgresql"] = "duckdb"
 
     # DuckDB Configuration
-    DUCKDB_PATH: Path | None = None
+    SILVER_DUCKDB_PATH: Path | None = None
+    GOLD_DUCKDB_PATH: Path | None = None
     DUCKDB_THREADS: int = 8
     DUCKDB_MEMORY_LIMIT: str = "16GB"
 
@@ -76,12 +77,23 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Validators
     # -------------------------------------------------------------------------
-    @field_validator("DUCKDB_PATH", mode="before")
+    @field_validator("SILVER_DUCKDB_PATH", mode="before")
     @classmethod
-    def set_duckdb_path(cls, v: Path | None, info) -> Path:
-        """Set default DuckDB path if not provided."""
+    def set_silver_duckdb_path(cls, v: Path | None, info) -> Path:
+        """Set default Silver DuckDB path if not provided."""
         if v is None:
-            # Get GOLD_DIR from the data being validated
+            silver_dir = info.data.get("SILVER_DIR")
+            if silver_dir is None:
+                data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
+                silver_dir = data_dir / "silver"
+            return silver_dir / "denue.duckdb"
+        return Path(v) if not isinstance(v, Path) else v
+
+    @field_validator("GOLD_DUCKDB_PATH", mode="before")
+    @classmethod
+    def set_gold_duckdb_path(cls, v: Path | None, info) -> Path:
+        """Set default Gold DuckDB path if not provided."""
+        if v is None:
             gold_dir = info.data.get("GOLD_DIR")
             if gold_dir is None:
                 data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
@@ -165,10 +177,10 @@ class Settings(BaseSettings):
             str: DuckDB connection URL
         """
         # Ensure parent directory exists
-        if self.DUCKDB_PATH:
-            self.DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            return f"duckdb:///{self.DUCKDB_PATH}"
-        raise ValueError("DUCKDB_PATH must be set for DuckDB backend")
+        if self.GOLD_DUCKDB_PATH:
+            self.GOLD_DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            return f"duckdb:///{self.GOLD_DUCKDB_PATH}"
+        raise ValueError("GOLD_DUCKDB_PATH must be set for DuckDB backend")
 
     # -------------------------------------------------------------------------
     # Model Configuration

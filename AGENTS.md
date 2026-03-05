@@ -9,7 +9,7 @@
 - **Package Manager:** uv
 - **Frameworks:** FastAPI (API), Typer (CLI), SQLAlchemy 2.0 (ORM), Alembic (migrations)
 - **Data Engine:** DuckDB (OLAP) + Polars (DataFrames)
-- **Storage:** Apache Parquet (data lake), DuckDB (warehouse)
+- **Storage:** DuckDB (Silver + Gold warehouses), Apache Parquet (seeds/curated)
 - **Architecture:** Hexagonal/Clean Architecture with medallion data lake (Bronze/Silver/Gold)
 - **Design Decision:** Monolithic ETL -- YAGNI; single service doesn't justify microservices
 
@@ -33,12 +33,13 @@ etl-core/
 │   ├── extractors/                # Domain-specific data extraction
 │   │   └── denue.py               # DENUE orchestrator (Selenium + parallel)
 │   ├── transformers/              # Transformation layer
-│   │   ├── denue.py               # Unified orchestrator
-│   │   ├── processor.py           # ZIP -> Warehouse processing
-│   │   ├── harmonizer.py          # Entity resolution across time
+│   │   ├── denue.py               # Unified orchestrator (DenueTransformer)
+│   │   ├── processor.py           # TransformStage: ZIP -> Silver DuckDB
+│   │   ├── harmonizer.py          # HarmonizerStage: Entity resolution across time
 │   │   └── _legacy/               # Archived old processor/harmonizer
-│   ├── loaders/                   # Data store management
-│   │   ├── denue.py               # Establecimientos fact table (DataStoreManager)
+│   ├── loaders/                   # Data loading layer
+│   │   ├── loader.py              # LoaderStage: Silver -> Gold (file copy)
+│   │   ├── denue.py               # DataStoreManager (DuckDB upsert)
 │   │   ├── geography.py           # Geography seeds (entidades, municipios, localidades)
 │   │   └── scian.py               # SCIAN economic activity seeds
 │   └── utils/                     # Shared utilities
@@ -95,7 +96,6 @@ etl-core/
 ```bash
 # Environment
 uv sync                                    # Install all dependencies
-uv sync --group etl                        # Install ETL group (Selenium, etc.)
 
 # Run CLI
 uv run python -m src_etl.main             # Main CLI entry point
@@ -120,12 +120,13 @@ uv run pytest -vv                          # Verbose
 
 ```bash
 # ETL Pipeline
-make download                    # Download INEGI data (incremental)
-make download ARGS="--force"     # Force re-download all files
-make process                     # Process RAW -> Warehouse
-make process-force               # Force reprocess all
+make extract                     # Extract data from INEGI (Bronze)
+make extract ARGS="--force"      # Force re-download all files
+make transform                   # Transform raw data (Bronze -> Silver)
+make transform-force             # Force reprocess all
+make load                        # Load Silver -> Gold
 make harmonize                   # Entity resolution
-make pipeline                    # Full: Download -> Process -> Harmonize
+make pipeline                    # Full: Extract -> Transform -> Load
 make pipeline-force              # Full pipeline with force mode
 
 # Database
@@ -153,17 +154,18 @@ make lint / lint-fix / format    # Ruff linting and formatting
 ### ETL Pipeline Flow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                 DENUE TRANSFORMER (Orchestrator)             │
-│  ┌──────────────────┬─────────────────┬───────────────────┐ │
-│  │ ProcessorStage   │ HarmonizerStage │ MetadataTracker   │ │
-│  │ (ZIP->Warehouse) │ (Entity Resoln) │ (Observability)   │ │
-│  └──────────────────┴─────────────────┴───────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                   DENUE TRANSFORMER (Orchestrator)                    │
+│  ┌────────────────┬─────────────────┬──────────────┬──────────────┐ │
+│  │ TransformStage │ HarmonizerStage │ LoaderStage  │ Metadata     │ │
+│  │ (ZIP->Silver)  │ (Entity Resoln) │ (Silver->Gold│ Tracker      │ │
+│  └────────────────┴─────────────────┴──────────────┴──────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
 
 Data Flow:
-  DOWNLOAD -> download_tasks  (lineage: WEB -> FILE)
-  PROCESS  -> process_tasks   (lineage: FILE -> TABLE)
+  EXTRACT   -> download_tasks  (lineage: WEB -> FILE)
+  TRANSFORM -> process_tasks   (lineage: FILE -> TABLE in Silver)
+  LOAD      -> process_tasks   (lineage: Silver -> Gold file copy)
   HARMONIZE -> harmonize_tasks (lineage: TABLE -> FILE)
 ```
 
@@ -186,8 +188,9 @@ Data Flow:
 
 ```
 data/bronze/denue/{period}/*.zip      # Raw downloads
-data/processed/denue/state=XX/        # Silver layer
-data/curated/denue/snapshots/         # Gold layer
+data/silver/denue.duckdb              # Silver DuckDB warehouse
+data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
+data/curated/denue/snapshots/         # Harmonized snapshots
 data/curated/denue/master_catalog.parquet
 ```
 
@@ -245,7 +248,8 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 ```bash
 DATABASE_BACKEND=duckdb          # or postgresql
-DUCKDB_PATH=data/gold/denue.duckdb
+SILVER_DUCKDB_PATH=data/silver/denue.duckdb
+GOLD_DUCKDB_PATH=data/gold/denue.duckdb
 DUCKDB_THREADS=8
 DUCKDB_MEMORY_LIMIT=16GB
 ```
@@ -271,7 +275,7 @@ Verification:
 uv run python -c "
 import duckdb
 from src_etl.core.config import settings
-conn = duckdb.connect(str(settings.DUCKDB_PATH))
+conn = duckdb.connect(str(settings.GOLD_DUCKDB_PATH))
 for t in ['denue_entidades','denue_municipios','denue_localidades','denue_actividades_economicas']:
     print(f'{t}: {conn.execute(f\"SELECT COUNT(*) FROM {t}\").fetchone()[0]}')
 conn.close()
@@ -296,7 +300,8 @@ GET /api/v1/redoc        # ReDoc
 ```bash
 # Database
 DATABASE_BACKEND=duckdb
-DUCKDB_PATH=data/gold/denue.duckdb
+SILVER_DUCKDB_PATH=data/silver/denue.duckdb
+GOLD_DUCKDB_PATH=data/gold/denue.duckdb
 DUCKDB_THREADS=8
 DUCKDB_MEMORY_LIMIT=16GB
 METADATA_DUCKDB_PATH=data/metadata.duckdb
@@ -443,7 +448,7 @@ from pydantic import BaseModel
 
 # Local - ETL
 from src_etl.core.config import settings
-from src_etl.transformers.denue_transformer import DenueTransformer
+from src_etl.transformers.denue import DenueTransformer
 
 # Local - Metadata
 from src_metadata.tracker import MetadataTracker
@@ -492,7 +497,7 @@ alembic upgrade head      # Reapply (data: 42,777 rows)
 docker build -f Dockerfile.etl -t tesis-etl:local .
 
 # Run (downloads data into local data/ volume)
-docker compose run etl download-inegi --force
+docker compose run etl extract --force
 
 # Run pipeline
 docker compose run etl pipeline
@@ -507,13 +512,13 @@ docker compose run etl pipeline
 uv sync && make db-migrate
 
 # Daily development
-make test                        # Run tests (92 should pass)
+make test                        # Run tests (180 should pass)
 make lint                        # Check code quality
 
 # Run ETL
-make download                    # Step 1: Download from INEGI
-make process                     # Step 2: ZIP -> Warehouse
-make harmonize                   # Step 3: Entity resolution
+make extract                     # Step 1: Download from INEGI
+make transform                   # Step 2: ZIP -> Silver DuckDB
+make load                        # Step 3: Silver -> Gold DuckDB
 # OR
 make pipeline                    # All three steps
 

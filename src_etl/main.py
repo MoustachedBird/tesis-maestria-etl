@@ -4,155 +4,159 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-# Importación de orquestadores modulares
 from src_etl.extractors.denue import DenueDownloader
 
-# Legacy imports kept for backward compatibility during migration
-# TODO: Remove after full migration verification
-# from src_etl.transformers.denue_processor import DenueProcessor
-# from src_etl.transformers.denue_harmonizer import DenueHarmonizer
-
-# Configuración de la CLI
 app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")
 console = Console()
 
-# Definición de rutas raíz (basadas en la ubicación de este archivo)
+# Project paths
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data"
 BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 
 
+# ---------------------------------------------------------------------------
+# EXTRACT
+# ---------------------------------------------------------------------------
 @app.command()
-def download_inegi(
-    headless: bool = typer.Option(True, help="Ejecutar navegador en modo headless (sin ventana)"),
-    output: Path = typer.Option(BRONZE_DIR, help="Carpeta de destino para los archivos ZIP"),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="🔄 Re-download ALL files, ignoring metadata and disk cache",
-    ),
+def extract(
+    source: str = typer.Option("denue", "--source", "-s", help="Data source to extract"),
+    headless: bool = typer.Option(True, help="Run browser in headless mode"),
+    output: Path = typer.Option(BRONZE_DIR, help="Output directory for downloaded files"),
+    force: bool = typer.Option(False, "--force", help="Re-download all files"),
 ):
     """
-    PASO 1: Descarga masiva de datos DENUE desde el sitio de INEGI.
-    Sincroniza lo que hay en disco con el reporte de control en reports.db.
+    STEP 1: Extract raw data from source.
 
-    Use --force to re-download all files regardless of existing downloads.
+    Downloads data files from the configured source (default: DENUE/INEGI).
     """
-    console.print("[bold green]🚀 Iniciando DENUE Downloader (Phase 2)[/bold green]")
-    console.print(f"📂 Destino: {output}")
-    console.print(f"👻 Modo Headless: {headless}")
+    if source != "denue":
+        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold green]Starting DENUE Extractor[/bold green]")
+    console.print(f"   Output: {output}")
+    console.print(f"   Headless: {headless}")
 
     if force:
-        console.print("⚠️  [bold yellow]FORCE MODE: Re-downloading ALL files[/bold yellow]")
+        console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
     downloader = DenueDownloader(output_dir=output, headless=headless, force=force)
     downloader.download_all()
 
 
+# ---------------------------------------------------------------------------
+# TRANSFORM
+# ---------------------------------------------------------------------------
 @app.command()
-def retry_inegi(
-    output: Path = typer.Option(BRONZE_DIR, help="Carpeta de destino para los archivos ZIP"),
+def transform(
+    source: str = typer.Option("denue", "--source", "-s", help="Data source to transform"),
+    process: bool = typer.Option(True, "--process/--no-process", help="Run process sub-step"),
+    harmonize: bool = typer.Option(
+        False, "--harmonize/--no-harmonize", help="Run harmonize sub-step"
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
-    PASO 1.5: Reintenta descargas fallidas basándose en el historial de metadata.duckdb.
+    STEP 2: Transform raw data (Bronze -> Silver).
+
+    Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
+    Sub-steps can be controlled with --process and --harmonize flags.
     """
-    console.print("[bold yellow]🔄 Reintentando descargas fallidas[/bold yellow]")
-    downloader = DenueDownloader(output_dir=output, headless=True)
-    # Retry functionality will be added separately
-    console.print("[yellow]Retry functionality coming soon - use download-inegi to re-run[/yellow]")
+    if source != "denue":
+        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold blue]Starting DENUE Transform[/bold blue]")
+
+    if force:
+        console.print("[bold orange3]   FORCE MODE: Reprocessing all files[/bold orange3]")
+
+    try:
+        from src_etl.transformers.denue import DenueTransformer
+
+        transformer = DenueTransformer(data_root=DATA_ROOT)
+        success = True
+
+        if process:
+            console.print("[bold blue]   Running: process[/bold blue]")
+            success = transformer.run_transform_stage(force=force)
+
+        if harmonize and success:
+            console.print("[bold magenta]   Running: harmonize[/bold magenta]")
+            success = transformer.run_harmonize_stage()
+
+        if success:
+            console.print("[bold green]Transform completed successfully.[/bold green]")
+        else:
+            console.print("[bold yellow]Transform completed with errors. Check logs.[/bold yellow]")
+            raise typer.Exit(code=1)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[bold red]Transform failed: {escape(str(e))}[/bold red]")
+        raise typer.Exit(code=1)
 
 
+# ---------------------------------------------------------------------------
+# LOAD
+# ---------------------------------------------------------------------------
 @app.command()
-def process_denue(
+def load(
+    source: str = typer.Option("denue", "--source", "-s", help="Data source to load"),
     force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Forzar el procesamiento de todos los archivos ZIP, ignorando si ya fueron marcados como exitosos (DONE).",
+        False, "--force", "-f", help="Force load even if Gold is up-to-date"
     ),
 ):
     """
-    PASO 2: Procesar ZIPs Raw -> Warehouse Centralizado (DuckDB).
-    Limpia, normaliza encodings (UTF-8/Latin-1) y sincroniza catálogos de actividades y entidades.
+    STEP 3: Load Silver -> Gold.
 
-    Usa el nuevo sistema de MetadataTracker para tracking completo.
+    Promotes the Silver DuckDB warehouse to Gold for production use.
     """
-    console.print("[bold blue]⚙️ Iniciando DENUE Warehouse Processor[/bold blue]")
-    if force:
-        console.print(
-            "[bold orange3]⚠️ MODO FORCE: Se re-procesarán todos los archivos en disco.[/bold orange3]"
-        )
+    if source != "denue":
+        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold cyan]Starting DENUE Loader[/bold cyan]")
 
     try:
-        # Use new unified transformer
         from src_etl.transformers.denue import DenueTransformer
 
         transformer = DenueTransformer(data_root=DATA_ROOT)
-        success = transformer.run_process_stage(force=force)
+        success = transformer.run_load_stage(force=force)
 
         if success:
-            console.print(
-                "[bold green]✨ Sincronización con Warehouse finalizada correctamente.[/bold green]"
-            )
+            console.print("[bold green]Load completed successfully.[/bold green]")
         else:
-            console.print(
-                "[bold yellow]⚠️ Proceso completado con errores. Revisa los logs.[/bold yellow]"
-            )
+            console.print("[bold yellow]Load failed. Check logs.[/bold yellow]")
             raise typer.Exit(code=1)
 
+    except typer.Exit:
+        raise
     except Exception as e:
-        console.print(f"[bold red]❌ Error en el procesamiento: {escape(str(e))}[/bold red]")
+        console.print(f"[bold red]Load failed: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
 
 
-@app.command()
-def harmonize():
-    """
-    PASO 3: Resolución de Identidad (Capa Gold).
-    Vincula establecimientos a través del tiempo generando el catálogo maestro de identidades.
-
-    Usa el nuevo sistema de MetadataTracker para tracking completo.
-    """
-    console.print("[bold magenta]🔗 Iniciando Resolución de Identidad (Harmonizer)[/bold magenta]")
-
-    try:
-        # Use new unified transformer
-        from src_etl.transformers.denue import DenueTransformer
-
-        transformer = DenueTransformer(data_root=DATA_ROOT)
-        success = transformer.run_harmonize_stage()
-
-        if success:
-            console.print(
-                "[bold green]✅ Pipeline de Armonización finalizado con éxito.[/bold green]"
-            )
-        else:
-            console.print(
-                "[bold yellow]⚠️ Harmonización completada con errores. Revisa los logs.[/bold yellow]"
-            )
-            raise typer.Exit(code=1)
-
-    except Exception as e:
-        console.print(f"[bold red]❌ Error en armonización: {escape(str(e))}[/bold red]")
-        raise typer.Exit(code=1)
-
-
+# ---------------------------------------------------------------------------
+# PIPELINE
+# ---------------------------------------------------------------------------
 @app.command()
 def pipeline(
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-f",
-        help="Forzar el procesamiento de todos los archivos ZIP.",
-    ),
+    source: str = typer.Option("denue", "--source", "-s", help="Data source"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
-    EJECUTAR PIPELINE COMPLETO: Download -> Process -> Harmonize
+    Run full pipeline: Extract -> Transform -> Load.
 
-    Ejecuta la cadena completa de transformación de datos DENUE
-    con tracking completo en metadata.duckdb.
+    Executes the complete ETL chain with tracking in metadata.duckdb.
     """
-    console.print("[bold cyan]🚀 Iniciando Pipeline Completo DENUE[/bold cyan]")
+    if source != "denue":
+        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold cyan]Starting Full Pipeline (DENUE)[/bold cyan]")
     console.print("=" * 60)
 
     try:
@@ -163,23 +167,37 @@ def pipeline(
 
         console.print("=" * 60)
         if success:
-            console.print("[bold green]🎉 Pipeline Completo finalizado con éxito![/bold green]")
+            console.print("[bold green]Pipeline completed successfully![/bold green]")
 
-            # Show summary
             status = transformer.get_pipeline_status()
-            console.print("\n[bold]📊 Resumen del Pipeline:[/bold]")
-            console.print(f"  Processed: {status['processed_output']}")
-            console.print(f"  Curated: {status['curated_output']}")
+            console.print("\n[bold]Pipeline Summary:[/bold]")
+            console.print(f"  Silver: {status['silver_db']}")
+            console.print(f"  Gold: {status['gold_db']}")
             console.print(f"  Metadata: {status['metadata_db']}")
         else:
-            console.print(
-                "[bold yellow]⚠️ Pipeline completado con errores. Revisa los logs.[/bold yellow]"
-            )
+            console.print("[bold yellow]Pipeline completed with errors. Check logs.[/bold yellow]")
             raise typer.Exit(code=1)
 
+    except typer.Exit:
+        raise
     except Exception as e:
-        console.print(f"[bold red]❌ Error en pipeline: {escape(str(e))}[/bold red]")
+        console.print(f"[bold red]Pipeline failed: {escape(str(e))}[/bold red]")
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# RETRY (placeholder)
+# ---------------------------------------------------------------------------
+@app.command()
+def retry(
+    source: str = typer.Option("denue", "--source", "-s", help="Data source to retry"),
+    output: Path = typer.Option(BRONZE_DIR, help="Output directory"),
+):
+    """
+    Retry failed extractions based on metadata history.
+    """
+    console.print("[bold yellow]Retrying failed downloads[/bold yellow]")
+    console.print("[yellow]Retry functionality coming soon - use extract to re-run[/yellow]")
 
 
 if __name__ == "__main__":

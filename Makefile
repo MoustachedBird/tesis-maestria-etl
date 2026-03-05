@@ -1,9 +1,10 @@
-.PHONY: help setup download retry process normalize harmonize validate clean db-migrate db-downgrade db-seed db-reset test
+.PHONY: help setup extract transform load harmonize pipeline clean db-migrate db-downgrade db-seed db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
 PYTHON := uv run python
-WAREHOUSE := data/denue_warehouse.db
+SILVER_DB := data/silver/denue.duckdb
+GOLD_DB := data/gold/denue.duckdb
 METADATA_DB := data/metadata.duckdb
 ALEMBIC := uv run alembic
 
@@ -21,23 +22,42 @@ setup: ## Install dependencies
 api: ## Run FastAPI dev server
 	uv run fastapi dev src_api/main.py
 
-download: ## Download INEGI data
-	$(PYTHON) -m src_etl.main download-inegi $(ARGS)
+# ─── ETL Pipeline ────────────────────────────────────────────────────────────
 
-retry: ## Retry failed downloads
-	$(PYTHON) -m src_etl.main retry-inegi
+extract: ## Extract data from source (Bronze)
+	$(PYTHON) -m src_etl.main extract $(ARGS)
 
-process: ## Process RAW -> Warehouse
-	$(PYTHON) -m src_etl.main process-denue $(ARGS)
+transform: ## Transform raw data (Bronze -> Silver)
+	$(PYTHON) -m src_etl.main transform $(ARGS)
 
-process-force: ## Process ALL files (ignore state)
-	$(PYTHON) -m src_etl.main process-denue --force
+transform-force: ## Transform ALL files (force mode)
+	$(PYTHON) -m src_etl.main transform --force
 
-harmonize: ## Run harmonization (Identity Resolution)
-	$(PYTHON) -m src_etl.main harmonize
+load: ## Load Silver -> Gold
+	$(PYTHON) -m src_etl.main load $(ARGS)
+
+harmonize: ## Run harmonization (Entity Resolution)
+	$(PYTHON) -m src_etl.main transform --no-process --harmonize $(ARGS)
+
+retry: ## Retry failed extractions
+	$(PYTHON) -m src_etl.main retry
+
+pipeline: ## Full pipeline (Extract -> Transform -> Load)
+	$(PYTHON) -m src_etl.main pipeline $(ARGS)
+
+pipeline-force: ## Full pipeline with force mode
+	$(PYTHON) -m src_etl.main pipeline --force
+
+pipeline-steps: extract transform load ## Pipeline step by step
+	@echo "Pipeline completed"
+
+pipeline-full: setup extract transform load ## Full pipeline with setup
+	@echo "Full pipeline completed"
 
 validate: ## Validate warehouse
 	@echo "Warehouse validation (coming soon)"
+
+# ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 clean: ## Clean cache
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -48,7 +68,8 @@ clean-logs: ## Clean old logs
 	@find logs/downloads -type d -name "run_*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 	@echo "Old logs cleaned (kept last 7 days)"
 
-# Metadata commands
+# ─── Metadata ────────────────────────────────────────────────────────────────
+
 metadata-query: ## Query metadata database
 	@echo "Recent job runs:"
 	@$(PYTHON) -c "from src_metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); import json; print(json.dumps(t.get_recent_runs(5), indent=2, default=str))"
@@ -64,7 +85,8 @@ logs: ## Show latest logs
 	@echo "Last 20 log entries:"
 	@tail -20 logs/downloads/latest/app.log 2>/dev/null || echo "No app.log found yet"
 
-# Database migrations
+# ─── Database Migrations ─────────────────────────────────────────────────────
+
 db-migrate: ## Run pending migrations
 	@echo "Running database migrations..."
 	$(ALEMBIC) upgrade head
@@ -102,24 +124,13 @@ db-status: ## Show migration status
 	@echo "Migration history:"
 	$(ALEMBIC) history
 
-# Pipeline
-pipeline: ## Full pipeline (Download -> Process -> Harmonize)
-	$(PYTHON) -m src_etl.main pipeline
+# ─── Development ─────────────────────────────────────────────────────────────
 
-pipeline-force: ## Full pipeline with force mode
-	$(PYTHON) -m src_etl.main pipeline --force
-
-pipeline-steps: download process harmonize ## Pipeline step by step
-	@echo "Pipeline completed"
-
-pipeline-full: setup download process harmonize validate ## Full pipeline with setup
-	@echo "Full pipeline completed"
-
-# Development
 dev: setup ## Setup development
 	@echo "Ready for development"
 
-# Testing
+# ─── Testing ─────────────────────────────────────────────────────────────────
+
 test: ## Run all tests
 	uv run pytest
 

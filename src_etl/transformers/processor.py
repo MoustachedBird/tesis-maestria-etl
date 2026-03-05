@@ -1,12 +1,11 @@
 """
-Processing Stage: ZIP → Warehouse
+Transform Stage: ZIP → Silver DuckDB
 
-Extracts data from raw ZIP files, cleans and normalizes it,
-and loads it into the DuckDB warehouse.
+Extracts data from raw ZIP files (Bronze), cleans and normalizes it,
+and loads it into the Silver DuckDB warehouse.
 
-This module contains the core processing logic extracted from the
-original DenueProcessor class, now integrated with MetadataTracker
-for comprehensive observability.
+This module contains the core transformation logic, integrated with
+MetadataTracker for comprehensive observability.
 """
 
 import logging
@@ -17,6 +16,7 @@ from typing import Any
 
 import polars as pl
 
+from src_etl.core.config import settings
 from src_etl.loaders.denue import DataStoreManager
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
@@ -40,15 +40,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class ProcessorStage:
+class TransformStage:
     """
-    Processes raw DENUE ZIP files into the DuckDB warehouse.
+    Transforms raw DENUE ZIP files (Bronze) into the Silver DuckDB warehouse.
 
     Handles:
     - ZIP file extraction
     - Data cleaning and normalization
     - Schema validation
-    - Warehouse loading
+    - Silver warehouse loading
     - Seed catalog bootstrapping
     """
 
@@ -56,20 +56,26 @@ class ProcessorStage:
         self,
         data_root: Path,
         tracker: MetadataTracker,
-        output_dir: Path | None = None,
+        silver_db_path: Path | None = None,
     ):
         """
-        Initialize processor stage.
+        Initialize transform stage.
 
         Args:
             data_root: Root data directory
             tracker: MetadataTracker instance for job/task tracking
-            output_dir: Optional output directory (currently unused, for future Parquet output)
+            silver_db_path: Path to Silver DuckDB (default: from settings)
         """
         self.data_root = Path(data_root)
         self.tracker = tracker
-        self.output_dir = Path(output_dir) if output_dir else None
-        self.warehouse_path = self.data_root / "denue_warehouse.db"
+
+        if silver_db_path is not None:
+            self.warehouse_path = Path(silver_db_path)
+        else:
+            self.warehouse_path = settings.SILVER_DUCKDB_PATH  # type: ignore[assignment]
+
+        # Ensure Silver directory exists
+        self.warehouse_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.datastore = DataStoreManager(self.warehouse_path)
         self._bootstrap_seeds()
@@ -288,7 +294,9 @@ class ProcessorStage:
 
     def run(self, force: bool = False) -> bool:
         """
-        Run processing pipeline using MetadataTracker.
+        Run transform pipeline using MetadataTracker.
+
+        Processes Bronze ZIPs into Silver DuckDB warehouse.
 
         Args:
             force: If True, reprocess all files regardless of status
@@ -302,8 +310,8 @@ class ProcessorStage:
 
         # Create job run
         run_id = self.tracker.create_run(
-            job_name="denue_processor",
-            job_type="PROCESS",
+            job_name="denue_transform",
+            job_type="TRANSFORM",
             trigger_type="MANUAL",
         )
 
@@ -324,7 +332,7 @@ class ProcessorStage:
                 ]
 
         if not tasks:
-            logger.info("✨ Warehouse actualizado. Nada por procesar.")
+            logger.info("✨ Silver actualizado. Nada por transformar.")
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             return True
 
@@ -389,7 +397,7 @@ class ProcessorStage:
         self.tracker.complete_run(run_id, final_status)
 
         logger.info(
-            f"✨ Proceso terminado. Total sesión: {session_total_rows:,} registros integrados en el Warehouse."
+            f"✨ Transform terminado. Total sesión: {session_total_rows:,} registros integrados en Silver."
         )
         logger.info(f"   📊 Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos")
 
