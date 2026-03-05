@@ -887,7 +887,7 @@ class MetadataTracker:
         """
         with self._get_connection() as conn:
             if include_failed:
-                query = QUERIES["get_pending_process_tasks"] + " OR pt.status = 'FAILED'"
+                query = QUERIES["get_pending_process_tasks_with_failed"]
             else:
                 query = QUERIES["get_pending_process_tasks"]
 

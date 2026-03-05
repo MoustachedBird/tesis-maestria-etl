@@ -333,6 +333,17 @@ QUERIES = {
         FROM download_tasks dt
         LEFT JOIN process_tasks pt ON dt.target_path = pt.source_path
         WHERE dt.status = 'SUCCESS'
+          AND pt.task_id IS NULL
+        ORDER BY dt.period DESC, dt.created_at DESC
+    """,
+    "get_pending_process_tasks_with_failed": """
+        SELECT 
+            dt.target_path as source_path,
+            dt.period,
+            dt.task_id as download_task_id
+        FROM download_tasks dt
+        LEFT JOIN process_tasks pt ON dt.target_path = pt.source_path
+        WHERE dt.status = 'SUCCESS'
           AND (pt.task_id IS NULL OR pt.status = 'FAILED')
         ORDER BY dt.period DESC, dt.created_at DESC
     """,
