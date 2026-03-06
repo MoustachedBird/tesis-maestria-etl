@@ -1,5 +1,17 @@
 # AGENTS.md - Development Guide for ETL Core
 
+## IMPORTANT: Destructive Operations Policy
+
+**NEVER delete, truncate, or overwrite data files (databases, parquets, etc.) without explicit user confirmation first.** This includes:
+- Removing `.duckdb`, `.db`, or `.parquet` files
+- Running `rm -f` on any data file
+- Dropping or truncating database tables with data
+- Any operation that could cause data loss
+
+Always ask the user before executing any destructive operation, even if it seems like a necessary intermediate step.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)
