@@ -272,7 +272,7 @@ class DateNormalizer:
             True if all periods normalized successfully, False otherwise
         """
         if force:
-            logger.warning("MODO FORCE ACTIVADO: Se re-normalizaran todas las fechas.")
+            logger.warning("⚠️ MODO FORCE ACTIVADO: Se re-normalizarán todas las fechas.")
 
         # Create job run
         run_id = self.tracker.create_run(
@@ -285,11 +285,11 @@ class DateNormalizer:
         periods = self._get_pending_periods(force=force)
 
         if not periods:
-            logger.info("Fechas ya normalizadas. Nada por procesar.")
+            logger.info("✨ Fechas ya normalizadas. Nada por procesar.")
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             return True
 
-        logger.info(f"Iniciando normalizacion de fechas para {len(periods)} periodos...")
+        logger.info(f"⚙️ Iniciando normalización de fechas para {len(periods)} periodos...")
 
         tasks_succeeded = 0
         tasks_failed = 0
@@ -308,7 +308,9 @@ class DateNormalizer:
                     period=period_str,
                 )
 
-                logger.info(f"[{idx}/{len(periods)}] Normalizando fechas: periodo {period_str}...")
+                logger.info(
+                    f"📅 [{idx}/{len(periods)}] Normalizando fechas: periodo {period_str}..."
+                )
 
                 self.tracker.start_normalize_task(task_id)
 
@@ -319,7 +321,7 @@ class DateNormalizer:
 
                     # Log results
                     logger.info(
-                        f"   {rows_normalized:,} fechas normalizadas de {rows_total:,} filas."
+                        f"   ✅ {rows_normalized:,} fechas normalizadas de {rows_total:,} filas."
                     )
 
                     if unrecognized_values:
@@ -331,7 +333,7 @@ class DateNormalizer:
                             else ""
                         )
                         logger.error(
-                            f"   {rows_unrecognized:,} fechas no reconocidas: {values_str}{extra}"
+                            f"   ❌ {rows_unrecognized:,} fechas no reconocidas: {values_str}{extra}"
                         )
 
                     self.tracker.complete_normalize_task(
@@ -350,7 +352,7 @@ class DateNormalizer:
                     session_total_normalized += rows_normalized
 
                 except Exception as e:
-                    logger.error(f"   Error normalizando periodo {period_str}: {e}")
+                    logger.error(f"   ❌ Error normalizando periodo {period_str}: {e}")
                     self.tracker.complete_normalize_task(
                         task_id=task_id,
                         status=TaskStatus.FAILED,
@@ -370,8 +372,8 @@ class DateNormalizer:
         self.tracker.complete_run(run_id, final_status)
 
         logger.info(
-            f"Normalizacion terminada. Total: {session_total_normalized:,} fechas normalizadas."
+            f"✨ Normalización terminada. Total: {session_total_normalized:,} fechas normalizadas."
         )
-        logger.info(f"   Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos")
+        logger.info(f"   📊 Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos")
 
         return tasks_failed == 0
