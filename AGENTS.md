@@ -12,6 +12,39 @@ Always ask the user before executing any destructive operation, even if it seems
 
 ---
 
+## Fixing Missing Localities (FK Violations)
+
+When `make transform` fails with a foreign key constraint error like:
+```
+Constraint Error: Violates foreign key constraint because key
+"cve_ent: XX, cve_mun: XXX, cve_loc: XXXX" does not exist in the referenced table
+```
+
+Follow this procedure:
+
+1. **Find the locality name** from the CSV that failed:
+   - Open the failing ZIP, read the data CSV (under `conjunto_de_datos/`)
+   - Filter for the missing `(cve_ent, cve_mun, cve_loc)` combination
+   - Extract the `localidad` column value
+
+2. **Insert into Silver DuckDB** (do NOT delete/truncate anything):
+   ```sql
+   INSERT INTO denue_localidades (cve_ent, cve_mun, cve_loc, localidad)
+   VALUES ('XX', 'XXX', 'XXXX', 'NOMBRE EN MAYÚSCULAS');
+   ```
+   If DuckDB accepts the INSERT (no PK violation), the locality is valid.
+
+3. **Add to seed parquet** (`data/seeds/seed_localidades.parquet`):
+   - Read the parquet with Polars
+   - Append the new row (locality name in UPPERCASE)
+   - Write back, sorted by `(cve_ent, cve_mun, cve_loc)`
+
+4. **Re-run** `make transform` to continue processing.
+
+**Important:** All locality names in the seed must be UPPERCASE. Always apply `.upper()` before inserting.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)
