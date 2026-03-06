@@ -51,7 +51,7 @@ def extract(
 @app.command()
 def transform(
     source: str = typer.Option("denue", "--source", "-s", help="Data source to transform"),
-    process: bool = typer.Option(True, "--process/--no-process", help="Run process sub-step"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
     harmonize: bool = typer.Option(
         False, "--harmonize/--no-harmonize", help="Run harmonize sub-step"
     ),
@@ -61,7 +61,7 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps can be controlled with --process and --harmonize flags.
+    Sub-steps can be controlled with --ingest and --harmonize flags.
     """
     if source != "denue":
         console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
@@ -78,8 +78,8 @@ def transform(
         transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
         success = True
 
-        if process:
-            console.print("[bold blue]   Running: process[/bold blue]")
+        if ingest:
+            console.print("[bold blue]   Running: ingest[/bold blue]")
             success = transformer.run_transform_stage(force=force)
 
         if harmonize and success:
