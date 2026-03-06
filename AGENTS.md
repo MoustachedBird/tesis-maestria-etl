@@ -45,6 +45,53 @@ Follow this procedure:
 
 ---
 
+## Normalize-Dates Step
+
+The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> harmonize**.
+
+The `normalize-dates` step parses `fecha_alta_str` (raw string from INEGI) into `fecha_alta_date` (DATE type, format `YYYY-MM-01`) directly in the Silver DuckDB via SQL UPDATE, one period at a time.
+
+### 6 Known fecha_alta_str Formats
+
+| Format | Example | Rows | Pattern |
+|--------|---------|------|---------|
+| YYYY-MM | "2010-07" | ~68M | Most common |
+| YYYY-MM (trailing space) | "2011-03 " | 15,192 | Strip then parse |
+| YYYY MM (space separator) | "2013 07" | 7,383 | Replace space with - |
+| YYYY_MM (underscore) | "2022_11" | 10 | Replace _ with - |
+| MES_ESPANOL ANNO | "JULIO 2010" | ~14.5M | Map Spanish month -> number |
+| DD/MM/YYYY | "06/10/2023" | 12 | Extract year-month |
+
+Plus 1 NULL row. Output format is always `DATE YYYY-MM-01`.
+
+### Tracking
+
+- Tracked per period (not per file) via `normalize_tasks` table in metadata DB
+- Incremental by default: only processes periods not yet marked SUCCESS
+- With `--force`, re-normalizes all periods
+- If any `fecha_alta_date` remains NULL after UPDATE, the distinct unrecognized values are logged as errors
+
+### CLI Usage
+
+```bash
+# Run only normalize-dates (skip ingest and harmonize)
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-harmonize
+
+# Force re-normalize all periods
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-harmonize --force
+
+# Full transform (ingest + normalize-dates, harmonize off by default)
+uv run python -m src_etl.main transform
+```
+
+### Tips
+
+- `SELECT DISTINCT column` is an efficient way to analyze patterns in columns with millions of rows. Use it to discover new fecha_alta_str formats if they appear in future INEGI releases.
+- The Spanish month map is defined in `src_etl/transformers/date_normalizer.py` as `SPANISH_MONTHS`.
+- DuckDB `regexp_matches()` + `CASE WHEN` handles all format detection in a single UPDATE statement per period.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)

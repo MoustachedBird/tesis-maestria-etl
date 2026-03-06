@@ -284,6 +284,40 @@ class HarmonizeTask(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
 
+class NormalizeTask(BaseModel):
+    """
+    Represents a date normalization task (per period in Silver DuckDB).
+
+    Tracks the UPDATE of fecha_alta_str -> fecha_alta_date for each
+    period in the Silver warehouse.
+    """
+
+    task_id: str = Field(..., description="Unique task identifier (UUID)")
+    run_id: str = Field(..., description="Parent job run ID")
+    task_name: str = Field(..., description="Human-readable task name")
+    period: str = Field(..., description="Data period as DATE (e.g., '2024-11-01')")
+
+    # Execution tracking
+    start_time: datetime | None = Field(None, description="Task start time")
+    end_time: datetime | None = Field(None, description="Task end time")
+    duration_seconds: float | None = Field(None, description="Execution duration")
+    status: TaskStatus = Field(..., description="Current task status")
+
+    # Normalization metrics
+    rows_total: int | None = Field(None, description="Total rows in this period")
+    rows_normalized: int | None = Field(None, description="Rows successfully normalized")
+    rows_unrecognized: int | None = Field(None, description="Rows with unrecognized format")
+
+    # Error handling
+    error_type: str | None = Field(None, description="Error classification")
+    error_message: str | None = Field(None, description="Error details")
+
+    created_at: datetime = Field(default_factory=datetime.now, description="Creation time")
+    updated_at: datetime = Field(default_factory=datetime.now, description="Last update time")
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
 class RunSummary(BaseModel):
     """
     Summary statistics for a job run.

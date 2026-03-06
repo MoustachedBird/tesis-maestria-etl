@@ -1070,6 +1070,131 @@ class MetadataTracker:
             )
 
     # ========================================================================
+    # NORMALIZE TASK MANAGEMENT
+    # ========================================================================
+
+    def create_normalize_task(
+        self,
+        run_id: str,
+        task_name: str,
+        period: str,
+    ) -> str:
+        """
+        Create new date normalization task.
+
+        Args:
+            run_id: Parent job run ID
+            task_name: Human-readable task name
+            period: Data period as DATE string (e.g., "2024-11-01")
+
+        Returns:
+            str: Unique task_id (UUID)
+        """
+        task_id = str(uuid.uuid4())
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO normalize_tasks (
+                    task_id, run_id, task_name, period,
+                    status, created_at
+                ) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?)
+            """,
+                [
+                    task_id,
+                    run_id,
+                    task_name,
+                    period,
+                    TaskStatus.PENDING.value,
+                    datetime.now(),
+                ],
+            )
+
+        return task_id
+
+    def start_normalize_task(self, task_id: str):
+        """
+        Mark normalize task as running.
+
+        Args:
+            task_id: Task identifier
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE normalize_tasks SET
+                    status = ?,
+                    start_time = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
+            )
+
+    def complete_normalize_task(
+        self,
+        task_id: str,
+        status: TaskStatus,
+        rows_total: int | None = None,
+        rows_normalized: int | None = None,
+        rows_unrecognized: int | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ):
+        """
+        Complete normalize task with results.
+
+        Args:
+            task_id: Task identifier
+            status: Final task status
+            rows_total: Total rows in this period
+            rows_normalized: Rows successfully normalized
+            rows_unrecognized: Rows with unrecognized fecha_alta_str format
+            error_type: Error classification if failed
+            error_message: Error details if failed
+        """
+        end_time = datetime.now()
+
+        with self._get_connection() as conn:
+            # Get start time to calculate duration
+            result = conn.execute(
+                "SELECT start_time FROM normalize_tasks WHERE task_id = ?", [task_id]
+            ).fetchone()
+
+            duration = None
+            if result and result[0]:
+                start_time = datetime.fromisoformat(str(result[0]))
+                duration = (end_time - start_time).total_seconds()
+
+            conn.execute(
+                """
+                UPDATE normalize_tasks SET
+                    end_time = ?,
+                    duration_seconds = ?,
+                    status = ?,
+                    rows_total = ?,
+                    rows_normalized = ?,
+                    rows_unrecognized = ?,
+                    error_type = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+            """,
+                [
+                    end_time,
+                    duration,
+                    status.value,
+                    rows_total,
+                    rows_normalized,
+                    rows_unrecognized,
+                    error_type,
+                    error_message,
+                    datetime.now(),
+                    task_id,
+                ],
+            )
+
+    # ========================================================================
     # METRICS AND REPORTING
     # ========================================================================
 
@@ -1107,5 +1232,24 @@ class MetadataTracker:
                 "total_matched",
                 "total_new",
                 "avg_confidence",
+            ]
+            return [dict(zip(columns, row)) for row in result]
+
+    def get_normalize_metrics(self) -> list[dict[str, Any]]:
+        """
+        Get date normalization metrics by period.
+
+        Returns:
+            List of dicts with metrics per period
+        """
+        with self._get_connection() as conn:
+            result = conn.execute(QUERIES["get_normalize_metrics"]).fetchall()
+            columns = [
+                "period",
+                "total_normalizations",
+                "total_rows",
+                "total_normalized",
+                "total_unrecognized",
+                "avg_duration_sec",
             ]
             return [dict(zip(columns, row)) for row in result]

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from src_etl.core.config import settings
 from src_etl.loaders.loader import SilverToGoldLoader
+from src_etl.transformers.date_normalizer import DateNormalizer
 from src_etl.transformers.harmonizer import EntityResolutionHarmonizer
 from src_etl.transformers.processor import BronzeToSilverProcessor
 from src_metadata.tracker import MetadataTracker
@@ -91,6 +92,11 @@ class DenuePipelineOrchestrator:
             output_dir=self.curated_output_dir,
         )
 
+        self.date_normalizer = DateNormalizer(
+            tracker=self.tracker,
+            silver_db_path=self.silver_db_path,
+        )
+
         self.loader = SilverToGoldLoader(
             tracker=self.tracker,
             silver_path=self.silver_db_path,
@@ -131,6 +137,37 @@ class DenuePipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"TRANSFORM stage failed: {e}")
+            raise
+
+    def run_normalize_dates_stage(self, force: bool = False) -> bool:
+        """
+        Run normalize-dates stage: fecha_alta_str -> fecha_alta_date.
+
+        Parses raw date strings in Silver DuckDB into proper DATE columns,
+        handling 6 known INEGI formats. Operates per-period with metadata
+        tracking.
+
+        Args:
+            force: If True, re-normalize all periods regardless of status
+
+        Returns:
+            True if successful, False otherwise
+        """
+        logger.info("Starting NORMALIZE-DATES stage (Silver DuckDB)")
+        logger.info(f"   Mode: {'FORCE (re-normalize all)' if force else 'INCREMENTAL'}")
+
+        try:
+            success = self.date_normalizer.run(force=force)
+
+            if success:
+                logger.info("NORMALIZE-DATES stage completed successfully")
+            else:
+                logger.warning("NORMALIZE-DATES stage completed with errors")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"NORMALIZE-DATES stage failed: {e}")
             raise
 
     def run_harmonize_stage(self) -> bool:
@@ -189,22 +226,23 @@ class DenuePipelineOrchestrator:
 
     def run_full_pipeline(self, force: bool = False) -> bool:
         """
-        Run complete pipeline: Transform -> Load.
+        Run complete pipeline: Transform -> Normalize-Dates -> Load.
 
-        Executes transform and load stages sequentially with full tracking.
-        Harmonization is not included by default (run separately).
+        Executes transform, date normalization, and load stages
+        sequentially with full tracking. Harmonization is not included
+        by default (run separately).
 
         Args:
-            force: If True, force reprocess in transform stage
+            force: If True, force reprocess in all stages
 
         Returns:
             True if all stages successful, False otherwise
         """
-        logger.info("Starting FULL PIPELINE (Transform -> Load)")
+        logger.info("Starting FULL PIPELINE (Transform -> Normalize-Dates -> Load)")
         logger.info("=" * 60)
 
         # Stage 1: Transform (Bronze -> Silver)
-        logger.info("STAGE 1/2: Transform")
+        logger.info("STAGE 1/3: Transform")
         transform_success = self.run_transform_stage(force=force)
 
         if not transform_success:
@@ -214,14 +252,24 @@ class DenuePipelineOrchestrator:
         logger.info("")
         logger.info("=" * 60)
 
-        # Stage 2: Load (Silver -> Gold)
-        logger.info("STAGE 2/2: Load")
+        # Stage 2: Normalize Dates (Silver DuckDB)
+        logger.info("STAGE 2/3: Normalize-Dates")
+        normalize_success = self.run_normalize_dates_stage(force=force)
+
+        if not normalize_success:
+            logger.warning("Normalize-Dates stage had errors, continuing to Load...")
+
+        logger.info("")
+        logger.info("=" * 60)
+
+        # Stage 3: Load (Silver -> Gold)
+        logger.info("STAGE 3/3: Load")
         load_success = self.run_load_stage(force=force)
 
         logger.info("")
         logger.info("=" * 60)
 
-        if transform_success and load_success:
+        if transform_success and normalize_success and load_success:
             logger.info("FULL PIPELINE completed successfully!")
             logger.info(f"   Silver: {self.silver_db_path}")
             logger.info(f"   Gold: {self.gold_db_path}")
@@ -264,9 +312,18 @@ class DenuePipelineOrchestrator:
                 LIMIT 1
             """).fetchone()
 
+            latest_normalize = conn.execute("""
+                SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
+                FROM job_runs
+                WHERE job_type = 'NORMALIZE'
+                ORDER BY run_date DESC
+                LIMIT 1
+            """).fetchone()
+
             # Get metrics
             process_metrics = self.tracker.get_process_metrics()
             harmonize_metrics = self.tracker.get_harmonize_metrics()
+            normalize_metrics = self.tracker.get_normalize_metrics()
 
             def _run_dict(row):
                 if row is None:
@@ -287,9 +344,11 @@ class DenuePipelineOrchestrator:
 
             return {
                 "latest_transform_run": _run_dict(latest_transform),
+                "latest_normalize_run": _run_dict(latest_normalize),
                 "latest_load_run": _run_dict(latest_load),
                 "latest_harmonize_run": _run_dict(latest_harmonize),
                 "process_metrics": process_metrics,
+                "normalize_metrics": normalize_metrics,
                 "harmonize_metrics": harmonize_metrics,
                 "metadata_db": str(self.metadata_db),
                 "silver_db": str(self.silver_db_path),

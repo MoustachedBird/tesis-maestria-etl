@@ -240,6 +240,44 @@ CREATE INDEX IF NOT EXISTS idx_process_tasks_source ON process_tasks(source_path
 CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_run_id ON harmonize_tasks(run_id);
 CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_status ON harmonize_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_region ON harmonize_tasks(region_group);
+
+-- ============================================================================
+-- NORMALIZE TASKS: Date normalization tracking (per period)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS normalize_tasks (
+    task_id VARCHAR(36) PRIMARY KEY,
+    run_id VARCHAR(36) NOT NULL,
+
+    -- Task identification
+    task_name VARCHAR(200) NOT NULL,
+    period DATE NOT NULL,
+
+    -- Execution tracking
+    start_time TIMESTAMP,
+    end_time TIMESTAMP,
+    duration_seconds DOUBLE,
+    status VARCHAR(20) NOT NULL,            -- PENDING, RUNNING, SUCCESS, FAILED
+
+    -- Normalization metrics
+    rows_total BIGINT,
+    rows_normalized BIGINT,
+    rows_unrecognized BIGINT,
+
+    -- Error handling
+    error_type VARCHAR(50),
+    error_message VARCHAR,
+
+    -- Audit
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================================
+-- NORMALIZE TASKS INDEXES
+-- ============================================================================
+CREATE INDEX IF NOT EXISTS idx_normalize_tasks_run_id ON normalize_tasks(run_id);
+CREATE INDEX IF NOT EXISTS idx_normalize_tasks_status ON normalize_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_normalize_tasks_period ON normalize_tasks(period);
 """
 
 
@@ -386,5 +424,18 @@ QUERIES = {
         WHERE status = 'SUCCESS'
         GROUP BY region_group
         ORDER BY region_group
+    """,
+    "get_normalize_metrics": """
+        SELECT 
+            period,
+            COUNT(*) as total_normalizations,
+            SUM(rows_total) as total_rows,
+            SUM(rows_normalized) as total_normalized,
+            SUM(rows_unrecognized) as total_unrecognized,
+            AVG(duration_seconds) as avg_duration_sec
+        FROM normalize_tasks
+        WHERE status = 'SUCCESS'
+        GROUP BY period
+        ORDER BY period DESC
     """,
 }

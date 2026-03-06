@@ -52,6 +52,11 @@ def extract(
 def transform(
     source: str = typer.Option("denue", "--source", "-s", help="Data source to transform"),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
+    normalize_dates: bool = typer.Option(
+        True,
+        "--normalize-dates/--no-normalize-dates",
+        help="Normalize fecha_alta dates in Silver",
+    ),
     harmonize: bool = typer.Option(
         False, "--harmonize/--no-harmonize", help="Run harmonize sub-step"
     ),
@@ -61,7 +66,8 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps can be controlled with --ingest and --harmonize flags.
+    Sub-steps: ingest -> normalize-dates -> harmonize.
+    Control each with --ingest, --normalize-dates, and --harmonize flags.
     """
     if source != "denue":
         console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
@@ -81,6 +87,10 @@ def transform(
         if ingest:
             console.print("[bold blue]   Running: ingest[/bold blue]")
             success = transformer.run_transform_stage(force=force)
+
+        if normalize_dates and success:
+            console.print("[bold blue]   Running: normalize-dates[/bold blue]")
+            success = transformer.run_normalize_dates_stage(force=force)
 
         if harmonize and success:
             console.print("[bold magenta]   Running: harmonize[/bold magenta]")
