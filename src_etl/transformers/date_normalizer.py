@@ -91,12 +91,12 @@ SET fecha_alta_date = CASE
         SPLIT_PART(TRIM(fecha_alta_str), '/', 2) || '-01'
         AS DATE)
 
-    -- Formats 1-4: YYYY-MM variants (normalize separators: strip, replace _ and space with -)
+    -- Formats 1-4: YYYY-MM variants (trim first, then normalize separators)
     WHEN regexp_matches(
-        TRIM(REPLACE(REPLACE(fecha_alta_str, '_', '-'), ' ', '-')),
+        REPLACE(REPLACE(TRIM(fecha_alta_str), '_', '-'), ' ', '-'),
         '^\\d{{4}}-\\d{{2}}$')
     THEN CAST(
-        TRIM(REPLACE(REPLACE(fecha_alta_str, '_', '-'), ' ', '-')) || '-01'
+        REPLACE(REPLACE(TRIM(fecha_alta_str), '_', '-'), ' ', '-') || '-01'
         AS DATE)
 
     ELSE NULL
