@@ -37,6 +37,8 @@ from src_etl.utils.matching import clean_contact_columns
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
+logger = logging.getLogger(__name__)
+
 
 class CLEEResolver:
     """
@@ -73,21 +75,6 @@ class CLEEResolver:
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
 
-        self._setup_logging()
-
-    def _setup_logging(self):
-        """Configure logging for CLEE resolution process."""
-        self.logger = logging.getLogger("CLEEResolver")
-        self.logger.setLevel(logging.INFO)
-
-        if not self.logger.handlers:
-            formatter = logging.Formatter("%(asctime)s - %(message)s", datefmt="%H:%M:%S")
-
-            # Console handler
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Get a DuckDB connection to Silver warehouse."""
         return duckdb.connect(str(self.silver_db_path))
@@ -119,7 +106,7 @@ class CLEEResolver:
                 WHERE clee_master IS NOT NULL
             """).fetchone()[0]
 
-            self.logger.info(f"   Seeded clee_master from clee: {count:,} rows")
+            logger.info(f"   🌱 clee_master sembrado desde clee: {count:,} filas")
             return count
 
     def _count_unresolved(self) -> int:
@@ -205,7 +192,7 @@ class CLEEResolver:
         batch_size = 50_000
         updated = 0
 
-        self.logger.info(f"   Writing {total:,} clee_master values to Silver DuckDB...")
+        logger.info(f"   💾 Escribiendo {total:,} valores clee_master en Silver DuckDB...")
 
         with self._get_connection() as conn:
             for offset in range(0, total, batch_size):
@@ -227,11 +214,11 @@ class CLEEResolver:
                 conn.execute("DROP TABLE IF EXISTS _clee_updates")
 
                 if (offset + batch_size) % 200_000 == 0 or offset + batch_size >= total:
-                    self.logger.info(
-                        f"      Updated {min(offset + batch_size, total):,}/{total:,} rows"
+                    logger.info(
+                        f"      Actualizados {min(offset + batch_size, total):,}/{total:,} filas"
                     )
 
-        self.logger.info(f"   Total rows updated: {updated:,}")
+        logger.info(f"   ✅ Total filas actualizadas: {updated:,}")
         return updated
 
     def process_national(self) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -254,7 +241,7 @@ class CLEEResolver:
         if not periods:
             return pl.DataFrame(), pl.DataFrame()
 
-        self.logger.info(f"   Periods detected ({len(periods)}): {periods}")
+        logger.info(f"   📅 Periodos detectados ({len(periods)}): {periods}")
 
         # Get region prefix from distinct cve_ent values
         with self._get_connection() as conn:
@@ -264,18 +251,18 @@ class CLEEResolver:
         state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
 
         prefix = get_region_prefix(state_list)
-        self.logger.info(f"   Region prefix (namespace): {prefix}")
+        logger.info(f"   🏷️ Prefijo de región (namespace): {prefix}")
 
         # --- Step 1: Load base period (most recent) and initialize KB ---
-        self.logger.info(f"      Seeding KB with base period: {periods[0]}...")
+        logger.info(f"🧠 Inicializando KB con periodo base: {periods[0]}...")
         df_base = self._load_period(periods[0])
 
         if df_base.is_empty():
             return pl.DataFrame(), pl.DataFrame()
 
-        self.logger.info(f"         Base period rows: {df_base.height:,}")
+        logger.info(f"   📦 Filas del periodo base: {df_base.height:,}")
         map_accum, kb = initialize_knowledge_base(df_base, prefix)
-        self.logger.info(f"         Initial entities in KB: {kb.height:,}")
+        logger.info(f"   ✅ Entidades iniciales en KB: {kb.height:,}")
 
         del df_base
         gc.collect()
@@ -284,22 +271,19 @@ class CLEEResolver:
         for i in range(1, len(periods)):
             period = periods[i]
 
-            self.logger.info(f"      [{i}/{len(periods) - 1}] Loading period {period}...")
+            logger.info(f"🔗 [{i}/{len(periods) - 1}] Cargando periodo {period}...")
             df_period = self._load_period(period)
 
             if df_period.is_empty():
-                self.logger.info(f"         {period}: empty, skipping.")
+                logger.info(f"   ⚠️ {period}: vacío, saltando.")
                 continue
 
             target_rows = df_period.height
             kb_before = kb.height
 
-            self.logger.info(
-                f"      [{i}/{len(periods) - 1}] Resolving period {period} "
-                f"({target_rows:,} records)..."
-            )
-            self.logger.info(
-                f"         Propagating CLEEs from future -> {period} (radius={self.spatial_tol}m)"
+            logger.info(
+                f"   ⚙️ Resolviendo {period} ({target_rows:,} registros, "
+                f"radio={self.spatial_tol}m)..."
             )
 
             # Resolve entity identities
@@ -321,10 +305,10 @@ class CLEEResolver:
 
             # Log growth
             new_entities = kb.height - kb_before
-            self.logger.info(f"         KB updated with {period}:")
-            self.logger.info(f"            New entities (not in future): +{new_entities:,}")
-            self.logger.info(f"            Total KB size: {kb.height:,} records")
-            self.logger.info(f"         {period} done.")
+            logger.info(
+                f"   ✅ {period} resuelto: +{new_entities:,} entidades nuevas, "
+                f"KB total: {kb.height:,}"
+            )
 
             # Free resolved DF for this period
             del df_resolved
@@ -346,6 +330,11 @@ class CLEEResolver:
         Returns:
             True if successful, False otherwise
         """
+        if force:
+            logger.warning(
+                "⚠️ MODO FORCE ACTIVADO: Se resetearán y re-resolverán todos los clee_master."
+            )
+
         # Create job run
         run_id = self.tracker.create_run(
             job_name="denue_clee_resolver",
@@ -366,15 +355,16 @@ class CLEEResolver:
         try:
             # --- Force mode: seed clee_master from clee, then resolve NULLs ---
             if force:
-                self.logger.info("FORCE MODE: Resetting clee_master and re-seeding from clee...")
                 self._seed_clee_master_from_clee()
 
             # --- Check how many rows need resolution ---
             unresolved_count = self._count_unresolved()
-            self.logger.info(f"Rows needing resolution (clee_master IS NULL): {unresolved_count:,}")
+            logger.info(
+                f"🔍 Filas pendientes de resolución (clee_master IS NULL): {unresolved_count:,}"
+            )
 
             if unresolved_count == 0:
-                self.logger.info("No unresolved rows. CLEE resolution complete (nothing to do).")
+                logger.info("✨ Todas las entidades ya resueltas. Nada por procesar.")
                 self.tracker.complete_clee_resolution_task(
                     task_id=task_id,
                     status=TaskStatus.SKIPPED,
@@ -384,10 +374,9 @@ class CLEEResolver:
                 return True
 
             total_rows = self._get_total_rows()
-            self.logger.info(
-                f"Starting CLEE resolution: {total_rows:,} total rows, "
-                f"{unresolved_count:,} unresolved, "
-                f"radius={self.spatial_tol}m"
+            logger.info(
+                f"⚙️ Iniciando resolución CLEE: {total_rows:,} filas totales, "
+                f"{unresolved_count:,} sin resolver, radio={self.spatial_tol}m"
             )
 
             # --- Run entity resolution (period by period) ---
@@ -407,9 +396,9 @@ class CLEEResolver:
                         )
                     # Filter mapping to only unresolved IDs
                     national_map = national_map.join(unresolved_ids, on="id", how="semi")
-                    self.logger.info(
-                        f"   Filtered to {national_map.height:,} unresolved rows "
-                        f"(preserving existing clee_master)"
+                    logger.info(
+                        f"   🔽 Filtrado a {national_map.height:,} filas sin resolver "
+                        f"(preservando clee_master existentes)"
                     )
 
                 # Write results back to Silver DuckDB
@@ -419,10 +408,6 @@ class CLEEResolver:
 
                 # Count remaining unresolved
                 remaining = self._count_unresolved()
-                self.logger.info(
-                    f"   Resolution complete: {rows_updated:,} rows updated, "
-                    f"{remaining:,} still unresolved"
-                )
 
                 # Count periods processed
                 n_periods = 0
@@ -441,6 +426,15 @@ class CLEEResolver:
                     periods_processed=n_periods,
                     output_path=str(self.silver_db_path),
                 )
+
+                logger.info(
+                    f"✨ Resolución CLEE terminada. {rows_updated:,} filas actualizadas, "
+                    f"{remaining:,} pendientes."
+                )
+                logger.info(
+                    f"   📊 Resumen: {national_kb.height:,} entidades únicas, "
+                    f"{n_periods} periodos procesados"
+                )
             else:
                 self.tracker.complete_clee_resolution_task(
                     task_id=task_id,
@@ -454,11 +448,10 @@ class CLEEResolver:
             gc.collect()
 
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
-            self.logger.info("CLEE resolution complete.")
             return True
 
         except Exception as e:
-            self.logger.error(f"Error during CLEE resolution: {e}")
+            logger.error(f"   ❌ Error en resolución CLEE: {e}")
             self.tracker.complete_clee_resolution_task(
                 task_id=task_id,
                 status=TaskStatus.FAILED,
