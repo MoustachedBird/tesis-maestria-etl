@@ -28,7 +28,6 @@ def temp_transformer(tmp_path):
     seeds_dir.mkdir(parents=True)
     (data_root / "silver").mkdir(parents=True)
     (data_root / "gold").mkdir(parents=True)
-    (data_root / "curated").mkdir(parents=True)
 
     # Copy real seed parquet files into temp directory
     for seed_file in SEEDS_DIR.glob("*.parquet"):
@@ -43,7 +42,6 @@ def temp_transformer(tmp_path):
         metadata_db=metadata_db,
         silver_db_path=silver_db,
         gold_db_path=gold_db,
-        curated_output_dir=data_root / "curated",
     )
 
     return transformer

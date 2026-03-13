@@ -94,7 +94,7 @@ def transform(
 
         if clee_resolution and success:
             console.print("[bold magenta]   Running: clee-resolution[/bold magenta]")
-            success = transformer.run_clee_resolution_stage()
+            success = transformer.run_clee_resolution_stage(force=force)
 
         if success:
             console.print("[bold green]Transform completed successfully.[/bold green]")

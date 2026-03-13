@@ -1,5 +1,5 @@
 """
-CLEE Resolution Stage: Entity Resolution (Silver -> Gold)
+CLEE Resolution Stage: Entity Resolution (Silver DuckDB)
 
 Resolves entity identities across temporal snapshots, matching
 establishments over time and generating master identifiers (CLEEs).
@@ -8,22 +8,23 @@ Propagates CLEEs from the most recent period backward through time
 (future -> past). Uses a spatial tolerance radius (BallTree) as
 pre-filter and a conditional matching cascade for identity resolution.
 
-No mega-regions: processes all states in a single national Knowledge Base.
+Reads from and writes back to the Silver DuckDB warehouse directly,
+populating the `clee_master` column on the `establecimientos` table.
 """
 
 import gc
 import logging
 from pathlib import Path
 
+import duckdb
 import polars as pl
 
 from src_etl.utils.clee_resolution_config import (
-    COLS_NEEDED_FOR_MATCHING,
+    SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,
     TEXT_COLS_TO_SANITIZE,
 )
 from src_etl.utils.entity_resolution import (
-    consolidate_global_catalog_lazy,
     get_region_prefix,
     initialize_knowledge_base,
     resolve_period_logic,
@@ -38,39 +39,31 @@ class CLEEResolver:
     """
     Resolves entity identities across temporal snapshots.
 
-    Handles:
-    - Entity identity matching across time periods
-    - Master CLEE generation and backward propagation
-    - National Knowledge Base management (single KB, all states)
-    - Snapshot generation and consolidation
+    Reads establishment data from Silver DuckDB, runs entity resolution
+    (future -> past propagation), and writes `clee_master` back to the
+    same table via UPDATE statements.
+
+    Modes:
+        force=True:  Copy all existing `clee` values to `clee_master`,
+                     then run the algorithm on remaining NULLs.
+        force=False: Only process records where `clee_master IS NULL`
+                     (incremental, preserves already-assigned values).
     """
 
     def __init__(
         self,
-        data_root: Path,
+        silver_db_path: Path,
         tracker: MetadataTracker,
-        input_dir: Path,
-        output_dir: Path,
     ):
         """
         Initialize CLEE resolution stage.
 
         Args:
-            data_root: Root data directory
+            silver_db_path: Path to Silver DuckDB warehouse
             tracker: MetadataTracker instance for job/task tracking
-            input_dir: Directory containing processed/silver data
-            output_dir: Directory for resolved/curated output
         """
-        self.root = Path(data_root)
+        self.silver_db_path = Path(silver_db_path)
         self.tracker = tracker
-        self.silver_dir = Path(input_dir) / "denue"
-        self.curated_root = Path(output_dir)
-        self.curated_dir = self.curated_root / "denue"
-        self.master_catalog_path = self.curated_dir / "master_catalog.parquet"
-
-        # Ensure output directory exists
-        self.curated_dir.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.curated_dir / "clee_resolution_process.log"
 
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
@@ -90,104 +83,158 @@ class CLEEResolver:
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-            # File handler
-            try:
-                file_handler = logging.FileHandler(self.log_path, mode="a", encoding="utf-8")
-                file_handler.setFormatter(formatter)
-                self.logger.addHandler(file_handler)
-            except Exception as e:
-                self.logger.warning(f"Could not create log file at {self.log_path}: {e}")
+    def _get_connection(self) -> duckdb.DuckDBPyConnection:
+        """Get a DuckDB connection to Silver warehouse."""
+        return duckdb.connect(str(self.silver_db_path))
 
-    def get_available_states(self) -> list[str]:
+    def _seed_clee_master_from_clee(self) -> int:
         """
-        Detect available state folders in the silver/processed directory.
+        Copy existing `clee` values into `clee_master` for all rows.
+
+        Used in force mode to reset and re-seed before running the
+        resolution algorithm on remaining NULLs.
 
         Returns:
-            Sorted list of state codes found in data/processed/denue/state=*
+            Number of rows updated.
         """
-        available_states = set()
-        for path in self.silver_dir.glob("state=*"):
-            if path.is_dir():
-                available_states.add(path.name.split("=")[1])
+        with self._get_connection() as conn:
+            # First, NULL out all clee_master to start fresh
+            conn.execute("UPDATE establecimientos SET clee_master = NULL")
 
-        return sorted(available_states)
+            # Copy non-empty clee values to clee_master
+            conn.execute("""
+                UPDATE establecimientos
+                SET clee_master = clee
+                WHERE clee IS NOT NULL AND clee != ''
+            """)
+            # Count how many got seeded
+            count = conn.execute("""
+                SELECT COUNT(*) FROM establecimientos
+                WHERE clee_master IS NOT NULL
+            """).fetchone()[0]
 
-    def load_all_history(self, state_list: list[str]) -> pl.DataFrame:
+            self.logger.info(f"   Seeded clee_master from clee: {count:,} rows")
+            return count
+
+    def _count_unresolved(self) -> int:
+        """Count rows where clee_master IS NULL."""
+        with self._get_connection() as conn:
+            return conn.execute("""
+                SELECT COUNT(*) FROM establecimientos
+                WHERE clee_master IS NULL
+            """).fetchone()[0]
+
+    def _load_data_for_resolution(self, only_unresolved: bool = False) -> pl.DataFrame:
         """
-        Load historical data for all states into a single national DataFrame.
+        Load establishment data from Silver DuckDB for resolution.
+
+        Uses SILVER_READ_QUERY which JOINs with catalog tables to get
+        `nombre_act` and casts ENUM columns to VARCHAR.
 
         Args:
-            state_list: List of all state codes to load
+            only_unresolved: If True, only load rows where clee_master IS NULL.
+                           If False, load ALL rows (needed for KB construction).
 
         Returns:
-            Polars DataFrame with complete national history
+            Polars DataFrame with columns from COLS_NEEDED_FOR_MATCHING
         """
-        dfs = []
+        query = SILVER_READ_QUERY
+        if only_unresolved:
+            query += "\n    WHERE e.clee_master IS NULL"
 
-        # Columns to read (exclude source_paths which we'll add)
-        cols_to_read = [c for c in COLS_NEEDED_FOR_MATCHING if c != "source_paths"]
+        self.logger.info("   Loading data from Silver DuckDB...")
+        with self._get_connection() as conn:
+            result = conn.execute(query)
+            df = pl.from_arrow(result.fetch_arrow_table())
 
-        for state in state_list:
-            try:
-                state_path = self.silver_dir / f"state={state}"
-                if not state_path.exists():
-                    continue
+        self.logger.info(f"   Loaded {df.height:,} rows")
 
-                parquet_files = list(state_path.glob("**/*.parquet"))
-                if not parquet_files:
-                    continue
-
-                self.logger.info(f"   Loading: {state} ({len(parquet_files)} files)")
-
-                for file_path in parquet_files:
-                    df_part = pl.read_parquet(
-                        file_path, columns=cols_to_read, hive_partitioning=True
-                    ).with_columns(
-                        pl.lit(str(file_path.relative_to(self.root))).alias("source_paths")
-                    )
-                    dfs.append(df_part)
-
-            except Exception as e:
-                self.logger.error(f"Error loading {state}: {e}")
-
-        if not dfs:
-            return pl.DataFrame()
-
-        full_df = pl.concat(dfs)
+        if df.is_empty():
+            return df
 
         # Sanitize nulls in text columns
-        full_df = full_df.with_columns(
-            [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in full_df.columns]
+        df = df.with_columns(
+            [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in df.columns]
         )
 
-        return clean_contact_columns(full_df)
+        return clean_contact_columns(df)
 
-    def process_national(self, state_list: list[str]) -> tuple[pl.DataFrame, pl.DataFrame]:
+    def _write_results_to_silver(self, mapping: pl.DataFrame) -> int:
         """
-        Process all states as a single national Knowledge Base.
+        Write clee_master assignments back to Silver DuckDB.
+
+        Uses batched UPDATE statements for efficiency.
+
+        Args:
+            mapping: DataFrame with columns [id, clee_master]
+
+        Returns:
+            Number of rows updated
+        """
+        if mapping.is_empty():
+            return 0
+
+        total = mapping.height
+        batch_size = 50_000
+        updated = 0
+
+        self.logger.info(f"   Writing {total:,} clee_master values to Silver DuckDB...")
+
+        with self._get_connection() as conn:
+            for offset in range(0, total, batch_size):
+                batch = mapping.slice(offset, batch_size)
+
+                # Build a temp table approach for efficient batch update
+                conn.execute(
+                    "CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, clee_master VARCHAR)"
+                )
+                conn.execute("INSERT INTO _clee_updates SELECT * FROM batch")
+                result = conn.execute("""
+                    UPDATE establecimientos e
+                    SET clee_master = u.clee_master
+                    FROM _clee_updates u
+                    WHERE e.id = u.id
+                """)
+                batch_updated = result.fetchone()[0] if result.description else batch.height
+                updated += batch_updated
+                conn.execute("DROP TABLE IF EXISTS _clee_updates")
+
+                if (offset + batch_size) % 200_000 == 0 or offset + batch_size >= total:
+                    self.logger.info(
+                        f"      Updated {min(offset + batch_size, total):,}/{total:,} rows"
+                    )
+
+        self.logger.info(f"   Total rows updated: {updated:,}")
+        return updated
+
+    def process_national(self, df_all: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Process all data as a single national Knowledge Base.
 
         Propagates CLEEs from the most recent period backward through time.
         Each period is resolved against the accumulated KB, then the KB
         is updated with the new period's data.
 
         Args:
-            state_list: List of all state codes to process
+            df_all: Full national DataFrame with all periods
 
         Returns:
-            Tuple of (mapping DataFrame [row_id -> master_clee], knowledge base DataFrame)
+            Tuple of (mapping DataFrame [id -> clee_master], knowledge base DataFrame)
         """
+        # Use all unique cve_ent values as state list for region prefix
+        if "cve_ent" in df_all.columns:
+            state_list = sorted(df_all["cve_ent"].unique().to_list())
+        else:
+            state_list = ["NATIONAL"]
+
         prefix = get_region_prefix(state_list)
         self.logger.info(f"   Region prefix (namespace): {prefix}")
 
-        df_national = self.load_all_history(state_list)
-        if df_national.is_empty():
-            return pl.DataFrame(), pl.DataFrame()
-
-        total_records = df_national.height
-        self.logger.info(f"   Total records loaded: {total_records:,}")
+        total_records = df_all.height
+        self.logger.info(f"   Total records for resolution: {total_records:,}")
 
         # Get unique periods sorted chronologically (newest first)
-        unique_periods = df_national["period"].unique().to_list()
+        unique_periods = df_all["period"].unique().to_list()
         periods = sorted(
             unique_periods,
             key=lambda x: (int(x.split("_")[1]), int(x.split("_")[0])),
@@ -196,10 +243,10 @@ class CLEEResolver:
 
         self.logger.info(f"   Periods detected ({len(periods)}): {periods}")
 
-        dict_dfs = {p: df_national.filter(pl.col("period") == p) for p in periods}
+        dict_dfs = {p: df_all.filter(pl.col("period") == p) for p in periods}
 
         # Free the full national DF now that we have per-period splits
-        del df_national
+        del df_all
         gc.collect()
 
         # Initialize Knowledge Base with the most recent period
@@ -229,7 +276,7 @@ class CLEEResolver:
                 self.spatial_tol,
             )
 
-            map_accum = map_accum.vstack(df_resolved.select(["row_id", "master_clee"]))
+            map_accum = map_accum.vstack(df_resolved.select(["id", "clee_master"]))
 
             # Update knowledge base
             kb = update_kb_logic(kb, df_resolved)
@@ -247,85 +294,20 @@ class CLEEResolver:
 
         return map_accum, kb
 
-    def _save_local_results(self, state_list: list[str], mapping: pl.DataFrame) -> list[str]:
-        """
-        Save CLEE resolution results to partitioned Parquet files.
-
-        Joins the row_id -> master_clee mapping onto the original Silver
-        Parquets and writes enriched files to the curated directory.
-
-        Args:
-            state_list: List of states processed
-            mapping: Mapping DataFrame with row_id -> master_clee
-
-        Returns:
-            List of relative paths where files were saved
-        """
-        updated_paths = []
-
-        for state in state_list:
-            state_path = self.silver_dir / f"state={state}"
-            if not state_path.exists():
-                continue
-
-            for parquet_file in state_path.glob("**/*.parquet"):
-                # Read original data
-                df_original = pl.read_parquet(parquet_file, hive_partitioning=True)
-
-                # Join with mapping to add master_clee
-                df_enriched = df_original.join(mapping, on="row_id", how="left").select(
-                    [*df_original.columns, "master_clee"]
-                )
-
-                # Save to curated directory maintaining partition structure
-                rel_path = parquet_file.relative_to(self.silver_dir)
-                output_path = self.curated_dir / rel_path
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-
-                df_enriched.write_parquet(output_path)
-                updated_paths.append(str(rel_path))
-
-        return updated_paths
-
-    def _consolidate_snapshots(self, snapshot_dir: Path):
-        """
-        Consolidate snapshot(s) into master catalog.
-
-        Args:
-            snapshot_dir: Directory containing snapshot files
-        """
-        snapshot_files = list(snapshot_dir.glob("kb_*.parquet"))
-
-        if not snapshot_files:
-            self.logger.warning("No snapshots found.")
-            return
-
-        self.logger.info(f"   Consolidating {len(snapshot_files)} snapshot(s)...")
-
-        lazy_frames = [pl.scan_parquet(f) for f in snapshot_files]
-        master_kb = consolidate_global_catalog_lazy(lazy_frames).collect()
-
-        master_kb.write_parquet(self.master_catalog_path)
-        self.logger.info(
-            f"   Master Catalog: {self.master_catalog_path.name} ({master_kb.height:,} entities)"
-        )
-
-    def run(self) -> bool:
+    def run(self, force: bool = False) -> bool:
         """
         Run CLEE resolution pipeline.
 
-        Loads all states into a single national KB, resolves entity
-        identities backward through time, and generates master catalog.
+        Reads from Silver DuckDB, resolves entity identities, and writes
+        `clee_master` back to the same table.
+
+        Args:
+            force: If True, reset all clee_master values and re-run from scratch.
+                   If False, only process rows where clee_master IS NULL (incremental).
 
         Returns:
             True if successful, False otherwise
         """
-        self.curated_root.mkdir(parents=True, exist_ok=True)
-
-        # Create snapshot directory
-        snapshot_dir = self.curated_dir / "snapshots"
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-
         # Create job run
         run_id = self.tracker.create_run(
             job_name="denue_clee_resolver",
@@ -333,46 +315,96 @@ class CLEEResolver:
             trigger_type="MANUAL",
         )
 
-        all_states = self.get_available_states()
-
-        if not all_states:
-            self.logger.info("No states found to process.")
-            self.tracker.complete_run(run_id, JobStatus.SUCCESS)
-            return True
-
-        self.logger.info(
-            f"Starting CLEE resolution: {len(all_states)} states, "
-            f"national KB, radius={self.spatial_tol}m"
-        )
-
         # Create a single CLEE resolution task for the national run
         task_id = self.tracker.create_clee_resolution_task(
             run_id=run_id,
             task_name="clee_resolution_national",
             region_group="NATIONAL",
-            state_list=all_states,
+            state_list=["ALL"],
         )
 
         self.tracker.start_clee_resolution_task(task_id)
 
         try:
-            national_map, national_kb = self.process_national(all_states)
+            # --- Force mode: seed clee_master from clee, then resolve NULLs ---
+            if force:
+                self.logger.info("FORCE MODE: Resetting clee_master and re-seeding from clee...")
+                self._seed_clee_master_from_clee()
+
+            # --- Check how many rows need resolution ---
+            unresolved_count = self._count_unresolved()
+            self.logger.info(f"Rows needing resolution (clee_master IS NULL): {unresolved_count:,}")
+
+            if unresolved_count == 0:
+                self.logger.info("No unresolved rows. CLEE resolution complete (nothing to do).")
+                self.tracker.complete_clee_resolution_task(
+                    task_id=task_id,
+                    status=TaskStatus.SKIPPED,
+                    error_message="No unresolved rows",
+                )
+                self.tracker.complete_run(run_id, JobStatus.SUCCESS)
+                return True
+
+            # --- Load ALL data for KB construction ---
+            # We need the full history (including already-resolved rows) to build
+            # the Knowledge Base, but we only assign clee_master to unresolved rows.
+            self.logger.info("Loading full history for KB construction...")
+            df_all = self._load_data_for_resolution(only_unresolved=False)
+
+            if df_all.is_empty():
+                self.logger.info("No data found in Silver DuckDB.")
+                self.tracker.complete_clee_resolution_task(
+                    task_id=task_id,
+                    status=TaskStatus.SKIPPED,
+                    error_message="No data in Silver DuckDB",
+                )
+                self.tracker.complete_run(run_id, JobStatus.SUCCESS)
+                return True
+
+            total_rows = df_all.height
+            self.logger.info(
+                f"Starting CLEE resolution: {total_rows:,} total rows, "
+                f"{unresolved_count:,} unresolved, "
+                f"radius={self.spatial_tol}m"
+            )
+
+            # --- Run entity resolution ---
+            national_map, national_kb = self.process_national(df_all)
 
             if not national_map.is_empty():
-                # Save enriched parquets
-                self.logger.info("Saving enriched Parquet files...")
-                updated_paths = self._save_local_results(all_states, national_map)
-                self.logger.info(f"   Saved {len(updated_paths)} files")
+                # Filter mapping to only include rows that were unresolved
+                # (don't overwrite already-resolved clee_master in incremental mode)
+                if not force:
+                    # Get the set of unresolved IDs
+                    with self._get_connection() as conn:
+                        unresolved_ids = pl.from_arrow(
+                            conn.execute("""
+                                SELECT id FROM establecimientos
+                                WHERE clee_master IS NULL
+                            """).fetch_arrow_table()
+                        )
+                    # Filter mapping to only unresolved IDs
+                    national_map = national_map.join(unresolved_ids, on="id", how="semi")
+                    self.logger.info(
+                        f"   Filtered to {national_map.height:,} unresolved rows "
+                        f"(preserving existing clee_master)"
+                    )
 
-                # Save national KB snapshot
-                snapshot_path = snapshot_dir / "kb_national.parquet"
-                national_kb.write_parquet(snapshot_path)
-                self.logger.info(f"   Snapshot saved: {snapshot_path.name}")
+                # Write results back to Silver DuckDB
+                rows_updated = self._write_results_to_silver(
+                    national_map.select(["id", "clee_master"])
+                )
 
-                # Count periods
+                # Count remaining unresolved
+                remaining = self._count_unresolved()
+                self.logger.info(
+                    f"   Resolution complete: {rows_updated:,} rows updated, "
+                    f"{remaining:,} still unresolved"
+                )
+
+                # Count periods processed
                 n_periods = 0
                 if "periods" in national_kb.columns:
-                    # KB has list column 'periods' — count unique across all entities
                     n_periods = national_kb.select(
                         pl.col("periods").list.explode().unique().len()
                     ).item()
@@ -381,11 +413,11 @@ class CLEEResolver:
                 self.tracker.complete_clee_resolution_task(
                     task_id=task_id,
                     status=TaskStatus.SUCCESS,
-                    entities_input=national_map.height,
+                    entities_input=total_rows,
                     entities_matched=national_kb.height,
                     master_clees_created=national_kb.height,
                     periods_processed=n_periods,
-                    output_path=str(snapshot_path),
+                    output_path=str(self.silver_db_path),
                 )
             else:
                 self.tracker.complete_clee_resolution_task(
@@ -398,10 +430,6 @@ class CLEEResolver:
             del national_map
             del national_kb
             gc.collect()
-
-            # Consolidate snapshots into master catalog
-            self.logger.info("Consolidating Master Catalog from snapshots...")
-            self._consolidate_snapshots(snapshot_dir)
 
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             self.logger.info("CLEE resolution complete.")

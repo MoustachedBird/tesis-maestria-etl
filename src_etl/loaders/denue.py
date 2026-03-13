@@ -35,7 +35,8 @@ class EstablecimientoWriter(DuckDBWarehouse):
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table_id} (
                     id VARCHAR PRIMARY KEY,
-                    clee VARCHAR, nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
+                    clee VARCHAR, clee_master VARCHAR,
+                    nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
                     tipo_vial tipo_vial_type,
                     tipo_asent tipo_asent_type,
                     tipounieco tipounieco_type,

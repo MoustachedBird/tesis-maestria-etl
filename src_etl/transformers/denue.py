@@ -3,7 +3,7 @@ Unified DENUE Data Transformer
 
 Orchestrates the complete ETL transformation pipeline:
 1. TRANSFORM Stage: ZIP -> Silver DuckDB (Bronze -> Silver)
-2. CLEE RESOLUTION Stage: Entity Resolution (Silver -> Curated)
+2. CLEE RESOLUTION Stage: Entity Resolution (Silver DuckDB in-place)
 3. LOAD Stage: Silver DuckDB -> Gold DuckDB (Silver -> Gold)
 
 Uses MetadataTracker for comprehensive tracking and observability.
@@ -46,7 +46,6 @@ class DenuePipelineOrchestrator:
         metadata_db: Path | None = None,
         silver_db_path: Path | None = None,
         gold_db_path: Path | None = None,
-        curated_output_dir: Path | None = None,
     ):
         """
         Initialize unified transformer.
@@ -56,7 +55,6 @@ class DenuePipelineOrchestrator:
             metadata_db: Path to metadata.duckdb (default: data/metadata.duckdb)
             silver_db_path: Path to Silver DuckDB (default: from settings)
             gold_db_path: Path to Gold DuckDB (default: from settings)
-            curated_output_dir: Output for curated/resolved data (default: from settings)
         """
         self.data_root = Path(data_root)
 
@@ -66,17 +64,14 @@ class DenuePipelineOrchestrator:
         self.metadata_db = Path(metadata_db)
         self.tracker = MetadataTracker(self.metadata_db)
 
-        # Resolve paths
-        self.silver_db_path = (
-            Path(silver_db_path) if silver_db_path else settings.SILVER_DUCKDB_PATH
-        )
-        self.gold_db_path = Path(gold_db_path) if gold_db_path else settings.GOLD_DUCKDB_PATH
-        self.curated_output_dir = (
-            Path(curated_output_dir) if curated_output_dir else settings.CURATED_OUTPUT_DIR
-        )
+        # Resolve paths (validators guarantee non-None, assert for type checker)
+        resolved_silver = Path(silver_db_path) if silver_db_path else settings.SILVER_DUCKDB_PATH
+        assert resolved_silver is not None, "SILVER_DUCKDB_PATH must be configured"
+        self.silver_db_path: Path = resolved_silver
 
-        # Ensure output directories exist
-        self.curated_output_dir.mkdir(parents=True, exist_ok=True)
+        resolved_gold = Path(gold_db_path) if gold_db_path else settings.GOLD_DUCKDB_PATH
+        assert resolved_gold is not None, "GOLD_DUCKDB_PATH must be configured"
+        self.gold_db_path: Path = resolved_gold
 
         # Initialize stages
         self.transformer = BronzeToSilverProcessor(
@@ -86,10 +81,8 @@ class DenuePipelineOrchestrator:
         )
 
         self.clee_resolver = CLEEResolver(
-            data_root=self.data_root,
+            silver_db_path=self.silver_db_path,
             tracker=self.tracker,
-            input_dir=settings.PROCESSED_OUTPUT_DIR,
-            output_dir=self.curated_output_dir,
         )
 
         self.date_normalizer = DateNormalizer(
@@ -107,7 +100,6 @@ class DenuePipelineOrchestrator:
         logger.info(f"   Silver DB: {self.silver_db_path}")
         logger.info(f"   Gold DB: {self.gold_db_path}")
         logger.info(f"   Metadata: {self.metadata_db}")
-        logger.info(f"   Curated output: {self.curated_output_dir}")
 
     def run_transform_stage(self, force: bool = False) -> bool:
         """
@@ -170,20 +162,25 @@ class DenuePipelineOrchestrator:
             logger.error(f"NORMALIZE-DATES stage failed: {e}")
             raise
 
-    def run_clee_resolution_stage(self) -> bool:
+    def run_clee_resolution_stage(self, force: bool = False) -> bool:
         """
         Run CLEE resolution stage: Entity Resolution.
 
         Matches establishments across time periods and generates
-        master identifiers (CLEEs) for entity tracking.
+        master identifiers (CLEEs) for entity tracking. Results are
+        written back to the Silver DuckDB `clee_master` column.
+
+        Args:
+            force: If True, reset all clee_master values and re-run from scratch.
 
         Returns:
             True if successful, False otherwise
         """
         logger.info("Starting CLEE RESOLUTION stage (Entity Resolution)")
+        logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
 
         try:
-            success = self.clee_resolver.run()
+            success = self.clee_resolver.run(force=force)
 
             if success:
                 logger.info("CLEE RESOLUTION stage completed successfully")
@@ -353,7 +350,6 @@ class DenuePipelineOrchestrator:
                 "metadata_db": str(self.metadata_db),
                 "silver_db": str(self.silver_db_path),
                 "gold_db": str(self.gold_db_path),
-                "curated_output": str(self.curated_output_dir),
             }
 
     def __repr__(self) -> str:

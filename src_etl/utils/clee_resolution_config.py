@@ -1,5 +1,3 @@
-import polars as pl
-
 # =============================================================================
 # UMBRALES DE ENTITY RESOLUTION (Facil de calibrar)
 #
@@ -58,96 +56,69 @@ MIN_WEB_LENGTH = 5
 
 
 # =============================================================================
-# ESQUEMAS Y COLUMNAS
+# COLUMNAS PARA RESOLUCION (leidas desde Silver DuckDB)
 # =============================================================================
 
-# Esquema alineado con el Processor
-SILVER_SCHEMA = {
-    "id": pl.Utf8,
-    "clee": pl.Utf8,
-    "nom_estab": pl.Utf8,
-    "raz_social": pl.Utf8,
-    "codigo_act": pl.Utf8,
-    "nombre_act": pl.Utf8,
-    "per_ocu": pl.Utf8,
-    "tipo_vial": pl.Utf8,
-    "nom_vial": pl.Utf8,
-    "tipo_v_e_1": pl.Utf8,
-    "nom_v_e_1": pl.Utf8,
-    "tipo_v_e_2": pl.Utf8,
-    "nom_v_e_2": pl.Utf8,
-    "tipo_v_e_3": pl.Utf8,
-    "nom_v_e_3": pl.Utf8,
-    "numero_ext": pl.Utf8,
-    "letra_ext": pl.Utf8,
-    "edificio": pl.Utf8,
-    "edificio_e": pl.Utf8,
-    "numero_int": pl.Utf8,
-    "letra_int": pl.Utf8,
-    "tipo_asent": pl.Utf8,
-    "nomb_asent": pl.Utf8,
-    "tipocencom": pl.Utf8,
-    "nom_cencom": pl.Utf8,
-    "num_local": pl.Utf8,
-    "cod_postal": pl.Utf8,
-    "cve_ent": pl.Utf8,
-    "entidad": pl.Utf8,
-    "cve_mun": pl.Utf8,
-    "municipio": pl.Utf8,
-    "cve_loc": pl.Utf8,
-    "localidad": pl.Utf8,
-    "ageb": pl.Utf8,
-    "manzana": pl.Utf8,
-    "telefono": pl.Utf8,
-    "correoelec": pl.Utf8,
-    "www": pl.Utf8,
-    "tipounieco": pl.Utf8,
-    "latitud": pl.Float64,
-    "longitud": pl.Float64,
-    "fecha_alta_str": pl.Utf8,
-    "period": pl.Utf8,
-    "row_id": pl.Utf8,
-}
-
-# Columnas minimas necesarias para la resolucion
+# Columnas que se leen del Silver DuckDB para la resolucion.
+# nombre_act se obtiene via JOIN con denue_actividades_economicas.
 COLS_NEEDED_FOR_MATCHING = [
-    "row_id",
+    "id",
     "clee",
+    "clee_master",
     "nom_estab",
     "raz_social",
-    "nombre_act",
+    "codigo_act",
+    "nombre_act",  # via JOIN con catalogo actividades
     "latitud",
     "longitud",
     "period",
     "telefono",
     "correoelec",
     "www",
-    "entidad",
-    "municipio",
-    "localidad",
     "fecha_alta_str",
-    "source_paths",
     "per_ocu",
     "tipo_asent",
     "nomb_asent",
-    "tipocencom",
     "nom_cencom",
     "cod_postal",
 ]
+
+# SQL query para leer datos del Silver DuckDB con JOINs a catalogos.
+# Obtiene nombre_act via JOIN; cast de enums a VARCHAR para Polars.
+SILVER_READ_QUERY = """
+    SELECT
+        e.id,
+        e.clee,
+        e.clee_master,
+        e.nom_estab,
+        e.raz_social,
+        e.codigo_act,
+        COALESCE(a.nombre_act, '') AS nombre_act,
+        e.latitud,
+        e.longitud,
+        CAST(e.period AS VARCHAR) AS period,
+        e.telefono,
+        e.correoelec,
+        e.www,
+        e.fecha_alta_str,
+        CAST(e.per_ocu AS VARCHAR) AS per_ocu,
+        CAST(e.tipo_asent AS VARCHAR) AS tipo_asent,
+        e.nomb_asent,
+        e.nom_cencom,
+        e.cod_postal
+    FROM establecimientos e
+    LEFT JOIN denue_actividades_economicas a ON e.codigo_act = a.codigo_act
+"""
 
 # Columnas de texto para sanitizar (None -> "")
 TEXT_COLS_TO_SANITIZE = [
     "nom_estab",
     "raz_social",
     "nombre_act",
-    "entidad",
-    "municipio",
-    "localidad",
     "fecha_alta_str",
     "per_ocu",
     "tipo_asent",
     "nomb_asent",
-    "tipocencom",
     "nom_cencom",
     "cod_postal",
 ]

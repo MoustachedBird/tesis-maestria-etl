@@ -21,25 +21,20 @@ def initialize_knowledge_base(
     Crea la KB inicial con historial completo.
 
     Cada registro del periodo base se convierte en una entidad de la KB.
-    Los registros con CLEE oficial lo usan como master_clee; los demas
+    Los registros con CLEE oficial lo usan como clee_master; los demas
     reciben un CLEE temporal generado.
 
     Returns:
-        Tupla (mapping_df, kb_df) donde mapping_df tiene [row_id, master_clee]
-        y kb_df es la Knowledge Base agregada por master_clee.
+        Tupla (mapping_df, kb_df) donde mapping_df tiene [id, clee_master]
+        y kb_df es la Knowledge Base agregada por clee_master.
     """
     # Aseguramos homogeneidad de tipos string y limpieza de nulos
     df_resolved = df_base.with_columns(
         [
-            pl.col("entidad").cast(pl.Utf8).fill_null(""),
-            pl.col("municipio").cast(pl.Utf8).fill_null(""),
-            pl.col("localidad").cast(pl.Utf8).fill_null(""),
             pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
-            pl.col("source_paths").cast(pl.Utf8).fill_null(""),
             pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
             pl.col("tipo_asent").cast(pl.Utf8).fill_null(""),
             pl.col("nomb_asent").cast(pl.Utf8).fill_null(""),
-            pl.col("tipocencom").cast(pl.Utf8).fill_null(""),
             pl.col("nom_cencom").cast(pl.Utf8).fill_null(""),
             pl.col("cod_postal").cast(pl.Utf8).fill_null(""),
         ]
@@ -47,14 +42,14 @@ def initialize_knowledge_base(
         pl.when((pl.col("clee").is_not_null()) & (pl.col("clee") != ""))
         .then(pl.col("clee"))
         .otherwise(
-            pl.col("row_id").map_elements(
+            pl.col("id").map_elements(
                 lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
             )
         )
-        .alias("master_clee")
+        .alias("clee_master")
     )
 
-    kb = df_resolved.group_by("master_clee").agg(
+    kb = df_resolved.group_by("clee_master").agg(
         [
             pl.col("latitud").first(),
             pl.col("longitud").first(),
@@ -62,15 +57,10 @@ def initialize_knowledge_base(
             pl.col("nom_estab").alias("names"),
             pl.col("raz_social").alias("razones"),
             pl.col("nombre_act").alias("acts"),
-            pl.col("entidad").alias("entidades"),
-            pl.col("municipio").alias("municipios"),
-            pl.col("localidad").alias("localidades"),
             pl.col("fecha_alta_str").alias("fechas_alta"),
-            pl.col("source_paths").alias("source_paths"),
             pl.col("per_ocu").alias("estratos_personal"),
             pl.col("tipo_asent").alias("tipos_asentamiento"),
             pl.col("nomb_asent").alias("asentamientos"),
-            pl.col("tipocencom").alias("tipos_centro_comercial"),
             pl.col("nom_cencom").alias("centros_comerciales"),
             pl.col("cod_postal").alias("codigos_postales"),
             pl.col("tel_clean").fill_null("").alias("tels"),
@@ -79,7 +69,7 @@ def initialize_knowledge_base(
         ]
     )
 
-    return df_resolved.select(["row_id", "master_clee"]), kb
+    return df_resolved.select(["id", "clee_master"]), kb
 
 
 def resolve_period_logic(
@@ -106,12 +96,12 @@ def resolve_period_logic(
         spatial_tol: Radio de busqueda espacial en metros
 
     Returns:
-        DataFrame con todos los registros del periodo + columna master_clee
+        DataFrame con todos los registros del periodo + columna clee_master
     """
 
     # A. Determinista: Enlace directo por CLEE oficial
     df_with_clee = df_target.filter((pl.col("clee").is_not_null()) & (pl.col("clee") != ""))
-    df_res_A = df_with_clee.with_columns(pl.col("clee").alias("master_clee"))
+    df_res_A = df_with_clee.with_columns(pl.col("clee").alias("clee_master"))
 
     # B. Probabilistico: Negocios sin CLEE o nuevos registros
     df_missing = df_target.filter((pl.col("clee").is_null()) | (pl.col("clee") == ""))
@@ -122,7 +112,7 @@ def resolve_period_logic(
         # 1. Filtro Espacial Inicial (Radio de tolerancia en metros)
         indices, _ = find_spatial_neighbors(kb, df_missing, spatial_tol)
 
-        kb_ids = kb["master_clee"].to_list()
+        kb_ids = kb["clee_master"].to_list()
 
         # Pre-cargamos las listas historicas de la KB para acceso rapido
         kb_lists = {
@@ -169,7 +159,7 @@ def resolve_period_logic(
             final_clee = best_clee if best_clee else f"NEW_{region_prefix}-{generate_temp_clee()}"
 
             new_item = row.copy()
-            new_item["master_clee"] = final_clee
+            new_item["clee_master"] = final_clee
             new_links.append(new_item)
 
         # Reconstruccion del DataFrame con los resultados del Algoritmo B
@@ -177,11 +167,11 @@ def resolve_period_logic(
     else:
         # Caso donde no hay KB previa o todos los registros son nuevos
         df_res_B = df_missing.with_columns(
-            pl.col("row_id")
+            pl.col("id")
             .map_elements(
                 lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
             )
-            .alias("master_clee")
+            .alias("clee_master")
         ).select(df_res_A.columns)
 
     # Union de resultados Deterministas y Probabilisticos
@@ -198,35 +188,25 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
     kb_updates = (
         new_resolved_data.with_columns(
             [
-                pl.col("entidad").cast(pl.Utf8).fill_null(""),
-                pl.col("municipio").cast(pl.Utf8).fill_null(""),
-                pl.col("localidad").cast(pl.Utf8).fill_null(""),
                 pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
-                pl.col("source_paths").cast(pl.Utf8).fill_null(""),
                 pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
                 pl.col("tipo_asent").cast(pl.Utf8).fill_null(""),
                 pl.col("nomb_asent").cast(pl.Utf8).fill_null(""),
-                pl.col("tipocencom").cast(pl.Utf8).fill_null(""),
                 pl.col("nom_cencom").cast(pl.Utf8).fill_null(""),
                 pl.col("cod_postal").cast(pl.Utf8).fill_null(""),
             ]
         )
-        .group_by("master_clee")
+        .group_by("clee_master")
         .agg(
             [
                 pl.col("period").alias("periods"),
                 pl.col("nom_estab").alias("names"),
                 pl.col("raz_social").alias("razones"),
                 pl.col("nombre_act").alias("acts"),
-                pl.col("entidad").alias("entidades"),
-                pl.col("municipio").alias("municipios"),
-                pl.col("localidad").alias("localidades"),
                 pl.col("fecha_alta_str").alias("fechas_alta"),
-                pl.col("source_paths").alias("source_paths"),
                 pl.col("per_ocu").alias("estratos_personal"),
                 pl.col("tipo_asent").alias("tipos_asentamiento"),
                 pl.col("nomb_asent").alias("asentamientos"),
-                pl.col("tipocencom").alias("tipos_centro_comercial"),
                 pl.col("nom_cencom").alias("centros_comerciales"),
                 pl.col("cod_postal").alias("codigos_postales"),
                 pl.col("tel_clean").fill_null("").alias("tels"),
@@ -238,7 +218,7 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
         )
     )
 
-    kb = kb.join(kb_updates, on="master_clee", how="full", suffix="_new")
+    kb = kb.join(kb_updates, on="clee_master", how="full", suffix="_new")
 
     def merge_lists(col_name):
         return pl.concat_list(
@@ -247,64 +227,21 @@ def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.Dat
 
     return kb.select(
         [
-            pl.col("master_clee"),
+            pl.col("clee_master"),
             pl.coalesce(["latitud", "latitud_new"]).alias("latitud"),
             pl.coalesce(["longitud", "longitud_new"]).alias("longitud"),
             merge_lists("periods").list.sort().alias("periods"),
             merge_lists("names").alias("names"),
             merge_lists("razones").alias("razones"),
             merge_lists("acts").alias("acts"),
-            merge_lists("entidades").alias("entidades"),
-            merge_lists("municipios").alias("municipios"),
-            merge_lists("localidades").alias("localidades"),
             merge_lists("fechas_alta").alias("fechas_alta"),
-            merge_lists("source_paths").alias("source_paths"),
             merge_lists("estratos_personal").alias("estratos_personal"),
             merge_lists("tipos_asentamiento").alias("tipos_asentamiento"),
             merge_lists("asentamientos").alias("asentamientos"),
-            merge_lists("tipos_centro_comercial").alias("tipos_centro_comercial"),
             merge_lists("centros_comerciales").alias("centros_comerciales"),
             merge_lists("codigos_postales").alias("codigos_postales"),
             merge_lists("tels").alias("tels"),
             merge_lists("emails").alias("emails"),
             merge_lists("wwws").alias("wwws"),
-        ]
-    )
-
-
-def consolidate_global_catalog_lazy(lazy_frames: list[pl.LazyFrame]) -> pl.LazyFrame:
-    """
-    Consolidacion final de snapshots nacionales con todas las variables.
-
-    Recibe LazyFrames de cada snapshot regional/nacional y los fusiona
-    en un unico catalogo maestro agrupado por master_clee.
-    """
-    full_concat = pl.concat(lazy_frames)
-
-    def merge_lists_final(col_name):
-        return pl.col(col_name).list.eval(pl.element().flatten().unique())
-
-    return full_concat.group_by("master_clee").agg(
-        [
-            pl.col("latitud").first(),
-            pl.col("longitud").first(),
-            merge_lists_final("periods").list.sort().alias("periods"),
-            merge_lists_final("names"),
-            merge_lists_final("razones"),
-            merge_lists_final("acts"),
-            merge_lists_final("entidades"),
-            merge_lists_final("municipios"),
-            merge_lists_final("localidades"),
-            merge_lists_final("fechas_alta"),
-            merge_lists_final("source_paths"),
-            merge_lists_final("estratos_personal"),
-            merge_lists_final("tipos_asentamiento"),
-            merge_lists_final("asentamientos"),
-            merge_lists_final("tipos_centro_comercial"),
-            merge_lists_final("centros_comerciales"),
-            merge_lists_final("codigos_postales"),
-            merge_lists_final("tels"),
-            merge_lists_final("emails"),
-            merge_lists_final("wwws"),
         ]
     )

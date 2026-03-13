@@ -51,6 +51,11 @@ class Establecimiento(Base):
     clee: Mapped[str | None] = mapped_column(
         String, index=True, comment="CLEE - Clave Larga de Establecimiento Económico"
     )
+    clee_master: Mapped[str | None] = mapped_column(
+        String,
+        index=True,
+        comment="Resolved CLEE: official INEGI CLEE or generated via entity resolution",
+    )
     nom_estab: Mapped[str | None] = mapped_column(String(500), comment="Establishment name")
     raz_social: Mapped[str | None] = mapped_column(
         String(500), comment="Business legal name (razón social)"
