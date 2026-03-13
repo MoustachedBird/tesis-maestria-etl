@@ -17,6 +17,7 @@ loading all ~76M rows into RAM simultaneously.
 
 import gc
 import logging
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -117,29 +118,25 @@ class CLEEResolver:
                 WHERE clee_master IS NULL
             """).fetchone()[0]
 
-    def _get_sorted_periods(self) -> list[str]:
+    def _get_sorted_periods(self) -> list[date]:
         """
         Get all periods from Silver DuckDB sorted newest-first.
 
         Returns:
-            List of period strings sorted chronologically descending.
-            Example: ["11_2024", "05_2024", "11_2023", "05_2023", ...]
+            List of date objects sorted chronologically descending.
+            Example: [date(2024, 11, 1), date(2024, 5, 1), ...]
         """
         with self._get_connection() as conn:
             rows = conn.execute("""
-                SELECT DISTINCT CAST(period AS VARCHAR) AS period
+                SELECT DISTINCT period
                 FROM establecimientos
+                WHERE period IS NOT NULL
+                ORDER BY period DESC
             """).fetchall()
 
-        periods = [r[0] for r in rows]
+        return [r[0] for r in rows]
 
-        return sorted(
-            periods,
-            key=lambda x: (int(x.split("_")[1]), int(x.split("_")[0])),
-            reverse=True,
-        )
-
-    def _load_period(self, period: str) -> pl.DataFrame:
+    def _load_period(self, period: date) -> pl.DataFrame:
         """
         Load a single period's data from Silver DuckDB.
 
@@ -147,12 +144,12 @@ class CLEEResolver:
         `nombre_act` and casts ENUM columns to VARCHAR, filtered by period.
 
         Args:
-            period: Period string to load (e.g. "11_2024")
+            period: Date object representing the period (e.g. date(2024, 11, 1))
 
         Returns:
             Polars DataFrame with columns from COLS_NEEDED_FOR_MATCHING
         """
-        query = SILVER_READ_QUERY + "\n    WHERE CAST(e.period AS VARCHAR) = ?"
+        query = SILVER_READ_QUERY + "\n    WHERE e.period = ?"
 
         with self._get_connection() as conn:
             result = conn.execute(query, [period])
