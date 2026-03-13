@@ -1,4 +1,4 @@
-.PHONY: help setup extract transform load harmonize pipeline clean db-migrate db-downgrade db-seed db-reset test
+.PHONY: help setup extract transform load clee-resolution pipeline clean db-migrate db-downgrade db-seed db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
@@ -33,8 +33,8 @@ transform: ## Transform raw data (Bronze -> Silver)
 load: ## Load Silver -> Gold
 	$(PYTHON) -m src_etl.main load $(ARGS)
 
-harmonize: ## Run harmonization (Entity Resolution)
-	$(PYTHON) -m src_etl.main transform --no-process --harmonize $(ARGS)
+clee-resolution: ## Run CLEE Resolution (Entity Resolution)
+	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution $(ARGS)
 
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry

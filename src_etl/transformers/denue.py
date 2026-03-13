@@ -3,7 +3,7 @@ Unified DENUE Data Transformer
 
 Orchestrates the complete ETL transformation pipeline:
 1. TRANSFORM Stage: ZIP -> Silver DuckDB (Bronze -> Silver)
-2. HARMONIZE Stage: Entity Resolution (Silver -> Curated)
+2. CLEE RESOLUTION Stage: Entity Resolution (Silver -> Curated)
 3. LOAD Stage: Silver DuckDB -> Gold DuckDB (Silver -> Gold)
 
 Uses MetadataTracker for comprehensive tracking and observability.
@@ -14,8 +14,8 @@ from pathlib import Path
 
 from src_etl.core.config import settings
 from src_etl.loaders.loader import SilverToGoldLoader
+from src_etl.transformers.clee_resolver import CLEEResolver
 from src_etl.transformers.date_normalizer import DateNormalizer
-from src_etl.transformers.harmonizer import EntityResolutionHarmonizer
 from src_etl.transformers.processor import BronzeToSilverProcessor
 from src_metadata.tracker import MetadataTracker
 
@@ -26,7 +26,7 @@ class DenuePipelineOrchestrator:
     """
     Unified transformer for DENUE data pipeline.
 
-    Coordinates transform, harmonize, and load stages with full
+    Coordinates transform, CLEE resolution, and load stages with full
     metadata tracking and observability.
 
     Usage:
@@ -56,7 +56,7 @@ class DenuePipelineOrchestrator:
             metadata_db: Path to metadata.duckdb (default: data/metadata.duckdb)
             silver_db_path: Path to Silver DuckDB (default: from settings)
             gold_db_path: Path to Gold DuckDB (default: from settings)
-            curated_output_dir: Output for curated/harmonized data (default: from settings)
+            curated_output_dir: Output for curated/resolved data (default: from settings)
         """
         self.data_root = Path(data_root)
 
@@ -85,7 +85,7 @@ class DenuePipelineOrchestrator:
             silver_db_path=self.silver_db_path,
         )
 
-        self.harmonizer = EntityResolutionHarmonizer(
+        self.clee_resolver = CLEEResolver(
             data_root=self.data_root,
             tracker=self.tracker,
             input_dir=settings.PROCESSED_OUTPUT_DIR,
@@ -170,9 +170,9 @@ class DenuePipelineOrchestrator:
             logger.error(f"NORMALIZE-DATES stage failed: {e}")
             raise
 
-    def run_harmonize_stage(self) -> bool:
+    def run_clee_resolution_stage(self) -> bool:
         """
-        Run harmonization stage: Entity Resolution.
+        Run CLEE resolution stage: Entity Resolution.
 
         Matches establishments across time periods and generates
         master identifiers (CLEEs) for entity tracking.
@@ -180,20 +180,20 @@ class DenuePipelineOrchestrator:
         Returns:
             True if successful, False otherwise
         """
-        logger.info("Starting HARMONIZE stage (Entity Resolution)")
+        logger.info("Starting CLEE RESOLUTION stage (Entity Resolution)")
 
         try:
-            success = self.harmonizer.run()
+            success = self.clee_resolver.run()
 
             if success:
-                logger.info("HARMONIZE stage completed successfully")
+                logger.info("CLEE RESOLUTION stage completed successfully")
             else:
-                logger.warning("HARMONIZE stage completed with errors")
+                logger.warning("CLEE RESOLUTION stage completed with errors")
 
             return success
 
         except Exception as e:
-            logger.error(f"HARMONIZE stage failed: {e}")
+            logger.error(f"CLEE RESOLUTION stage failed: {e}")
             raise
 
     def run_load_stage(self, force: bool = False) -> bool:
@@ -229,7 +229,7 @@ class DenuePipelineOrchestrator:
         Run complete pipeline: Transform -> Normalize-Dates -> Load.
 
         Executes transform, date normalization, and load stages
-        sequentially with full tracking. Harmonization is not included
+        sequentially with full tracking. CLEE resolution is not included
         by default (run separately).
 
         Args:
@@ -304,10 +304,10 @@ class DenuePipelineOrchestrator:
                 LIMIT 1
             """).fetchone()
 
-            latest_harmonize = conn.execute("""
+            latest_clee_resolution = conn.execute("""
                 SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
                 FROM job_runs
-                WHERE job_type = 'HARMONIZE'
+                WHERE job_type = 'CLEE_RESOLUTION'
                 ORDER BY run_date DESC
                 LIMIT 1
             """).fetchone()
@@ -322,7 +322,7 @@ class DenuePipelineOrchestrator:
 
             # Get metrics
             process_metrics = self.tracker.get_process_metrics()
-            harmonize_metrics = self.tracker.get_harmonize_metrics()
+            clee_resolution_metrics = self.tracker.get_clee_resolution_metrics()
             normalize_metrics = self.tracker.get_normalize_metrics()
 
             def _run_dict(row):
@@ -346,10 +346,10 @@ class DenuePipelineOrchestrator:
                 "latest_transform_run": _run_dict(latest_transform),
                 "latest_normalize_run": _run_dict(latest_normalize),
                 "latest_load_run": _run_dict(latest_load),
-                "latest_harmonize_run": _run_dict(latest_harmonize),
+                "latest_clee_resolution_run": _run_dict(latest_clee_resolution),
                 "process_metrics": process_metrics,
                 "normalize_metrics": normalize_metrics,
-                "harmonize_metrics": harmonize_metrics,
+                "clee_resolution_metrics": clee_resolution_metrics,
                 "metadata_db": str(self.metadata_db),
                 "silver_db": str(self.silver_db_path),
                 "gold_db": str(self.gold_db_path),

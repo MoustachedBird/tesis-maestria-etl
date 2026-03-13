@@ -47,7 +47,7 @@ Follow this procedure:
 
 ## Normalize-Dates Step
 
-The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> harmonize**.
+The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> clee-resolution**.
 
 The `normalize-dates` step parses `fecha_alta_str` (raw string from INEGI) into `fecha_alta_date` (DATE type, format `YYYY-MM-01`) directly in the Silver DuckDB via SQL UPDATE, one period at a time.
 
@@ -74,13 +74,13 @@ Plus 1 NULL row. Output format is always `DATE YYYY-MM-01`.
 ### CLI Usage
 
 ```bash
-# Run only normalize-dates (skip ingest and harmonize)
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-harmonize
+# Run only normalize-dates (skip ingest and clee-resolution)
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-clee-resolution
 
 # Force re-normalize all periods
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-harmonize --force
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-clee-resolution --force
 
-# Full transform (ingest + normalize-dates, harmonize off by default)
+# Full transform (ingest + normalize-dates + clee-resolution, all on by default)
 uv run python -m src_etl.main transform
 ```
 
@@ -127,8 +127,8 @@ etl-core/
 │   ├── transformers/              # Transformation layer
 │   │   ├── denue.py               # Unified orchestrator (DenueTransformer)
 │   │   ├── processor.py           # TransformStage: ZIP -> Silver DuckDB
-│   │   ├── harmonizer.py          # HarmonizerStage: Entity resolution across time
-│   │   └── _legacy/               # Archived old processor/harmonizer
+│   │   ├── clee_resolver.py        # CLEEResolver: Entity resolution across time
+│   │   └── _legacy/               # Archived old processor/clee_resolver
 │   ├── loaders/                   # Data loading layer
 │   │   ├── loader.py              # LoaderStage: Silver -> Gold (file copy)
 │   │   ├── denue.py               # DataStoreManager (DuckDB upsert)
@@ -141,7 +141,7 @@ etl-core/
 │       ├── downloader.py          # Generic HTTP downloader with retry
 │       ├── entity_resolution.py   # Cascade matching algorithm engine
 │       ├── file_validator.py      # SHA256, size, ZIP validation
-│       ├── harmonizer_config.py   # Harmonizer regions/schema config
+│       ├── clee_resolution_config.py # CLEE resolution regions/schema config
 │       ├── matching.py            # Spatial + fuzzy matching utilities
 │       └── warehouse.py           # DuckDB BaseWarehouse class
 │
@@ -166,7 +166,7 @@ etl-core/
 │   │   ├── seed_localidades.parquet     # 39,140 localities
 │   │   └── seed_actividades.parquet     # 1,127 economic activities
 │   ├── processed/                 # ZIP -> Warehouse transformed data
-│   └── curated/                   # Harmonized Gold layer data
+│   └── curated/                   # CLEE resolved Gold layer data
 │
 ├── alembic/                       # Database migrations
 ├── tests/
@@ -217,7 +217,7 @@ make extract ARGS="--force"      # Force re-download all files
 make transform                   # Transform raw data (Bronze -> Silver)
 make transform-force             # Force reprocess all
 make load                        # Load Silver -> Gold
-make harmonize                   # Entity resolution
+make clee-resolution             # CLEE Resolution (Entity Resolution)
 make pipeline                    # Full: Extract -> Transform -> Load
 make pipeline-force              # Full pipeline with force mode
 
@@ -249,7 +249,7 @@ make lint / lint-fix / format    # Ruff linting and formatting
 ┌──────────────────────────────────────────────────────────────────────┐
 │                   DENUE TRANSFORMER (Orchestrator)                    │
 │  ┌────────────────┬─────────────────┬──────────────┬──────────────┐ │
-│  │ TransformStage │ HarmonizerStage │ LoaderStage  │ Metadata     │ │
+│  │ TransformStage │ CLEEResolver    │ LoaderStage  │ Metadata     │ │
 │  │ (ZIP->Silver)  │ (Entity Resoln) │ (Silver->Gold│ Tracker      │ │
 │  └────────────────┴─────────────────┴──────────────┴──────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
@@ -258,7 +258,7 @@ Data Flow:
   EXTRACT   -> download_tasks  (lineage: WEB -> FILE)
   TRANSFORM -> process_tasks   (lineage: FILE -> TABLE in Silver)
   LOAD      -> process_tasks   (lineage: Silver -> Gold file copy)
-  HARMONIZE -> harmonize_tasks (lineage: TABLE -> FILE)
+  CLEE_RESOLUTION -> clee_resolution_tasks (lineage: TABLE -> FILE)
 ```
 
 ### Metadata Layer
@@ -270,8 +270,9 @@ Data Flow:
 │  │ job_runs   │ download_tasks │ data_lineage │             │
 │  │ (run-level)│ (file-level)   │ (provenance) │             │
 │  ├────────────┼────────────────┼──────────────┤             │
-│  │ process_   │ harmonize_     │              │             │
-│  │ tasks      │ tasks          │              │             │
+│  │ process_   │ clee_          │              │             │
+│  │ tasks      │ resolution_    │              │             │
+│  │            │ tasks          │              │             │
 │  └────────────┴────────────────┴──────────────┘             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -282,7 +283,7 @@ Data Flow:
 data/bronze/denue/{period}/*.zip      # Raw downloads
 data/silver/denue.duckdb              # Silver DuckDB warehouse
 data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
-data/curated/denue/snapshots/         # Harmonized snapshots
+data/curated/denue/snapshots/         # CLEE resolution snapshots
 data/curated/denue/master_catalog.parquet
 ```
 
@@ -450,9 +451,9 @@ tracker.complete_task(task_id, TaskStatus.SUCCESS, result)
 task_id = tracker.create_process_task(run_id, task_name, source_path, period)
 tracker.complete_process_task(task_id, status, rows_loaded=1000)
 
-# Harmonize tasks
-task_id = tracker.create_harmonize_task(run_id, task_name, region, states)
-tracker.complete_harmonize_task(task_id, status, entities_matched=8000)
+# CLEE Resolution tasks
+task_id = tracker.create_clee_resolution_task(run_id, task_name, region, states)
+tracker.complete_clee_resolution_task(task_id, status, entities_matched=8000)
 
 # Queries
 failed = tracker.get_failed_tasks(retryable_only=True)

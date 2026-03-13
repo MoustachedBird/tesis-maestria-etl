@@ -57,8 +57,8 @@ def transform(
         "--normalize-dates/--no-normalize-dates",
         help="Normalize fecha_alta dates in Silver",
     ),
-    harmonize: bool = typer.Option(
-        False, "--harmonize/--no-harmonize", help="Run harmonize sub-step"
+    clee_resolution: bool = typer.Option(
+        True, "--clee-resolution/--no-clee-resolution", help="Run CLEE resolution sub-step"
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
@@ -66,8 +66,8 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps: ingest -> normalize-dates -> harmonize.
-    Control each with --ingest, --normalize-dates, and --harmonize flags.
+    Sub-steps: ingest -> normalize-dates -> clee-resolution.
+    Control each with --ingest, --normalize-dates, and --clee-resolution flags.
     """
     if source != "denue":
         console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
@@ -92,9 +92,9 @@ def transform(
             console.print("[bold blue]   Running: normalize-dates[/bold blue]")
             success = transformer.run_normalize_dates_stage(force=force)
 
-        if harmonize and success:
-            console.print("[bold magenta]   Running: harmonize[/bold magenta]")
-            success = transformer.run_harmonize_stage()
+        if clee_resolution and success:
+            console.print("[bold magenta]   Running: clee-resolution[/bold magenta]")
+            success = transformer.run_clee_resolution_stage()
 
         if success:
             console.print("[bold green]Transform completed successfully.[/bold green]")

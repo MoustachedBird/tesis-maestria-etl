@@ -53,12 +53,12 @@ class JobRun(BaseModel):
     Represents a complete job execution run.
 
     A job run tracks the execution of an ETL job (e.g., downloader,
-    processor, harmonizer) including all its tasks and aggregated metrics.
+    processor, CLEE resolver) including all its tasks and aggregated metrics.
     """
 
     run_id: str = Field(..., description="Unique identifier for this run (UUID)")
     job_name: str = Field(..., description="Name of the job (e.g., 'denue_downloader')")
-    job_type: str = Field(..., description="Type of job: DOWNLOAD, PROCESS, HARMONIZE")
+    job_type: str = Field(..., description="Type of job: DOWNLOAD, PROCESS, CLEE_RESOLUTION")
     run_date: datetime = Field(..., description="Date/time when run was scheduled")
     start_time: datetime | None = Field(None, description="Actual start time")
     end_time: datetime | None = Field(None, description="Actual end time")
@@ -238,9 +238,9 @@ class ProcessTask(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
 
-class HarmonizeTask(BaseModel):
+class CLEEResolutionTask(BaseModel):
     """
-    Represents an entity harmonization task (Silver → Gold).
+    Represents a CLEE resolution task (Silver -> Gold).
 
     Tracks entity resolution across temporal snapshots, matching
     establishments over time and generating master identifiers.
@@ -258,7 +258,7 @@ class HarmonizeTask(BaseModel):
     duration_seconds: float | None = Field(None, description="Execution duration")
     status: TaskStatus = Field(..., description="Current task status")
 
-    # Harmonization metrics
+    # CLEE resolution metrics
     entities_input: int | None = Field(None, description="Input entities")
     entities_matched: int | None = Field(None, description="Matched entities")
     entities_new: int | None = Field(None, description="New entities discovered")

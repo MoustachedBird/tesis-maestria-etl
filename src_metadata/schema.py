@@ -14,7 +14,7 @@ METADATA_SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS job_runs (
     run_id VARCHAR(36) PRIMARY KEY,
     job_name VARCHAR(100) NOT NULL,
-    job_type VARCHAR(50) NOT NULL,           -- DOWNLOAD, PROCESS, HARMONIZE
+    job_type VARCHAR(50) NOT NULL,           -- DOWNLOAD, PROCESS, CLEE_RESOLUTION
     run_date TIMESTAMP NOT NULL,
     start_time TIMESTAMP,
     end_time TIMESTAMP,
@@ -184,9 +184,9 @@ CREATE TABLE IF NOT EXISTS process_tasks (
 );
 
 -- ============================================================================
--- HARMONIZE TASKS: Entity resolution tracking
+-- CLEE RESOLUTION TASKS: Entity resolution tracking
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS harmonize_tasks (
+CREATE TABLE IF NOT EXISTS clee_resolution_tasks (
     task_id VARCHAR(36) PRIMARY KEY,
     run_id VARCHAR(36) NOT NULL,
     
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS harmonize_tasks (
     duration_seconds DOUBLE,
     status VARCHAR(20) NOT NULL,            -- PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
     
-    -- Harmonization metrics
+    -- CLEE resolution metrics
     entities_input BIGINT,
     entities_matched BIGINT,
     entities_new BIGINT,
@@ -235,11 +235,11 @@ CREATE INDEX IF NOT EXISTS idx_process_tasks_period ON process_tasks(period);
 CREATE INDEX IF NOT EXISTS idx_process_tasks_source ON process_tasks(source_path);
 
 -- ============================================================================
--- HARMONIZE TASKS INDEXES
+-- CLEE RESOLUTION TASKS INDEXES
 -- ============================================================================
-CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_run_id ON harmonize_tasks(run_id);
-CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_status ON harmonize_tasks(status);
-CREATE INDEX IF NOT EXISTS idx_harmonize_tasks_region ON harmonize_tasks(region_group);
+CREATE INDEX IF NOT EXISTS idx_clee_resolution_tasks_run_id ON clee_resolution_tasks(run_id);
+CREATE INDEX IF NOT EXISTS idx_clee_resolution_tasks_status ON clee_resolution_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_clee_resolution_tasks_region ON clee_resolution_tasks(region_group);
 
 -- ============================================================================
 -- NORMALIZE TASKS: Date normalization tracking (per period)
@@ -412,15 +412,15 @@ QUERIES = {
         GROUP BY period
         ORDER BY period DESC
     """,
-    "get_harmonize_metrics": """
+    "get_clee_resolution_metrics": """
         SELECT 
             region_group,
-            COUNT(*) as total_harmonizations,
+            COUNT(*) as total_resolutions,
             SUM(entities_input) as total_entities,
             SUM(entities_matched) as total_matched,
             SUM(entities_new) as total_new,
             AVG(match_confidence_avg) as avg_confidence
-        FROM harmonize_tasks
+        FROM clee_resolution_tasks
         WHERE status = 'SUCCESS'
         GROUP BY region_group
         ORDER BY region_group

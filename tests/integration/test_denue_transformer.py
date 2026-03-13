@@ -54,7 +54,7 @@ def test_transformer_initialization(temp_transformer):
     assert temp_transformer is not None
     assert temp_transformer.tracker is not None
     assert temp_transformer.transformer is not None
-    assert temp_transformer.harmonizer is not None
+    assert temp_transformer.clee_resolver is not None
     assert temp_transformer.loader is not None
 
 
@@ -64,9 +64,9 @@ def test_get_pipeline_status(temp_transformer):
 
     assert "latest_transform_run" in status
     assert "latest_load_run" in status
-    assert "latest_harmonize_run" in status
+    assert "latest_clee_resolution_run" in status
     assert "process_metrics" in status
-    assert "harmonize_metrics" in status
+    assert "clee_resolution_metrics" in status
     assert "metadata_db" in status
     assert "silver_db" in status
     assert "gold_db" in status

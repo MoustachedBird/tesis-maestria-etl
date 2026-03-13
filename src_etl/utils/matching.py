@@ -5,6 +5,17 @@ import polars as pl
 from rapidfuzz import fuzz
 from sklearn.neighbors import BallTree
 
+from src_etl.utils.clee_resolution_config import (
+    ACTIVITY_GATE_THRESH,
+    BUSINESS_NAME_MATCH_THRESH,
+    LEGAL_NAME_MATCH_THRESH,
+    MIN_COMBINED_SIGNALS,
+    MIN_EMAIL_LENGTH,
+    MIN_TEL_LENGTH,
+    MIN_WEB_LENGTH,
+    PARTIAL_NAME_THRESH,
+)
+
 
 def generate_temp_clee():
     """Genera un UUID seguro para nuevos negocios."""
@@ -12,7 +23,7 @@ def generate_temp_clee():
 
 
 def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """Normaliza teléfonos, emails y webs para comparación exacta."""
+    """Normaliza telefonos, emails y webs para comparacion exacta."""
     return df.with_columns(
         [
             pl.col("telefono").str.replace_all(r"[^0-9]", "").alias("tel_clean"),
@@ -28,7 +39,7 @@ def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
 
 def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
     """
-    Ejecuta BallTree para encontrar índices vecinos.
+    Ejecuta BallTree para encontrar indices vecinos.
     Retorna: (indices, distances)
     """
     ref_coords = np.radians(ref_df.select(["latitud", "longitud"]).to_numpy())
@@ -51,74 +62,98 @@ def calculate_match_score(
     kb_wwws: list,
     kb_cps: list,
     kb_plazas: list,
-    identity_threshold: int,
-    activity_threshold: int,
 ) -> tuple[bool, str]:
     """
-    Calcula el match siguiendo una cascada jerárquica:
-    1. Estabilidad Geográfica (CP / Plaza)
-    2. Consistencia de Actividad (Filtro Obligatorio)
-    3. Identidad Semántica (Nombre / Razón Social)
-    4. Huella Digital (Tel / Email / WWW)
+    Calcula el match siguiendo una cascada jerarquica con umbrales calibrables:
+
+    GATE (obligatorio): Actividad SCIAN fuzzy > ACTIVITY_GATE_THRESH
+    Path A: Razon social fuzzy > LEGAL_NAME_MATCH_THRESH  -> match directo
+    Path B: Nombre comercial fuzzy > BUSINESS_NAME_MATCH_THRESH -> match directo
+    Path C: 2+ senales debiles coinciden (nombre parcial, tel, email, web, CP)
+            -> match combinado
+
+    Los umbrales se importan desde clee_resolution_config.py para facilitar
+    calibracion futura.
+
+    Args:
+        t_row: Diccionario con datos del registro objetivo
+        kb_names: Lista historica de nombres comerciales del candidato KB
+        kb_razones: Lista historica de razones sociales del candidato KB
+        kb_acts: Lista historica de actividades del candidato KB
+        kb_tels: Lista historica de telefonos del candidato KB
+        kb_emails: Lista historica de emails del candidato KB
+        kb_wwws: Lista historica de webs del candidato KB
+        kb_cps: Lista historica de codigos postales del candidato KB
+        kb_plazas: Lista historica de centros comerciales del candidato KB
+
+    Returns:
+        Tupla (es_match: bool, estrategia: str)
+        Estrategias posibles: "RAZON_MATCH", "NAME_MATCH", "COMBINED_MATCH",
+                              "DIFF_ACTIVITY", "NONE"
     """
 
-    # --- PASO 1: VALIDACIÓN GEOGRÁFICA (SEGURIDAD) ---
-    # Si fallan las coordenadas, el CP o la Plaza actúan como anclas
-    t_cp = t_row.get("cod_postal", "")
-    t_plaza = t_row.get("nom_cencom", "")
-
-    geo_stable = False
-    # Verificamos si el CP actual existe en el historial del candidato
-    if t_cp != "" and t_cp in kb_cps:
-        geo_stable = True
-    # Si no, verificamos si el nombre del Centro Comercial coincide
-    elif t_plaza != "" and t_plaza in kb_plazas:
-        geo_stable = True
-    else:
-        # Si no hay CP ni Plaza (vacíos), permitimos continuar confiando
-        # en la proximidad de latitud/longitud ya filtrada previamente
-        geo_stable = True
-
-    if not geo_stable:
-        return False, "GEO_MISMATCH"
-
-    # --- PASO 2: FILTRO DE ACTIVIDAD (REQUISITO MÍNIMO) ---
-    # Un negocio no puede ser el mismo si su giro cambió drásticamente
+    # === GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ===
+    # Un negocio no puede ser el mismo si su giro cambio drasticamente.
     t_act = t_row.get("nombre_act", "")
     act_match = False
     for known_act in kb_acts:
-        if fuzz.token_set_ratio(t_act, known_act) > activity_threshold:
+        if fuzz.token_set_ratio(t_act, known_act) > ACTIVITY_GATE_THRESH:
             act_match = True
             break
 
     if not act_match:
         return False, "DIFF_ACTIVITY"
 
-    # --- PASO 3: JERARQUÍA DE IDENTIDAD ---
-
-    # A. Prioridad 1: Nombre Comercial
-    t_name = t_row.get("nom_estab", "")
-    for known_name in kb_names:
-        if fuzz.token_sort_ratio(t_name, known_name) > identity_threshold:
-            return True, "NAME_MATCH"
-
-    # B. Prioridad 2: Razón Social (si el nombre falló o es genérico)
+    # === PATH A: MATCH DIRECTO POR RAZON SOCIAL ===
     t_raz = t_row.get("raz_social", "")
     if len(t_raz) > 2:
         for known_raz in kb_razones:
-            if fuzz.token_sort_ratio(t_raz, known_raz) > identity_threshold:
+            if known_raz and fuzz.token_sort_ratio(t_raz, known_raz) > LEGAL_NAME_MATCH_THRESH:
                 return True, "RAZON_MATCH"
 
-    # C. Prioridad 3: Huella Digital (Última instancia de validación única)
-    t_tel = t_row.get("tel_clean", "")
-    t_email = t_row.get("email_clean", "")
-    t_web = t_row.get("www_clean", "")
+    # === PATH B: MATCH DIRECTO POR NOMBRE COMERCIAL ===
+    t_name = t_row.get("nom_estab", "")
+    if len(t_name) > 2:
+        for known_name in kb_names:
+            if (
+                known_name
+                and fuzz.token_sort_ratio(t_name, known_name) > BUSINESS_NAME_MATCH_THRESH
+            ):
+                return True, "NAME_MATCH"
 
-    if len(t_tel) > 6 and t_tel in kb_tels:
-        return True, "DIGITAL_TEL"
-    if len(t_email) > 5 and t_email in kb_emails:
-        return True, "DIGITAL_EMAIL"
-    if len(t_web) > 5 and t_web in kb_wwws:
-        return True, "DIGITAL_WWW"
+    # === PATH C: MATCH COMBINADO (senales debiles acumuladas) ===
+    # Contamos cuantas senales coinciden. Si alcanzamos MIN_COMBINED_SIGNALS,
+    # declaramos match. Ninguna senal individual basta por si sola.
+    signals = 0
+
+    # Senal 1: Nombre comercial parcial
+    if len(t_name) > 2:
+        for known_name in kb_names:
+            if known_name and fuzz.token_sort_ratio(t_name, known_name) > PARTIAL_NAME_THRESH:
+                signals += 1
+                break
+
+    # Senal 2: Telefono exacto
+    t_tel = t_row.get("tel_clean", "")
+    if len(t_tel) >= MIN_TEL_LENGTH and t_tel in kb_tels:
+        signals += 1
+
+    # Senal 3: Email exacto
+    t_email = t_row.get("email_clean", "")
+    if len(t_email) >= MIN_EMAIL_LENGTH and t_email in kb_emails:
+        signals += 1
+
+    # Senal 4: Web exacto
+    t_web = t_row.get("www_clean", "")
+    if len(t_web) >= MIN_WEB_LENGTH and t_web in kb_wwws:
+        signals += 1
+
+    # Senal 5: Codigo postal igual
+    t_cp = t_row.get("cod_postal", "")
+    if t_cp != "" and t_cp in kb_cps:
+        signals += 1
+
+    if signals >= MIN_COMBINED_SIGNALS:
+        return True, "COMBINED_MATCH"
 
     return False, "NONE"

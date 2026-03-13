@@ -1,7 +1,7 @@
 """
 Unit tests for extended MetadataTracker functionality.
 
-Tests the new process_tasks and harmonize_tasks tracking.
+Tests the new process_tasks and clee_resolution_tasks tracking.
 """
 
 import pytest
@@ -57,13 +57,13 @@ def test_complete_process_task(temp_tracker):
     assert True
 
 
-def test_create_harmonize_task(temp_tracker):
-    """Test creating a harmonization task."""
-    run_id = temp_tracker.create_run("test_harmonizer", "HARMONIZE")
+def test_create_clee_resolution_task(temp_tracker):
+    """Test creating a CLEE resolution task."""
+    run_id = temp_tracker.create_run("test_clee_resolver", "CLEE_RESOLUTION")
 
-    task_id = temp_tracker.create_harmonize_task(
+    task_id = temp_tracker.create_clee_resolution_task(
         run_id=run_id,
-        task_name="harmonize_norte",
+        task_name="clee_resolution_norte",
         region_group="NORTE",
         state_list=["chihuahua", "sonora", "coahuila"],
     )
@@ -72,18 +72,18 @@ def test_create_harmonize_task(temp_tracker):
     assert len(task_id) == 36
 
 
-def test_complete_harmonize_task(temp_tracker):
-    """Test completing harmonization task with metrics."""
-    run_id = temp_tracker.create_run("test_harmonizer", "HARMONIZE")
-    task_id = temp_tracker.create_harmonize_task(
+def test_complete_clee_resolution_task(temp_tracker):
+    """Test completing CLEE resolution task with metrics."""
+    run_id = temp_tracker.create_run("test_clee_resolver", "CLEE_RESOLUTION")
+    task_id = temp_tracker.create_clee_resolution_task(
         run_id=run_id,
-        task_name="harmonize_test",
+        task_name="clee_resolution_test",
         region_group="TEST",
         state_list=["test"],
     )
 
-    temp_tracker.start_harmonize_task(task_id)
-    temp_tracker.complete_harmonize_task(
+    temp_tracker.start_clee_resolution_task(task_id)
+    temp_tracker.complete_clee_resolution_task(
         task_id=task_id,
         status=TaskStatus.SUCCESS,
         entities_input=10000,
@@ -125,7 +125,7 @@ def test_process_metrics(temp_tracker):
     assert isinstance(metrics, list)
 
 
-def test_harmonize_metrics(temp_tracker):
-    """Test getting harmonize metrics."""
-    metrics = temp_tracker.get_harmonize_metrics()
+def test_clee_resolution_metrics(temp_tracker):
+    """Test getting CLEE resolution metrics."""
+    metrics = temp_tracker.get_clee_resolution_metrics()
     assert isinstance(metrics, list)

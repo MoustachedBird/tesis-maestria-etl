@@ -6,7 +6,7 @@ DATE column (fecha_alta_date) with format YYYY-MM-01. Operates directly
 on the Silver DuckDB via UPDATE statements, tracked per-period in the
 metadata database.
 
-Pipeline position: ingest -> normalize-dates -> harmonize
+Pipeline position: ingest -> normalize-dates -> clee-resolution
 """
 
 import logging

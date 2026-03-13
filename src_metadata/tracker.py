@@ -94,7 +94,7 @@ class MetadataTracker:
 
         Args:
             job_name: Name of the job (e.g., "denue_downloader")
-            job_type: Type of job: DOWNLOAD, PROCESS, HARMONIZE
+            job_type: Type of job: DOWNLOAD, PROCESS, CLEE_RESOLUTION
             trigger_type: What triggered this run: MANUAL, SCHEDULED, RETRY
             triggered_by: Who/what triggered this run
             config: Optional configuration dictionary
@@ -911,10 +911,10 @@ class MetadataTracker:
             return result[0] if result else None
 
     # ========================================================================
-    # HARMONIZE TASK MANAGEMENT
+    # CLEE RESOLUTION TASK MANAGEMENT
     # ========================================================================
 
-    def create_harmonize_task(
+    def create_clee_resolution_task(
         self,
         run_id: str,
         task_name: str,
@@ -922,7 +922,7 @@ class MetadataTracker:
         state_list: list[str],
     ) -> str:
         """
-        Create new harmonization task.
+        Create new CLEE resolution task.
 
         Args:
             run_id: Parent job run ID
@@ -941,7 +941,7 @@ class MetadataTracker:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO harmonize_tasks (
+                INSERT INTO clee_resolution_tasks (
                     task_id, run_id, task_name, region_group, state_list,
                     status, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -959,9 +959,9 @@ class MetadataTracker:
 
         return task_id
 
-    def start_harmonize_task(self, task_id: str):
+    def start_clee_resolution_task(self, task_id: str):
         """
-        Mark harmonize task as running.
+        Mark CLEE resolution task as running.
 
         Args:
             task_id: Task identifier
@@ -969,7 +969,7 @@ class MetadataTracker:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                UPDATE harmonize_tasks SET
+                UPDATE clee_resolution_tasks SET
                     status = ?,
                     start_time = ?,
                     updated_at = ?
@@ -978,7 +978,7 @@ class MetadataTracker:
                 [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
             )
 
-    def complete_harmonize_task(
+    def complete_clee_resolution_task(
         self,
         task_id: str,
         status: TaskStatus,
@@ -996,7 +996,7 @@ class MetadataTracker:
         error_message: str | None = None,
     ):
         """
-        Complete harmonize task with results.
+        Complete CLEE resolution task with results.
 
         Args:
             task_id: Task identifier
@@ -1019,7 +1019,7 @@ class MetadataTracker:
         with self._get_connection() as conn:
             # Get start time to calculate duration
             result = conn.execute(
-                "SELECT start_time FROM harmonize_tasks WHERE task_id = ?", [task_id]
+                "SELECT start_time FROM clee_resolution_tasks WHERE task_id = ?", [task_id]
             ).fetchone()
 
             duration = None
@@ -1029,7 +1029,7 @@ class MetadataTracker:
 
             conn.execute(
                 """
-                UPDATE harmonize_tasks SET
+                UPDATE clee_resolution_tasks SET
                     end_time = ?,
                     duration_seconds = ?,
                     status = ?,
@@ -1216,18 +1216,18 @@ class MetadataTracker:
             ]
             return [dict(zip(columns, row)) for row in result]
 
-    def get_harmonize_metrics(self) -> list[dict[str, Any]]:
+    def get_clee_resolution_metrics(self) -> list[dict[str, Any]]:
         """
-        Get harmonization performance metrics by region.
+        Get CLEE resolution performance metrics by region.
 
         Returns:
             List of dicts with metrics per region
         """
         with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_harmonize_metrics"]).fetchall()
+            result = conn.execute(QUERIES["get_clee_resolution_metrics"]).fetchall()
             columns = [
                 "region_group",
-                "total_harmonizations",
+                "total_resolutions",
                 "total_entities",
                 "total_matched",
                 "total_new",
