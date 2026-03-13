@@ -10,6 +10,9 @@ pre-filter and a conditional matching cascade for identity resolution.
 
 Reads from and writes back to the Silver DuckDB warehouse directly,
 populating the `clee_master` column on the `establecimientos` table.
+
+Memory-efficient: loads one period at a time from DuckDB instead of
+loading all ~76M rows into RAM simultaneously.
 """
 
 import gc
@@ -39,9 +42,11 @@ class CLEEResolver:
     """
     Resolves entity identities across temporal snapshots.
 
-    Reads establishment data from Silver DuckDB, runs entity resolution
-    (future -> past propagation), and writes `clee_master` back to the
-    same table via UPDATE statements.
+    Reads establishment data from Silver DuckDB one period at a time,
+    runs entity resolution (future -> past propagation), and writes
+    `clee_master` back to the same table via UPDATE statements.
+
+    Memory usage: KB + 1 period (~5-8 GB) instead of all periods (~40+ GB).
 
     Modes:
         force=True:  Copy all existing `clee` values to `clee_master`,
@@ -95,7 +100,7 @@ class CLEEResolver:
         resolution algorithm on remaining NULLs.
 
         Returns:
-            Number of rows updated.
+            Number of rows seeded.
         """
         with self._get_connection() as conn:
             # First, NULL out all clee_master to start fresh
@@ -107,6 +112,7 @@ class CLEEResolver:
                 SET clee_master = clee
                 WHERE clee IS NOT NULL AND clee != ''
             """)
+
             # Count how many got seeded
             count = conn.execute("""
                 SELECT COUNT(*) FROM establecimientos
@@ -124,30 +130,46 @@ class CLEEResolver:
                 WHERE clee_master IS NULL
             """).fetchone()[0]
 
-    def _load_data_for_resolution(self, only_unresolved: bool = False) -> pl.DataFrame:
+    def _get_sorted_periods(self) -> list[str]:
         """
-        Load establishment data from Silver DuckDB for resolution.
+        Get all periods from Silver DuckDB sorted newest-first.
+
+        Returns:
+            List of period strings sorted chronologically descending.
+            Example: ["11_2024", "05_2024", "11_2023", "05_2023", ...]
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT CAST(period AS VARCHAR) AS period
+                FROM establecimientos
+            """).fetchall()
+
+        periods = [r[0] for r in rows]
+
+        return sorted(
+            periods,
+            key=lambda x: (int(x.split("_")[1]), int(x.split("_")[0])),
+            reverse=True,
+        )
+
+    def _load_period(self, period: str) -> pl.DataFrame:
+        """
+        Load a single period's data from Silver DuckDB.
 
         Uses SILVER_READ_QUERY which JOINs with catalog tables to get
-        `nombre_act` and casts ENUM columns to VARCHAR.
+        `nombre_act` and casts ENUM columns to VARCHAR, filtered by period.
 
         Args:
-            only_unresolved: If True, only load rows where clee_master IS NULL.
-                           If False, load ALL rows (needed for KB construction).
+            period: Period string to load (e.g. "11_2024")
 
         Returns:
             Polars DataFrame with columns from COLS_NEEDED_FOR_MATCHING
         """
-        query = SILVER_READ_QUERY
-        if only_unresolved:
-            query += "\n    WHERE e.clee_master IS NULL"
+        query = SILVER_READ_QUERY + "\n    WHERE CAST(e.period AS VARCHAR) = ?"
 
-        self.logger.info("   Loading data from Silver DuckDB...")
         with self._get_connection() as conn:
-            result = conn.execute(query)
+            result = conn.execute(query, [period])
             df = pl.from_arrow(result.fetch_arrow_table())
-
-        self.logger.info(f"   Loaded {df.height:,} rows")
 
         if df.is_empty():
             return df
@@ -158,6 +180,11 @@ class CLEEResolver:
         )
 
         return clean_contact_columns(df)
+
+    def _get_total_rows(self) -> int:
+        """Get total row count in establecimientos."""
+        with self._get_connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM establecimientos").fetchone()[0]
 
     def _write_results_to_silver(self, mapping: pl.DataFrame) -> int:
         """
@@ -207,57 +234,64 @@ class CLEEResolver:
         self.logger.info(f"   Total rows updated: {updated:,}")
         return updated
 
-    def process_national(self, df_all: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    def process_national(self) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
-        Process all data as a single national Knowledge Base.
+        Process all periods as a single national Knowledge Base.
 
+        Loads one period at a time from DuckDB to keep memory usage low.
         Propagates CLEEs from the most recent period backward through time.
         Each period is resolved against the accumulated KB, then the KB
         is updated with the new period's data.
 
-        Args:
-            df_all: Full national DataFrame with all periods
+        Peak memory: KB (~2-4 GB) + 1 period (~3 GB) + mapping (~1 GB).
 
         Returns:
             Tuple of (mapping DataFrame [id -> clee_master], knowledge base DataFrame)
         """
-        # Use all unique cve_ent values as state list for region prefix
-        if "cve_ent" in df_all.columns:
-            state_list = sorted(df_all["cve_ent"].unique().to_list())
-        else:
-            state_list = ["NATIONAL"]
+        # Get periods sorted newest-first
+        periods = self._get_sorted_periods()
+
+        if not periods:
+            return pl.DataFrame(), pl.DataFrame()
+
+        self.logger.info(f"   Periods detected ({len(periods)}): {periods}")
+
+        # Get region prefix from distinct cve_ent values
+        with self._get_connection() as conn:
+            state_rows = conn.execute(
+                "SELECT DISTINCT cve_ent FROM establecimientos ORDER BY cve_ent"
+            ).fetchall()
+        state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
 
         prefix = get_region_prefix(state_list)
         self.logger.info(f"   Region prefix (namespace): {prefix}")
 
-        total_records = df_all.height
-        self.logger.info(f"   Total records for resolution: {total_records:,}")
-
-        # Get unique periods sorted chronologically (newest first)
-        unique_periods = df_all["period"].unique().to_list()
-        periods = sorted(
-            unique_periods,
-            key=lambda x: (int(x.split("_")[1]), int(x.split("_")[0])),
-            reverse=True,
-        )
-
-        self.logger.info(f"   Periods detected ({len(periods)}): {periods}")
-
-        dict_dfs = {p: df_all.filter(pl.col("period") == p) for p in periods}
-
-        # Free the full national DF now that we have per-period splits
-        del df_all
-        gc.collect()
-
-        # Initialize Knowledge Base with the most recent period
+        # --- Step 1: Load base period (most recent) and initialize KB ---
         self.logger.info(f"      Seeding KB with base period: {periods[0]}...")
-        map_accum, kb = initialize_knowledge_base(dict_dfs[periods[0]], prefix)
+        df_base = self._load_period(periods[0])
+
+        if df_base.is_empty():
+            return pl.DataFrame(), pl.DataFrame()
+
+        self.logger.info(f"         Base period rows: {df_base.height:,}")
+        map_accum, kb = initialize_knowledge_base(df_base, prefix)
         self.logger.info(f"         Initial entities in KB: {kb.height:,}")
 
-        # Process older periods (propagate CLEEs from future to past)
+        del df_base
+        gc.collect()
+
+        # --- Step 2: Process older periods one by one (future -> past) ---
         for i in range(1, len(periods)):
             period = periods[i]
-            target_rows = dict_dfs[period].height
+
+            self.logger.info(f"      [{i}/{len(periods) - 1}] Loading period {period}...")
+            df_period = self._load_period(period)
+
+            if df_period.is_empty():
+                self.logger.info(f"         {period}: empty, skipping.")
+                continue
+
+            target_rows = df_period.height
             kb_before = kb.height
 
             self.logger.info(
@@ -270,11 +304,15 @@ class CLEEResolver:
 
             # Resolve entity identities
             df_resolved = resolve_period_logic(
-                dict_dfs[period],
+                df_period,
                 kb,
                 prefix,
                 self.spatial_tol,
             )
+
+            # Free period data immediately — we only need the resolved result
+            del df_period
+            gc.collect()
 
             map_accum = map_accum.vstack(df_resolved.select(["id", "clee_master"]))
 
@@ -298,8 +336,8 @@ class CLEEResolver:
         """
         Run CLEE resolution pipeline.
 
-        Reads from Silver DuckDB, resolves entity identities, and writes
-        `clee_master` back to the same table.
+        Reads from Silver DuckDB period by period, resolves entity
+        identities, and writes `clee_master` back to the same table.
 
         Args:
             force: If True, reset all clee_master values and re-run from scratch.
@@ -345,31 +383,15 @@ class CLEEResolver:
                 self.tracker.complete_run(run_id, JobStatus.SUCCESS)
                 return True
 
-            # --- Load ALL data for KB construction ---
-            # We need the full history (including already-resolved rows) to build
-            # the Knowledge Base, but we only assign clee_master to unresolved rows.
-            self.logger.info("Loading full history for KB construction...")
-            df_all = self._load_data_for_resolution(only_unresolved=False)
-
-            if df_all.is_empty():
-                self.logger.info("No data found in Silver DuckDB.")
-                self.tracker.complete_clee_resolution_task(
-                    task_id=task_id,
-                    status=TaskStatus.SKIPPED,
-                    error_message="No data in Silver DuckDB",
-                )
-                self.tracker.complete_run(run_id, JobStatus.SUCCESS)
-                return True
-
-            total_rows = df_all.height
+            total_rows = self._get_total_rows()
             self.logger.info(
                 f"Starting CLEE resolution: {total_rows:,} total rows, "
                 f"{unresolved_count:,} unresolved, "
                 f"radius={self.spatial_tol}m"
             )
 
-            # --- Run entity resolution ---
-            national_map, national_kb = self.process_national(df_all)
+            # --- Run entity resolution (period by period) ---
+            national_map, national_kb = self.process_national()
 
             if not national_map.is_empty():
                 # Filter mapping to only include rows that were unresolved
