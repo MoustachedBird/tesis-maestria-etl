@@ -48,7 +48,7 @@ def initialize_knowledge_base(
         .then(pl.col("clee"))
         .otherwise(
             pl.col("row_id").map_elements(
-                lambda x: f"{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
+                lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
             )
         )
         .alias("master_clee")
@@ -166,7 +166,7 @@ def resolve_period_logic(
                             break
 
             # Si no hubo match con vecinos, generamos un CLEE temporal nuevo
-            final_clee = best_clee if best_clee else f"{region_prefix}-{generate_temp_clee()}"
+            final_clee = best_clee if best_clee else f"NEW_{region_prefix}-{generate_temp_clee()}"
 
             new_item = row.copy()
             new_item["master_clee"] = final_clee
@@ -178,7 +178,9 @@ def resolve_period_logic(
         # Caso donde no hay KB previa o todos los registros son nuevos
         df_res_B = df_missing.with_columns(
             pl.col("row_id")
-            .map_elements(lambda x: f"{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8)
+            .map_elements(
+                lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
+            )
             .alias("master_clee")
         ).select(df_res_A.columns)
 

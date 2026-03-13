@@ -19,7 +19,7 @@ from src_etl.utils.clee_resolution_config import (
 
 def generate_temp_clee():
     """Genera un UUID seguro para nuevos negocios."""
-    return f"NEW_{uuid.uuid4().hex[:12]}"
+    return uuid.uuid4().hex[:12]
 
 
 def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
