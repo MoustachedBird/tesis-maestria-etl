@@ -101,7 +101,7 @@ uv run python -m src_etl.main transform
 - **Package Manager:** uv
 - **Frameworks:** FastAPI (API), Typer (CLI), SQLAlchemy 2.0 (ORM), Alembic (migrations)
 - **Data Engine:** DuckDB (OLAP) + Polars (DataFrames)
-- **Storage:** DuckDB (Silver + Gold warehouses), Apache Parquet (seeds/curated)
+- **Storage:** DuckDB (Silver + Gold warehouses), Apache Parquet (seeds)
 - **Architecture:** Hexagonal/Clean Architecture with medallion data lake (Bronze/Silver/Gold)
 - **Design Decision:** Monolithic ETL -- YAGNI; single service doesn't justify microservices
 
@@ -118,7 +118,7 @@ etl-core/
 │   │   ├── download_config.py     # Download settings (retries, timeouts)
 │   │   └── logging.py             # Structured logging (structlog)
 │   ├── db/                        # Database layer
-│   │   ├── models.py              # SQLAlchemy ORM models (5 tables, 38 cols)
+│   │   ├── models.py              # SQLAlchemy ORM models (5 tables, 40 cols)
 │   │   ├── database.py            # Engine/session management
 │   │   ├── enums.py               # DENUE enums (TipoVial, PersonalOcupado, etc.)
 │   │   └── seed_loader.py         # Seed orchestrator (delegates to loaders/)
@@ -165,8 +165,6 @@ etl-core/
 │   │   ├── seed_municipios.parquet      # 2,478 municipalities
 │   │   ├── seed_localidades.parquet     # 39,140 localities
 │   │   └── seed_actividades.parquet     # 1,127 economic activities
-│   ├── processed/                 # ZIP -> Warehouse transformed data
-│   └── curated/                   # CLEE resolved Gold layer data
 │
 ├── alembic/                       # Database migrations
 ├── tests/
@@ -258,7 +256,7 @@ Data Flow:
   EXTRACT   -> download_tasks  (lineage: WEB -> FILE)
   TRANSFORM -> process_tasks   (lineage: FILE -> TABLE in Silver)
   LOAD      -> process_tasks   (lineage: Silver -> Gold file copy)
-  CLEE_RESOLUTION -> clee_resolution_tasks (lineage: TABLE -> FILE)
+  CLEE_RESOLUTION -> clee_resolution_tasks (lineage: Silver DuckDB in-place)
 ```
 
 ### Metadata Layer
@@ -281,10 +279,8 @@ Data Flow:
 
 ```
 data/bronze/denue/{period}/*.zip      # Raw downloads
-data/silver/denue.duckdb              # Silver DuckDB warehouse
+data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_master)
 data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
-data/curated/denue/snapshots/         # CLEE resolution snapshots
-data/curated/denue/master_catalog.parquet
 ```
 
 ### Logging Layer
@@ -311,12 +307,12 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 | `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,478 |
 | `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 39,140 |
 
-### Establecimiento (38 columns)
+### Establecimiento (40 columns)
 
 | Category | Columns |
 |----------|---------|
 | PK | `id` |
-| Identification | `clee`, `nom_estab`, `raz_social` |
+| Identification | `clee`, `clee_master`, `nom_estab`, `raz_social` |
 | Economic | `codigo_act`, `tipounieco`, `per_ocu` |
 | Address | `tipo_vial`, `nom_vial`, `numero_ext`, `letra_ext`, `numero_int`, `letra_int`, `edificio`, `edificio_e` |
 | Cross Streets | `tipo_v_e_1/2/3`, `nom_v_e_1/2/3` |
@@ -324,7 +320,18 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 | Geographic | `cve_ent`, `cve_mun`, `cve_loc`, `ageb`, `manzana` |
 | Coordinates | `latitud`, `longitud` |
 | Contact | `telefono`, `correoelec`, `www` |
-| Temporal | `fecha_alta`, `period` |
+| Temporal | `fecha_alta_str`, `fecha_alta_date`, `period` |
+
+### clee_master Column
+
+The `clee_master` column stores the resolved entity identifier assigned by the CLEE resolution stage. It enables tracking establishments across temporal snapshots.
+
+- **Source**: Populated by `CLEEResolver` directly in Silver DuckDB via UPDATE
+- **Values**:
+  - Original CLEE (copied from `clee` when available)
+  - Temporal CLEE: `NEW_{REGION_PREFIX}-{uuid_hex_12}` for new entities without CLEE
+- **Force mode** (`--force`): Resets all `clee_master` to NULL, re-seeds from `clee`, then resolves remaining NULLs
+- **Incremental mode** (default): Only processes rows where `clee_master IS NULL`
 
 ### Performance Indexes (100M+ rows)
 
@@ -417,10 +424,6 @@ LOG_LEVEL=INFO
 API_TITLE=DENUE ETL API
 API_VERSION=0.1.0
 API_PREFIX=/api/v1
-
-# Processing
-PROCESSED_OUTPUT_DIR=data/processed
-CURATED_OUTPUT_DIR=data/curated
 
 # Testing
 TEST_DB_PATH=data/denue_warehouse_most_recent.db
@@ -541,7 +544,7 @@ from pydantic import BaseModel
 
 # Local - ETL
 from src_etl.core.config import settings
-from src_etl.transformers.denue import DenueTransformer
+from src_etl.transformers.denue import DenuePipelineOrchestrator
 
 # Local - Metadata
 from src_metadata.tracker import MetadataTracker

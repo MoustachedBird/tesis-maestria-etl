@@ -32,7 +32,6 @@ data/silver/*
 data/gold/*
 
 # Exception: Keep empty folder structure
-!data/processed/.gitkeep
 !data/models/.gitkeep
 
 # --- Local Databases & Files ---
