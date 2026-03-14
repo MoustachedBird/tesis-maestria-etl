@@ -5,14 +5,17 @@ Resolves entity identities across temporal snapshots, matching
 establishments over time and generating master identifiers (CLEEs).
 
 Propagates CLEEs from the most recent period backward through time
-(future -> past). Uses a spatial tolerance radius (BallTree) as
-pre-filter and a conditional matching cascade for identity resolution.
+(future -> past). Uses a sliding-window approach: each target period
+is compared against one reference period at a time (instead of a
+monolithic growing KB), keeping peak RAM to ~5-8 GB.
+
+For periods that already have CLEE assigned by INEGI (2021+), resolution
+is deterministic (clee_master = clee). For older periods without CLEE
+(2015-2020), a spatial tolerance radius (BallTree) pre-filter and a
+conditional matching cascade resolve identities probabilistically.
 
 Reads from and writes back to the Silver DuckDB warehouse directly,
 populating the `clee_master` column on the `establecimientos` table.
-
-Memory-efficient: loads one period at a time from DuckDB instead of
-loading all ~76M rows into RAM simultaneously.
 """
 
 import gc
@@ -29,10 +32,10 @@ from src_etl.utils.clee_resolution_config import (
     TEXT_COLS_TO_SANITIZE,
 )
 from src_etl.utils.entity_resolution import (
+    assign_new_clees,
+    build_single_period_kb,
     get_region_prefix,
-    initialize_knowledge_base,
-    resolve_period_logic,
-    update_kb_logic,
+    propagate_clees,
 )
 from src_etl.utils.matching import clean_contact_columns
 from src_metadata.models import JobStatus, TaskStatus
@@ -45,16 +48,15 @@ class CLEEResolver:
     """
     Resolves entity identities across temporal snapshots.
 
-    Reads establishment data from Silver DuckDB one period at a time,
-    runs entity resolution (future -> past propagation), and writes
-    `clee_master` back to the same table via UPDATE statements.
+    Uses a sliding-window approach: for each target period without CLEE,
+    iterates over all already-resolved periods one at a time as reference,
+    propagating clee_master where spatial + fuzzy matching finds a hit.
 
-    Memory usage: KB + 1 period (~5-8 GB) instead of all periods (~40+ GB).
+    Peak memory: ~5-8 GB (1 reference period + 1 target period).
 
     Modes:
-        force=True:  Copy all existing `clee` values to `clee_master`,
-                     then run the algorithm on remaining NULLs.
-        force=False: Only process records where `clee_master IS NULL`
+        force=True:  Reset all clee_master, re-resolve from scratch.
+        force=False: Only process records where clee_master IS NULL
                      (incremental, preserves already-assigned values).
     """
 
@@ -79,36 +81,6 @@ class CLEEResolver:
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Get a DuckDB connection to Silver warehouse."""
         return duckdb.connect(str(self.silver_db_path))
-
-    def _seed_clee_master_from_clee(self) -> int:
-        """
-        Copy existing `clee` values into `clee_master` for all rows.
-
-        Used in force mode to reset and re-seed before running the
-        resolution algorithm on remaining NULLs.
-
-        Returns:
-            Number of rows seeded.
-        """
-        with self._get_connection() as conn:
-            # First, NULL out all clee_master to start fresh
-            conn.execute("UPDATE establecimientos SET clee_master = NULL")
-
-            # Copy non-empty clee values to clee_master
-            conn.execute("""
-                UPDATE establecimientos
-                SET clee_master = clee
-                WHERE clee IS NOT NULL AND clee != ''
-            """)
-
-            # Count how many got seeded
-            count = conn.execute("""
-                SELECT COUNT(*) FROM establecimientos
-                WHERE clee_master IS NOT NULL
-            """).fetchone()[0]
-
-            logger.info(f"   🌱 clee_master sembrado desde clee: {count:,} filas")
-            return count
 
     def _count_unresolved(self) -> int:
         """Count rows where clee_master IS NULL."""
@@ -135,6 +107,27 @@ class CLEEResolver:
             """).fetchall()
 
         return [r[0] for r in rows]
+
+    def _get_periods_with_clee_coverage(self) -> dict[date, bool]:
+        """
+        Classify each period as having full CLEE coverage or not.
+
+        Returns:
+            Dict mapping period -> True if 100% rows have CLEE, False otherwise.
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT
+                    period,
+                    COUNT(*) AS total,
+                    COUNT(CASE WHEN clee IS NOT NULL AND clee != '' THEN 1 END) AS with_clee
+                FROM establecimientos
+                WHERE period IS NOT NULL
+                GROUP BY period
+                ORDER BY period DESC
+            """).fetchall()
+
+        return {r[0]: (r[2] == r[1]) for r in rows}
 
     def _load_period(self, period: date) -> pl.DataFrame:
         """
@@ -170,11 +163,11 @@ class CLEEResolver:
         with self._get_connection() as conn:
             return conn.execute("SELECT COUNT(*) FROM establecimientos").fetchone()[0]
 
-    def _write_results_to_silver(self, mapping: pl.DataFrame) -> int:
+    def _write_period_results(self, mapping: pl.DataFrame) -> int:
         """
-        Write clee_master assignments back to Silver DuckDB.
+        Write clee_master assignments for a single period to Silver DuckDB.
 
-        Uses batched UPDATE statements for efficiency.
+        Uses batched UPDATE statements via temp table for efficiency.
 
         Args:
             mapping: DataFrame with columns [id, clee_master]
@@ -189,13 +182,10 @@ class CLEEResolver:
         batch_size = 50_000
         updated = 0
 
-        logger.info(f"   💾 Escribiendo {total:,} valores clee_master en Silver DuckDB...")
-
         with self._get_connection() as conn:
             for offset in range(0, total, batch_size):
                 batch = mapping.slice(offset, batch_size)
 
-                # Build a temp table approach for efficient batch update
                 conn.execute(
                     "CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, clee_master VARCHAR)"
                 )
@@ -210,108 +200,237 @@ class CLEEResolver:
                 updated += batch_updated
                 conn.execute("DROP TABLE IF EXISTS _clee_updates")
 
-                if (offset + batch_size) % 200_000 == 0 or offset + batch_size >= total:
-                    logger.info(
-                        f"      Actualizados {min(offset + batch_size, total):,}/{total:,} filas"
-                    )
-
-        logger.info(f"   ✅ Total filas actualizadas: {updated:,}")
         return updated
 
-    def process_national(self) -> tuple[pl.DataFrame, pl.DataFrame]:
+    # ------------------------------------------------------------------
+    # Phase 1: Deterministic resolution (periods with CLEE from INEGI)
+    # ------------------------------------------------------------------
+
+    def _resolve_deterministic_periods(
+        self,
+        periods: list[date],
+        clee_coverage: dict[date, bool],
+        force: bool,
+    ) -> list[date]:
         """
-        Process all periods as a single national Knowledge Base.
+        Resolve periods that have 100% CLEE coverage deterministically.
 
-        Loads one period at a time from DuckDB to keep memory usage low.
-        Propagates CLEEs from the most recent period backward through time.
-        Each period is resolved against the accumulated KB, then the KB
-        is updated with the new period's data.
+        For these periods, clee_master = clee (direct copy via SQL UPDATE).
+        No BallTree, no fuzzy matching needed.
 
-        Peak memory: KB (~2-4 GB) + 1 period (~3 GB) + mapping (~1 GB).
+        Args:
+            periods: All periods sorted newest-first.
+            clee_coverage: Dict mapping period -> has_full_clee.
+            force: If True, overwrite existing clee_master values.
 
         Returns:
-            Tuple of (mapping DataFrame [id -> clee_master], knowledge base DataFrame)
+            List of periods that were resolved (available as references).
         """
-        # Get periods sorted newest-first
+        deterministic_periods = [p for p in periods if clee_coverage.get(p, False)]
+
+        if not deterministic_periods:
+            return []
+
+        logger.info(
+            f"[FASE 1] Resolucion deterministica: {len(deterministic_periods)} periodos con CLEE"
+        )
+
+        with self._get_connection() as conn:
+            if force:
+                # Reset all clee_master first
+                conn.execute("UPDATE establecimientos SET clee_master = NULL")
+
+            # Copy clee -> clee_master for all rows with CLEE
+            conn.execute("""
+                UPDATE establecimientos
+                SET clee_master = clee
+                WHERE clee IS NOT NULL AND clee != ''
+            """)
+
+            # Count seeded rows
+            count = conn.execute("""
+                SELECT COUNT(*) FROM establecimientos
+                WHERE clee_master IS NOT NULL
+            """).fetchone()[0]
+
+        logger.info(
+            f"   clee_master = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
+        )
+
+        return deterministic_periods
+
+    # ------------------------------------------------------------------
+    # Phase 2: Probabilistic resolution (sliding window)
+    # ------------------------------------------------------------------
+
+    def _resolve_probabilistic_periods(
+        self,
+        periods: list[date],
+        clee_coverage: dict[date, bool],
+        resolved_periods: list[date],
+        region_prefix: str,
+    ) -> int:
+        """
+        Resolve periods without CLEE using sliding-window approach.
+
+        For each target period P (no CLEE, newest-first):
+          1. Load P from DuckDB (~3M rows, all clee_master NULL)
+          2. For each already-resolved period R (newest-first):
+             - Load R, build KB (scalar, ~6M rows max)
+             - Run propagate_clees(P, KB_R) to assign matches
+             - Free R from RAM
+          3. Assign NEW_prefix-uuid to remaining unresolved rows
+          4. Write results to DuckDB
+          5. Mark P as resolved (available as reference for next periods)
+
+        Args:
+            periods: All periods sorted newest-first.
+            clee_coverage: Dict mapping period -> has_full_clee.
+            resolved_periods: Periods already resolved (from Phase 1).
+            region_prefix: Prefix for generating temporal CLEEs.
+
+        Returns:
+            Total number of rows resolved in this phase.
+        """
+        probabilistic_periods = [p for p in periods if not clee_coverage.get(p, False)]
+
+        if not probabilistic_periods:
+            logger.info("[FASE 2] No hay periodos sin CLEE. Nada por resolver.")
+            return 0
+
+        logger.info(
+            f"[FASE 2] Resolucion probabilistica: "
+            f"{len(probabilistic_periods)} periodos sin CLEE "
+            f"(ventana deslizante, radio={self.spatial_tol}m)"
+        )
+
+        total_resolved = 0
+
+        for p_idx, target_period in enumerate(probabilistic_periods):
+            logger.info(
+                f"🔗 [{p_idx + 1}/{len(probabilistic_periods)}] "
+                f"Resolviendo periodo {target_period}..."
+            )
+
+            # Load target period (all rows, clee_master will be NULL)
+            df_target = self._load_period(target_period)
+            if df_target.is_empty():
+                logger.info(f"   {target_period}: vacio, saltando.")
+                resolved_periods.append(target_period)
+                continue
+
+            target_total = df_target.height
+
+            # Ensure clee_master column exists and is NULL for this period
+            if "clee_master" not in df_target.columns:
+                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias("clee_master"))
+            else:
+                df_target = df_target.with_columns(
+                    pl.when(pl.col("clee_master") == "")
+                    .then(pl.lit(None).cast(pl.Utf8))
+                    .otherwise(pl.col("clee_master"))
+                    .alias("clee_master")
+                )
+
+            # Sliding window: compare against each resolved period
+            for ref_period in resolved_periods:
+                # Count how many still need resolution
+                still_missing = df_target.filter(pl.col("clee_master").is_null()).height
+                if still_missing == 0:
+                    break
+
+                logger.info(f"   vs {ref_period} ({still_missing:,} pendientes)...")
+
+                # Load reference period and build lightweight KB
+                df_ref = self._load_period(ref_period)
+                ref_kb = build_single_period_kb(df_ref)
+
+                del df_ref
+                gc.collect()
+
+                # Propagate CLEEs from reference to target
+                df_target = propagate_clees(df_target, ref_kb, self.spatial_tol)
+
+                del ref_kb
+                gc.collect()
+
+            # Assign NEW CLEEs to remaining unresolved rows
+            still_missing = df_target.filter(pl.col("clee_master").is_null()).height
+            if still_missing > 0:
+                logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
+                df_target = assign_new_clees(df_target, region_prefix)
+
+            # Write results to DuckDB immediately (no accumulation in RAM)
+            mapping = df_target.select(["id", "clee_master"])
+            rows_written = self._write_period_results(mapping)
+            total_resolved += rows_written
+
+            logger.info(
+                f"   ✅ {target_period} resuelto: {rows_written:,} filas escritas "
+                f"({target_total - still_missing:,} propagados, "
+                f"{still_missing:,} nuevos)"
+            )
+
+            # Mark this period as resolved (available as reference)
+            resolved_periods.append(target_period)
+
+            # Free memory
+            del df_target, mapping
+            gc.collect()
+
+        return total_resolved
+
+    # ------------------------------------------------------------------
+    # Main orchestrator
+    # ------------------------------------------------------------------
+
+    def process_national(self, force: bool = False) -> dict:
+        """
+        Process all periods using sliding-window entity resolution.
+
+        Phase 1 (deterministic): Periods with CLEE get clee_master = clee
+        Phase 2 (probabilistic): Periods without CLEE are resolved via
+        sliding-window comparison against all already-resolved periods.
+
+        Args:
+            force: If True, reset all clee_master and re-resolve from scratch.
+
+        Returns:
+            Dict with resolution statistics.
+        """
         periods = self._get_sorted_periods()
-
         if not periods:
-            return pl.DataFrame(), pl.DataFrame()
+            return {"total_resolved": 0, "periods_processed": 0}
 
-        logger.info(f"   📅 Periodos detectados ({len(periods)}): {periods}")
+        logger.info(f"   Periodos detectados ({len(periods)}): {periods}")
 
-        # Get region prefix from distinct cve_ent values
+        # Classify periods by CLEE coverage
+        clee_coverage = self._get_periods_with_clee_coverage()
+
+        # Get region prefix
         with self._get_connection() as conn:
             state_rows = conn.execute(
                 "SELECT DISTINCT cve_ent FROM establecimientos ORDER BY cve_ent"
             ).fetchall()
         state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
-
         prefix = get_region_prefix(state_list)
-        logger.info(f"   🏷️ Prefijo de región (namespace): {prefix}")
+        logger.info(f"   Prefijo de region (namespace): {prefix}")
 
-        # --- Step 1: Load base period (most recent) and initialize KB ---
-        logger.info(f"🧠 Inicializando KB con periodo base: {periods[0]}...")
-        df_base = self._load_period(periods[0])
+        # --- Phase 1: Deterministic resolution ---
+        resolved_periods = self._resolve_deterministic_periods(periods, clee_coverage, force)
 
-        if df_base.is_empty():
-            return pl.DataFrame(), pl.DataFrame()
+        # --- Phase 2: Probabilistic resolution (sliding window) ---
+        total_prob = self._resolve_probabilistic_periods(
+            periods, clee_coverage, resolved_periods, prefix
+        )
 
-        logger.info(f"   📦 Filas del periodo base: {df_base.height:,}")
-        map_accum, kb = initialize_knowledge_base(df_base, prefix)
-        logger.info(f"   ✅ Entidades iniciales en KB: {kb.height:,}")
-
-        del df_base
-        gc.collect()
-
-        # --- Step 2: Process older periods one by one (future -> past) ---
-        for i in range(1, len(periods)):
-            period = periods[i]
-
-            logger.info(f"🔗 [{i}/{len(periods) - 1}] Cargando periodo {period}...")
-            df_period = self._load_period(period)
-
-            if df_period.is_empty():
-                logger.info(f"   ⚠️ {period}: vacío, saltando.")
-                continue
-
-            target_rows = df_period.height
-            kb_before = kb.height
-
-            logger.info(
-                f"   ⚙️ Resolviendo {period} ({target_rows:,} registros, "
-                f"radio={self.spatial_tol}m)..."
-            )
-
-            # Resolve entity identities
-            df_resolved = resolve_period_logic(
-                df_period,
-                kb,
-                prefix,
-                self.spatial_tol,
-            )
-
-            # Free period data immediately — we only need the resolved result
-            del df_period
-            gc.collect()
-
-            map_accum = map_accum.vstack(df_resolved.select(["id", "clee_master"]))
-
-            # Update knowledge base
-            kb = update_kb_logic(kb, df_resolved)
-
-            # Log growth
-            new_entities = kb.height - kb_before
-            logger.info(
-                f"   ✅ {period} resuelto: +{new_entities:,} entidades nuevas, "
-                f"KB total: {kb.height:,}"
-            )
-
-            # Free resolved DF for this period
-            del df_resolved
-            gc.collect()
-
-        return map_accum, kb
+        return {
+            "total_resolved": total_prob,
+            "periods_processed": len(periods),
+            "deterministic_periods": len([p for p in periods if clee_coverage.get(p, False)]),
+            "probabilistic_periods": len([p for p in periods if not clee_coverage.get(p, False)]),
+            "region_prefix": prefix,
+        }
 
     def run(self, force: bool = False) -> bool:
         """
@@ -329,7 +448,7 @@ class CLEEResolver:
         """
         if force:
             logger.warning(
-                "⚠️ MODO FORCE ACTIVADO: Se resetearán y re-resolverán todos los clee_master."
+                "MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los clee_master."
             )
 
         # Create job run
@@ -350,18 +469,17 @@ class CLEEResolver:
         self.tracker.start_clee_resolution_task(task_id)
 
         try:
-            # --- Force mode: seed clee_master from clee, then resolve NULLs ---
-            if force:
-                self._seed_clee_master_from_clee()
+            # Check how many rows need resolution before starting
+            total_rows = self._get_total_rows()
+            unresolved_before = self._count_unresolved() if not force else total_rows
 
-            # --- Check how many rows need resolution ---
-            unresolved_count = self._count_unresolved()
             logger.info(
-                f"🔍 Filas pendientes de resolución (clee_master IS NULL): {unresolved_count:,}"
+                f"Iniciando resolucion CLEE: {total_rows:,} filas totales, "
+                f"{unresolved_before:,} sin resolver, radio={self.spatial_tol}m"
             )
 
-            if unresolved_count == 0:
-                logger.info("✨ Todas las entidades ya resueltas. Nada por procesar.")
+            if unresolved_before == 0 and not force:
+                logger.info("Todas las entidades ya resueltas. Nada por procesar.")
                 self.tracker.complete_clee_resolution_task(
                     task_id=task_id,
                     status=TaskStatus.SKIPPED,
@@ -370,85 +488,41 @@ class CLEEResolver:
                 self.tracker.complete_run(run_id, JobStatus.SUCCESS)
                 return True
 
-            total_rows = self._get_total_rows()
-            logger.info(
-                f"⚙️ Iniciando resolución CLEE: {total_rows:,} filas totales, "
-                f"{unresolved_count:,} sin resolver, radio={self.spatial_tol}m"
+            # Run the two-phase resolution
+            stats = self.process_national(force=force)
+
+            # Count remaining unresolved
+            remaining = self._count_unresolved()
+
+            # Complete task
+            self.tracker.complete_clee_resolution_task(
+                task_id=task_id,
+                status=TaskStatus.SUCCESS,
+                entities_input=total_rows,
+                entities_matched=total_rows - remaining,
+                master_clees_created=total_rows - remaining,
+                periods_processed=stats["periods_processed"],
+                output_path=str(self.silver_db_path),
             )
 
-            # --- Run entity resolution (period by period) ---
-            national_map, national_kb = self.process_national()
+            logger.info(
+                f"Resolucion CLEE terminada. "
+                f"{stats['total_resolved']:,} filas actualizadas (prob.), "
+                f"{remaining:,} pendientes."
+            )
+            logger.info(
+                f"   Resumen: {stats['deterministic_periods']} periodos deterministicos, "
+                f"{stats['probabilistic_periods']} periodos probabilisticos"
+            )
 
-            if not national_map.is_empty():
-                # Filter mapping to only include rows that were unresolved
-                # (don't overwrite already-resolved clee_master in incremental mode)
-                if not force:
-                    # Get the set of unresolved IDs
-                    with self._get_connection() as conn:
-                        unresolved_ids = pl.from_arrow(
-                            conn.execute("""
-                                SELECT id FROM establecimientos
-                                WHERE clee_master IS NULL
-                            """).fetch_arrow_table()
-                        )
-                    # Filter mapping to only unresolved IDs
-                    national_map = national_map.join(unresolved_ids, on="id", how="semi")
-                    logger.info(
-                        f"   🔽 Filtrado a {national_map.height:,} filas sin resolver "
-                        f"(preservando clee_master existentes)"
-                    )
-
-                # Write results back to Silver DuckDB
-                rows_updated = self._write_results_to_silver(
-                    national_map.select(["id", "clee_master"])
-                )
-
-                # Count remaining unresolved
-                remaining = self._count_unresolved()
-
-                # Count periods processed
-                n_periods = 0
-                if "periods" in national_kb.columns:
-                    n_periods = national_kb.select(
-                        pl.col("periods").list.explode().unique().len()
-                    ).item()
-
-                # Complete task
-                self.tracker.complete_clee_resolution_task(
-                    task_id=task_id,
-                    status=TaskStatus.SUCCESS,
-                    entities_input=total_rows,
-                    entities_matched=national_kb.height,
-                    master_clees_created=national_kb.height,
-                    periods_processed=n_periods,
-                    output_path=str(self.silver_db_path),
-                )
-
-                logger.info(
-                    f"✨ Resolución CLEE terminada. {rows_updated:,} filas actualizadas, "
-                    f"{remaining:,} pendientes."
-                )
-                logger.info(
-                    f"   📊 Resumen: {national_kb.height:,} entidades únicas, "
-                    f"{n_periods} periodos procesados"
-                )
-            else:
-                self.tracker.complete_clee_resolution_task(
-                    task_id=task_id,
-                    status=TaskStatus.SKIPPED,
-                    error_message="No data to resolve",
-                )
-
-            # Cleanup memory
-            del national_map
-            del national_kb
+            # Cleanup
             gc.collect()
 
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             return True
 
         except Exception as e:
-            logger.error(f"   ❌ Error en resolución CLEE: {e}")
+            logger.error(f"   Error en resolucion CLEE: {e}")
             self.tracker.complete_clee_resolution_task(
                 task_id=task_id,
                 status=TaskStatus.FAILED,

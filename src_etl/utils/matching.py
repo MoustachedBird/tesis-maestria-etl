@@ -54,17 +54,20 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
 
 def calculate_match_score(
     t_row: dict,
-    kb_names: list,
-    kb_razones: list,
-    kb_acts: list,
-    kb_tels: list,
-    kb_emails: list,
-    kb_wwws: list,
-    kb_cps: list,
-    kb_plazas: list,
+    kb_name: str,
+    kb_razon: str,
+    kb_act: str,
+    kb_tel: str,
+    kb_email: str,
+    kb_www: str,
+    kb_cp: str,
 ) -> tuple[bool, str]:
     """
-    Calcula el match siguiendo una cascada jerarquica con umbrales calibrables:
+    Calcula el match siguiendo una cascada jerarquica con umbrales calibrables.
+
+    Compara un registro objetivo contra UN candidato de la KB (valores escalares,
+    no listas). Cada candidato es un establecimiento de un solo periodo de
+    referencia.
 
     GATE (obligatorio): Actividad SCIAN fuzzy > ACTIVITY_GATE_THRESH
     Path A: Razon social fuzzy > LEGAL_NAME_MATCH_THRESH  -> match directo
@@ -77,14 +80,13 @@ def calculate_match_score(
 
     Args:
         t_row: Diccionario con datos del registro objetivo
-        kb_names: Lista historica de nombres comerciales del candidato KB
-        kb_razones: Lista historica de razones sociales del candidato KB
-        kb_acts: Lista historica de actividades del candidato KB
-        kb_tels: Lista historica de telefonos del candidato KB
-        kb_emails: Lista historica de emails del candidato KB
-        kb_wwws: Lista historica de webs del candidato KB
-        kb_cps: Lista historica de codigos postales del candidato KB
-        kb_plazas: Lista historica de centros comerciales del candidato KB
+        kb_name: Nombre comercial del candidato KB
+        kb_razon: Razon social del candidato KB
+        kb_act: Actividad economica del candidato KB
+        kb_tel: Telefono limpio del candidato KB
+        kb_email: Email limpio del candidato KB
+        kb_www: Web limpia del candidato KB
+        kb_cp: Codigo postal del candidato KB
 
     Returns:
         Tupla (es_match: bool, estrategia: str)
@@ -95,31 +97,20 @@ def calculate_match_score(
     # === GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ===
     # Un negocio no puede ser el mismo si su giro cambio drasticamente.
     t_act = t_row.get("nombre_act", "")
-    act_match = False
-    for known_act in kb_acts:
-        if fuzz.token_set_ratio(t_act, known_act) > ACTIVITY_GATE_THRESH:
-            act_match = True
-            break
-
-    if not act_match:
+    if not kb_act or fuzz.token_set_ratio(t_act, kb_act) <= ACTIVITY_GATE_THRESH:
         return False, "DIFF_ACTIVITY"
 
     # === PATH A: MATCH DIRECTO POR RAZON SOCIAL ===
     t_raz = t_row.get("raz_social", "")
-    if len(t_raz) > 2:
-        for known_raz in kb_razones:
-            if known_raz and fuzz.token_sort_ratio(t_raz, known_raz) > LEGAL_NAME_MATCH_THRESH:
-                return True, "RAZON_MATCH"
+    if len(t_raz) > 2 and kb_razon and len(kb_razon) > 2:
+        if fuzz.token_sort_ratio(t_raz, kb_razon) > LEGAL_NAME_MATCH_THRESH:
+            return True, "RAZON_MATCH"
 
     # === PATH B: MATCH DIRECTO POR NOMBRE COMERCIAL ===
     t_name = t_row.get("nom_estab", "")
-    if len(t_name) > 2:
-        for known_name in kb_names:
-            if (
-                known_name
-                and fuzz.token_sort_ratio(t_name, known_name) > BUSINESS_NAME_MATCH_THRESH
-            ):
-                return True, "NAME_MATCH"
+    if len(t_name) > 2 and kb_name and len(kb_name) > 2:
+        if fuzz.token_sort_ratio(t_name, kb_name) > BUSINESS_NAME_MATCH_THRESH:
+            return True, "NAME_MATCH"
 
     # === PATH C: MATCH COMBINADO (senales debiles acumuladas) ===
     # Contamos cuantas senales coinciden. Si alcanzamos MIN_COMBINED_SIGNALS,
@@ -127,30 +118,28 @@ def calculate_match_score(
     signals = 0
 
     # Senal 1: Nombre comercial parcial
-    if len(t_name) > 2:
-        for known_name in kb_names:
-            if known_name and fuzz.token_sort_ratio(t_name, known_name) > PARTIAL_NAME_THRESH:
-                signals += 1
-                break
+    if len(t_name) > 2 and kb_name and len(kb_name) > 2:
+        if fuzz.token_sort_ratio(t_name, kb_name) > PARTIAL_NAME_THRESH:
+            signals += 1
 
     # Senal 2: Telefono exacto
     t_tel = t_row.get("tel_clean", "")
-    if len(t_tel) >= MIN_TEL_LENGTH and t_tel in kb_tels:
+    if len(t_tel) >= MIN_TEL_LENGTH and kb_tel and t_tel == kb_tel:
         signals += 1
 
     # Senal 3: Email exacto
     t_email = t_row.get("email_clean", "")
-    if len(t_email) >= MIN_EMAIL_LENGTH and t_email in kb_emails:
+    if len(t_email) >= MIN_EMAIL_LENGTH and kb_email and t_email == kb_email:
         signals += 1
 
     # Senal 4: Web exacto
     t_web = t_row.get("www_clean", "")
-    if len(t_web) >= MIN_WEB_LENGTH and t_web in kb_wwws:
+    if len(t_web) >= MIN_WEB_LENGTH and kb_www and t_web == kb_www:
         signals += 1
 
     # Senal 5: Codigo postal igual
     t_cp = t_row.get("cod_postal", "")
-    if t_cp != "" and t_cp in kb_cps:
+    if t_cp and kb_cp and t_cp == kb_cp:
         signals += 1
 
     if signals >= MIN_COMBINED_SIGNALS:

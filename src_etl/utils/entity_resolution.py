@@ -1,6 +1,41 @@
+"""
+Entity Resolution: Funciones de propagacion de CLEEs entre periodos.
+
+Este modulo contiene la logica aislada de propagacion de identidades.
+La funcion principal `propagate_clees()` es el punto de intercambio
+para futuros algoritmos de matching -- mientras respete la interfaz
+(recibe target + ref_kb, retorna target con clee_master parcialmente
+poblado), el orquestador no necesita cambios.
+"""
+
+import logging
+
 import polars as pl
 
-from src_etl.utils.matching import calculate_match_score, find_spatial_neighbors, generate_temp_clee
+from src_etl.utils.matching import (
+    calculate_match_score,
+    find_spatial_neighbors,
+    generate_temp_clee,
+)
+
+logger = logging.getLogger(__name__)
+
+# Columnas minimas que la KB necesita para el algoritmo de matching.
+# Cualquier otra columna es innecesaria y consume RAM sin aportar.
+KB_COLUMNS = [
+    "clee_master",
+    "latitud",
+    "longitud",
+    "nom_estab",
+    "raz_social",
+    "nombre_act",
+    "tel_clean",
+    "email_clean",
+    "www_clean",
+    "cod_postal",
+]
+
+PROGRESS_LOG_INTERVAL = 100_000
 
 
 def get_region_prefix(state_list: list[str]) -> str:
@@ -14,234 +49,178 @@ def get_region_prefix(state_list: list[str]) -> str:
         return f"{clean_state[:3]}_{abs(hash(state)) % 1000:03d}"
 
 
-def initialize_knowledge_base(
-    df_base: pl.DataFrame, region_prefix: str
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+def build_single_period_kb(df_ref: pl.DataFrame) -> pl.DataFrame:
     """
-    Crea la KB inicial con historial completo.
+    Construye una KB escalar desde un periodo ya resuelto.
 
-    Cada registro del periodo base se convierte en una entidad de la KB.
-    Los registros con CLEE oficial lo usan como clee_master; los demas
-    reciben un CLEE temporal generado.
+    No hace group_by ni listas: cada fila del periodo de referencia
+    es una fila de la KB. Solo incluye las columnas necesarias para
+    el algoritmo de matching, minimizando el uso de RAM.
+
+    Args:
+        df_ref: DataFrame de un periodo ya resuelto (con clee_master poblado).
 
     Returns:
-        Tupla (mapping_df, kb_df) donde mapping_df tiene [id, clee_master]
-        y kb_df es la Knowledge Base agregada por clee_master.
+        DataFrame con columnas KB_COLUMNS, solo filas con clee_master valido.
     """
-    # Aseguramos homogeneidad de tipos string y limpieza de nulos
-    df_resolved = df_base.with_columns(
-        [
-            pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
-            pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
-            pl.col("tipo_asent").cast(pl.Utf8).fill_null(""),
-            pl.col("nomb_asent").cast(pl.Utf8).fill_null(""),
-            pl.col("nom_cencom").cast(pl.Utf8).fill_null(""),
-            pl.col("cod_postal").cast(pl.Utf8).fill_null(""),
-        ]
-    ).with_columns(
-        pl.when((pl.col("clee").is_not_null()) & (pl.col("clee") != ""))
-        .then(pl.col("clee"))
-        .otherwise(
-            pl.col("id").map_elements(
-                lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
+    available_cols = [c for c in KB_COLUMNS if c in df_ref.columns]
+    kb = df_ref.filter(
+        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+    ).select(available_cols)
+
+    # Rellenar nulos en campos de texto para evitar crashes en comparacion
+    text_cols = [
+        "nom_estab",
+        "raz_social",
+        "nombre_act",
+        "tel_clean",
+        "email_clean",
+        "www_clean",
+        "cod_postal",
+    ]
+    fill_exprs = [pl.col(c).fill_null("") for c in text_cols if c in kb.columns]
+    if fill_exprs:
+        kb = kb.with_columns(fill_exprs)
+
+    return kb
+
+
+def propagate_clees(
+    df_target: pl.DataFrame,
+    ref_kb: pl.DataFrame,
+    spatial_tol: int,
+) -> pl.DataFrame:
+    """
+    Propaga clee_master desde una KB de referencia a registros sin resolver.
+
+    Funcion aislada de propagacion: compara registros del periodo objetivo
+    que aun no tienen clee_master contra una KB de un solo periodo de
+    referencia (valores escalares, no listas acumuladas).
+
+    Algoritmo:
+    1. Separa registros ya resueltos de pendientes (clee_master IS NULL)
+    2. Construye BallTree sobre ref_kb (max ~6M puntos)
+    3. Para cada pendiente, evalua vecinos espaciales con calculate_match_score()
+    4. Si hay match -> asigna clee_master del vecino
+    5. Si no hay match -> deja clee_master como NULL (siguiente ronda lo intenta)
+
+    NOTA: Esta funcion es el punto de intercambio para futuros algoritmos
+    de propagacion. Mientras respete la interfaz (recibe target + ref_kb,
+    retorna target con clee_master parcialmente poblado), el orquestador
+    no necesita cambios.
+
+    Args:
+        df_target: DataFrame del periodo a resolver. Debe incluir columna
+                   clee_master (puede ser NULL para registros pendientes).
+        ref_kb: KB escalar de un solo periodo de referencia.
+        spatial_tol: Radio de busqueda espacial en metros.
+
+    Returns:
+        df_target con clee_master parcialmente poblado donde hubo match.
+    """
+    # Separar resueltos de pendientes
+    df_resolved = df_target.filter(
+        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+    )
+    df_pending = df_target.filter((pl.col("clee_master").is_null()) | (pl.col("clee_master") == ""))
+
+    if df_pending.height == 0 or ref_kb.height == 0:
+        return df_target
+
+    # 1. Pre-filtro espacial: BallTree sobre la KB de referencia
+    indices, _ = find_spatial_neighbors(ref_kb, df_pending, spatial_tol)
+
+    # 2. Materializar KB a arrays Python para acceso rapido en el loop
+    kb_clee_masters = ref_kb["clee_master"].to_list()
+    kb_names = ref_kb["nom_estab"].to_list()
+    kb_razones = ref_kb["raz_social"].to_list()
+    kb_acts = ref_kb["nombre_act"].to_list()
+    kb_tels = ref_kb["tel_clean"].to_list()
+    kb_emails = ref_kb["email_clean"].to_list()
+    kb_wwws = ref_kb["www_clean"].to_list()
+    kb_cps = ref_kb["cod_postal"].to_list()
+
+    # 3. Iterar sobre registros pendientes
+    target_rows = df_pending.to_dicts()
+    n_total = len(target_rows)
+    n_matched = 0
+
+    for idx, row in enumerate(target_rows):
+        if idx > 0 and idx % PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                f"      Progreso: {idx:,}/{n_total:,} filas procesadas, "
+                f"{n_matched:,} matches encontrados"
             )
+
+        neighbors = indices[idx]
+        if len(neighbors) == 0:
+            continue
+
+        # Sanitizar nulos
+        safe_row = {k: (v if v is not None else "") for k, v in row.items()}
+        best_clee = None
+
+        for n_idx in neighbors:
+            is_match, strategy = calculate_match_score(
+                safe_row,
+                kb_names[n_idx],
+                kb_razones[n_idx],
+                kb_acts[n_idx],
+                kb_tels[n_idx],
+                kb_emails[n_idx],
+                kb_wwws[n_idx],
+                kb_cps[n_idx],
+            )
+
+            if is_match:
+                best_clee = kb_clee_masters[n_idx]
+                if strategy in ("NAME_MATCH", "RAZON_MATCH"):
+                    break
+
+        if best_clee:
+            row["clee_master"] = best_clee
+            n_matched += 1
+
+    logger.info(
+        f"      Completado: {n_total:,} filas procesadas, {n_matched:,} matches encontrados"
+    )
+
+    # 4. Reconstruir DataFrame con resultados
+    df_newly_resolved = pl.DataFrame(target_rows).select(df_target.columns)
+
+    return df_resolved.vstack(df_newly_resolved)
+
+
+def assign_new_clees(
+    df_target: pl.DataFrame,
+    region_prefix: str,
+) -> pl.DataFrame:
+    """
+    Asigna NEW_prefix-uuid a registros que quedaron sin clee_master
+    despues de todas las rondas de propagacion.
+
+    Args:
+        df_target: DataFrame con clee_master parcialmente poblado.
+        region_prefix: Prefijo para generar CLEEs temporales.
+
+    Returns:
+        df_target con todos los clee_master poblados (sin NULLs).
+    """
+    df_resolved = df_target.filter(
+        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+    )
+    df_missing = df_target.filter((pl.col("clee_master").is_null()) | (pl.col("clee_master") == ""))
+
+    if df_missing.height == 0:
+        return df_target
+
+    df_assigned = df_missing.with_columns(
+        pl.col("id")
+        .map_elements(
+            lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}",
+            return_dtype=pl.Utf8,
         )
         .alias("clee_master")
     )
 
-    kb = df_resolved.group_by("clee_master").agg(
-        [
-            pl.col("latitud").first(),
-            pl.col("longitud").first(),
-            pl.col("period").alias("periods"),
-            pl.col("nom_estab").alias("names"),
-            pl.col("raz_social").alias("razones"),
-            pl.col("nombre_act").alias("acts"),
-            pl.col("fecha_alta_str").alias("fechas_alta"),
-            pl.col("per_ocu").alias("estratos_personal"),
-            pl.col("tipo_asent").alias("tipos_asentamiento"),
-            pl.col("nomb_asent").alias("asentamientos"),
-            pl.col("nom_cencom").alias("centros_comerciales"),
-            pl.col("cod_postal").alias("codigos_postales"),
-            pl.col("tel_clean").fill_null("").alias("tels"),
-            pl.col("email_clean").fill_null("").alias("emails"),
-            pl.col("www_clean").fill_null("").alias("wwws"),
-        ]
-    )
-
-    return df_resolved.select(["id", "clee_master"]), kb
-
-
-def resolve_period_logic(
-    df_target: pl.DataFrame,
-    kb: pl.DataFrame,
-    region_prefix: str,
-    spatial_tol: int,
-) -> pl.DataFrame:
-    """
-    Nucleo algoritmico de resolucion con cascada logica.
-
-    Para cada registro del periodo objetivo:
-    1. Si tiene CLEE oficial -> match determinista
-    2. Si no tiene CLEE -> buscar vecinos espaciales en KB (BallTree)
-       y evaluar cascada: gate SCIAN -> razon social -> nombre -> combinado
-
-    Los umbrales de matching se importan desde clee_resolution_config.py
-    y se aplican dentro de calculate_match_score().
-
-    Args:
-        df_target: DataFrame del periodo a resolver
-        kb: Knowledge Base acumulada
-        region_prefix: Prefijo para generar CLEEs temporales
-        spatial_tol: Radio de busqueda espacial en metros
-
-    Returns:
-        DataFrame con todos los registros del periodo + columna clee_master
-    """
-
-    # A. Determinista: Enlace directo por CLEE oficial
-    df_with_clee = df_target.filter((pl.col("clee").is_not_null()) & (pl.col("clee") != ""))
-    df_res_A = df_with_clee.with_columns(pl.col("clee").alias("clee_master"))
-
-    # B. Probabilistico: Negocios sin CLEE o nuevos registros
-    df_missing = df_target.filter((pl.col("clee").is_null()) | (pl.col("clee") == ""))
-
-    new_links = []
-
-    if df_missing.height > 0 and kb.height > 0:
-        # 1. Filtro Espacial Inicial (Radio de tolerancia en metros)
-        indices, _ = find_spatial_neighbors(kb, df_missing, spatial_tol)
-
-        kb_ids = kb["clee_master"].to_list()
-
-        # Pre-cargamos las listas historicas de la KB para acceso rapido
-        kb_lists = {
-            "names": kb["names"].to_list(),
-            "razones": kb["razones"].to_list(),
-            "acts": kb["acts"].to_list(),
-            "tels": kb["tels"].to_list(),
-            "emails": kb["emails"].to_list(),
-            "wwws": kb["wwws"].to_list(),
-            "cps": kb["codigos_postales"].to_list(),
-            "plazas": kb["centros_comerciales"].to_list(),
-        }
-
-        target_rows = df_missing.to_dicts()
-
-        for idx, row in enumerate(target_rows):
-            neighbors = indices[idx]
-            best_clee = None
-            # Sanitizacion preventiva
-            safe_row = {k: (v if v is not None else "") for k, v in row.items()}
-
-            if len(neighbors) > 0:
-                for n_idx in neighbors:
-                    # Ejecutamos la comparacion jerarquica
-                    is_match, strategy = calculate_match_score(
-                        safe_row,
-                        kb_lists["names"][n_idx],
-                        kb_lists["razones"][n_idx],
-                        kb_lists["acts"][n_idx],
-                        kb_lists["tels"][n_idx],
-                        kb_lists["emails"][n_idx],
-                        kb_lists["wwws"][n_idx],
-                        kb_lists["cps"][n_idx],
-                        kb_lists["plazas"][n_idx],
-                    )
-
-                    if is_match:
-                        best_clee = kb_ids[n_idx]
-                        # Si el match es por identidad fuerte, detenemos la busqueda
-                        if strategy in ["NAME_MATCH", "RAZON_MATCH"]:
-                            break
-
-            # Si no hubo match con vecinos, generamos un CLEE temporal nuevo
-            final_clee = best_clee if best_clee else f"NEW_{region_prefix}-{generate_temp_clee()}"
-
-            new_item = row.copy()
-            new_item["clee_master"] = final_clee
-            new_links.append(new_item)
-
-        # Reconstruccion del DataFrame con los resultados del Algoritmo B
-        df_res_B = pl.DataFrame(new_links).select(df_res_A.columns)
-    else:
-        # Caso donde no hay KB previa o todos los registros son nuevos
-        df_res_B = df_missing.with_columns(
-            pl.col("id")
-            .map_elements(
-                lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}", return_dtype=pl.Utf8
-            )
-            .alias("clee_master")
-        ).select(df_res_A.columns)
-
-    # Union de resultados Deterministas y Probabilisticos
-    return df_res_A.vstack(df_res_B)
-
-
-def update_kb_logic(kb: pl.DataFrame, new_resolved_data: pl.DataFrame) -> pl.DataFrame:
-    """
-    Actualiza la KB acumulando historiales de todas las variables.
-
-    Cada campo se mantiene como lista, permitiendo rastrear la evolucion
-    del negocio a traves del tiempo (nombres, actividades, contactos, etc.).
-    """
-    kb_updates = (
-        new_resolved_data.with_columns(
-            [
-                pl.col("fecha_alta_str").cast(pl.Utf8).fill_null(""),
-                pl.col("per_ocu").cast(pl.Utf8).fill_null(""),
-                pl.col("tipo_asent").cast(pl.Utf8).fill_null(""),
-                pl.col("nomb_asent").cast(pl.Utf8).fill_null(""),
-                pl.col("nom_cencom").cast(pl.Utf8).fill_null(""),
-                pl.col("cod_postal").cast(pl.Utf8).fill_null(""),
-            ]
-        )
-        .group_by("clee_master")
-        .agg(
-            [
-                pl.col("period").alias("periods"),
-                pl.col("nom_estab").alias("names"),
-                pl.col("raz_social").alias("razones"),
-                pl.col("nombre_act").alias("acts"),
-                pl.col("fecha_alta_str").alias("fechas_alta"),
-                pl.col("per_ocu").alias("estratos_personal"),
-                pl.col("tipo_asent").alias("tipos_asentamiento"),
-                pl.col("nomb_asent").alias("asentamientos"),
-                pl.col("nom_cencom").alias("centros_comerciales"),
-                pl.col("cod_postal").alias("codigos_postales"),
-                pl.col("tel_clean").fill_null("").alias("tels"),
-                pl.col("email_clean").fill_null("").alias("emails"),
-                pl.col("www_clean").fill_null("").alias("wwws"),
-                pl.col("latitud").first().alias("latitud"),
-                pl.col("longitud").first().alias("longitud"),
-            ]
-        )
-    )
-
-    kb = kb.join(kb_updates, on="clee_master", how="full", suffix="_new")
-
-    def merge_lists(col_name):
-        return pl.concat_list(
-            [pl.col(col_name).fill_null([]), pl.col(f"{col_name}_new").fill_null([])]
-        ).list.eval(pl.element().flatten().unique())
-
-    return kb.select(
-        [
-            pl.col("clee_master"),
-            pl.coalesce(["latitud", "latitud_new"]).alias("latitud"),
-            pl.coalesce(["longitud", "longitud_new"]).alias("longitud"),
-            merge_lists("periods").list.sort().alias("periods"),
-            merge_lists("names").alias("names"),
-            merge_lists("razones").alias("razones"),
-            merge_lists("acts").alias("acts"),
-            merge_lists("fechas_alta").alias("fechas_alta"),
-            merge_lists("estratos_personal").alias("estratos_personal"),
-            merge_lists("tipos_asentamiento").alias("tipos_asentamiento"),
-            merge_lists("asentamientos").alias("asentamientos"),
-            merge_lists("centros_comerciales").alias("centros_comerciales"),
-            merge_lists("codigos_postales").alias("codigos_postales"),
-            merge_lists("tels").alias("tels"),
-            merge_lists("emails").alias("emails"),
-            merge_lists("wwws").alias("wwws"),
-        ]
-    )
+    return df_resolved.vstack(df_assigned.select(df_resolved.columns))
