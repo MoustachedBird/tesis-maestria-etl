@@ -381,6 +381,11 @@ def _propagate_single_kb(
     logger.info(f"{prefix}KB materializada en {t_mat:.1f}s")
 
     # 3. Convertir target a lista de dicts para el loop
+    # Capturamos el esquema ANTES de to_dicts() para usarlo al reconstruir.
+    # Esto evita errores de inferencia cuando columnas dispersas (ej. www_clean)
+    # tienen muchos nulls al inicio y Polars infiere tipo Null en vez de Utf8.
+    original_schema = df_pending.schema
+
     logger.info(f"{prefix}Preparando {df_pending.height:,} filas target para matching...")
     t0 = time.perf_counter()
     target_rows = df_pending.to_dicts()
@@ -410,8 +415,8 @@ def _propagate_single_kb(
 
     logger.info(f"{prefix}{n_matched:,} matches encontrados en esta particion")
 
-    # 6. Reconstruir DataFrame con resultados
-    df_result = pl.DataFrame(target_rows).select(df_pending.columns)
+    # 6. Reconstruir DataFrame con esquema original (evita inferencia erronea)
+    df_result = pl.DataFrame(target_rows, schema=original_schema).select(df_pending.columns)
 
     # 7. Limpiar referencias globales (liberar KB para GC)
     _shared_kb_clee_masters = []

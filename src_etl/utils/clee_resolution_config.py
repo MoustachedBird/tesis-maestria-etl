@@ -133,10 +133,17 @@ SILVER_READ_QUERY = """
 """
 
 # Columnas de texto para sanitizar (None -> "")
+# IMPORTANTE: telefono, correoelec y www DEBEN estar aqui para que
+# clean_contact_columns() genere tel_clean/email_clean/www_clean con ""
+# en vez de None. Si faltan, columnas dispersas (especialmente www) causan
+# errores de inferencia de esquema al reconstruir DataFrames desde dicts.
 TEXT_COLS_TO_SANITIZE = [
     "nom_estab",
     "raz_social",
     "nombre_act",
+    "telefono",
+    "correoelec",
+    "www",
     "fecha_alta_str",
     "per_ocu",
     "tipo_asent",
