@@ -54,6 +54,16 @@ MIN_EMAIL_LENGTH = 5
 # Largo minimo de web para considerar como senal valida
 MIN_WEB_LENGTH = 5
 
+# --- PARALELISMO (multiprocessing) ---
+# Numero de workers para el loop de matching en propagate_clees().
+# None = auto (cpu_count - 2, minimo 1).
+# Poner 1 para desactivar paralelismo (modo debug/secuencial).
+MATCH_WORKERS: int | None = None
+
+# Tamano minimo de filas pendientes para activar multiprocessing.
+# Si hay menos filas que esto, el overhead de fork no vale la pena.
+MATCH_PARALLEL_THRESHOLD = 50_000
+
 
 # =============================================================================
 # COLUMNAS PARA RESOLUCION (leidas desde Silver DuckDB)
