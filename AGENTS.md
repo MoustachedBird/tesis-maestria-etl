@@ -92,6 +92,144 @@ uv run python -m src_etl.main transform
 
 ---
 
+## CLEE Resolution Step (Entity Resolution)
+
+The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> clee-resolution**. This section documents the CLEE resolution stage in detail.
+
+### Purpose
+
+CLEE resolution links establishments across temporal snapshots of DENUE. INEGI assigns CLEE codes starting in 2021, but older periods (2015-2020) lack them. This stage propagates CLEEs from recent periods backward through time using spatial + fuzzy matching, enabling longitudinal tracking of SME survival and mortality.
+
+### Two-Phase Architecture
+
+The resolver (`CLEEResolver.process_national()` in `clee_resolver.py:387`) runs two sequential phases:
+
+**Phase 1 -- Deterministic Resolution** (`_resolve_deterministic_periods`, line 209):
+- Identifies periods where INEGI assigned CLEE codes to 100% of rows (2021+ data).
+- Performs a simple SQL `UPDATE establecimientos SET clee_master = clee` for all rows with non-null `clee`.
+- These periods become the initial **resolved set** -- the anchor references for Phase 2.
+- No BallTree, no fuzzy matching -- purely deterministic copy.
+
+**Phase 2 -- Probabilistic Resolution** (`_resolve_probabilistic_periods`, line 266):
+- Processes older periods (2015-2020) that lack CLEE codes from INEGI.
+- Uses a **sliding-window approach with an expanding reference set** (see below).
+- After exhausting all references, unresolved rows get a synthetic ID: `NEW_{prefix}-{uuid_hex_12}`.
+- Results are written to DuckDB immediately; the period then joins the resolved set.
+
+### Sliding Window with Expanding Reference Set
+
+This is the core mechanism. It is **not** a fixed-size window nor a monolithic KB.
+
+```
+resolved_periods = [deterministic periods from Phase 1]  # e.g., 2021-2024
+
+FOR each target_period P in probabilistic_periods (newest-first):
+    1. Load P from Silver DuckDB (all rows where clee_master IS NULL)
+
+    2. FOR each ref_period R in resolved_periods (newest-first):
+        a. If P has 0 remaining unresolved rows -> BREAK early
+        b. Load R from DuckDB
+        c. Build ephemeral KB from R  (build_single_period_kb)
+        d. Free R from RAM  (del + gc.collect)
+        e. propagate_clees(target=P, ref_kb=KB_R, spatial_tol=500m)
+           -> Partially fills clee_master on P's matched rows
+        f. Free KB_R from RAM  (del + gc.collect)
+
+    3. assign_new_clees() for any rows still unresolved
+    4. Write P's clee_master values to DuckDB (50K-row batches via temp table)
+    5. resolved_periods.append(P)  # P is now available as reference
+    6. Free P from RAM
+```
+
+Key characteristics:
+- **Direction**: future-to-past (newest periods resolved first, propagated backward)
+- **Expanding reference**: after each target period resolves, it joins `resolved_periods`, so subsequent targets have more references
+- **One reference in RAM at a time**: peak RAM capped at ~5-8 GB by loading/discarding each reference individually
+- **Exhaustive comparison**: each target is compared against ALL resolved periods (not a fixed N-period window)
+- **Early termination**: inner loop breaks when target has 0 pending rows (`clee_resolver.py:339`)
+
+### Ephemeral KB Construction
+
+The KB is built fresh from a **single reference period** each time -- never accumulated across periods:
+
+`build_single_period_kb(df_ref)` (`entity_resolution.py:166`):
+- Filters to rows with valid `clee_master` (non-null, non-empty)
+- Selects only 10 columns (`KB_COLUMNS`): `clee_master`, `latitud`, `longitud`, `nom_estab`, `raz_social`, `nombre_act`, `tel_clean`, `email_clean`, `www_clean`, `cod_postal`
+- Returns a lightweight Polars DataFrame -- no group-by, no aggregation
+- Each row in the reference period is one row in the KB
+
+### Cascade Matching Algorithm
+
+`propagate_clees()` (`entity_resolution.py:326`) performs matching in three steps:
+
+1. **Spatial pre-filter**: BallTree (haversine) queries target coords against reference KB within 500m radius
+2. **Activity gate** (mandatory): SCIAN activity fuzzy score > 60 -- candidates below this are rejected
+3. **Match paths** (one must pass):
+   - **Path A**: Razon social (legal name) fuzzy > 80
+   - **Path B**: Business name fuzzy > 75
+   - **Path C**: 2+ combined weak signals from: partial name (>60), phone, email, web, postal code
+
+Parallelization: datasets > 50K rows use `multiprocessing.Pool` with fork() + copy-on-write KB sharing. Below that threshold, sequential processing is used.
+
+### Configuration Thresholds
+
+Defined in `clee_resolution_config.py`:
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `SPATIAL_RADIUS_M` | 500 | BallTree pre-filter radius (meters) |
+| `ACTIVITY_GATE_THRESH` | 60 | Mandatory SCIAN activity fuzzy threshold |
+| `BUSINESS_NAME_MATCH_THRESH` | 75 | Direct match: business name fuzzy |
+| `LEGAL_NAME_MATCH_THRESH` | 80 | Direct match: legal name (razon social) |
+| `MIN_COMBINED_SIGNALS` | 2 | Combined match: minimum weak signals |
+| `PARTIAL_NAME_THRESH` | 60 | Partial name signal threshold |
+| `MATCH_WORKERS` | None (auto) | Multiprocessing worker count |
+| `MATCH_PARALLEL_THRESHOLD` | 50,000 | Minimum rows to activate multiprocessing |
+
+### Key Functions Reference
+
+| Function | File:Line | Role |
+|----------|-----------|------|
+| `CLEEResolver.run()` | `clee_resolver.py:435` | Entry point. Creates metadata, invokes `process_national()` |
+| `process_national()` | `clee_resolver.py:387` | Orchestrator. Phase 1 then Phase 2 |
+| `_resolve_deterministic_periods()` | `clee_resolver.py:209` | Phase 1: `UPDATE clee_master = clee` |
+| `_resolve_probabilistic_periods()` | `clee_resolver.py:266` | Phase 2: sliding window loop |
+| `_get_sorted_periods()` | `clee_resolver.py:93` | Returns all periods sorted newest-first |
+| `_get_periods_with_clee_coverage()` | `clee_resolver.py:111` | Classifies periods as deterministic vs. probabilistic |
+| `_load_period()` | `clee_resolver.py:132` | Loads one period from Silver DuckDB |
+| `_write_period_results()` | `clee_resolver.py:166` | Writes clee_master back to DuckDB in 50K batches |
+| `build_single_period_kb()` | `entity_resolution.py:166` | Builds ephemeral KB from one reference period |
+| `propagate_clees()` | `entity_resolution.py:326` | Core propagation: BallTree + cascade scoring |
+| `assign_new_clees()` | `entity_resolution.py:446` | Assigns `NEW_{prefix}-{uuid12}` to unmatched rows |
+| `find_spatial_neighbors()` | `matching.py:40` | BallTree haversine spatial search |
+| `calculate_match_score()` | `matching.py:55` | Cascade matching: gate -> Path A/B/C |
+
+### CLI Usage
+
+```bash
+# Run only CLEE resolution (skip ingest and normalize-dates)
+uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution
+
+# Force re-resolve all periods (resets clee_master to NULL first)
+uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution --force
+
+# Or via Makefile
+make clee-resolution
+
+# Full transform (ingest + normalize-dates + clee-resolution, all on by default)
+uv run python -m src_etl.main transform
+```
+
+### Tips
+
+- The sliding window processes periods **newest-first** (`ORDER BY period DESC`). This maximizes the chance of matching against data that already has INEGI-assigned CLEEs.
+- Peak RAM is controlled by loading only one reference period at a time (~5-8 GB). If RAM is a concern, monitor via `_count_unresolved()` progress logging.
+- The `--force` flag resets ALL `clee_master` to NULL and re-runs from scratch. Use only when the matching algorithm changes or seed data is corrected.
+- Synthetic IDs (`NEW_*`) are stable within a single run but NOT across runs with `--force`. Do not use them as permanent foreign keys in downstream systems.
+- The inner loop's early termination (`still_missing == 0`) significantly speeds up recent periods that have near-complete CLEE coverage from INEGI.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)
@@ -324,12 +462,13 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 ### clee_master Column
 
-The `clee_master` column stores the resolved entity identifier assigned by the CLEE resolution stage. It enables tracking establishments across temporal snapshots.
+The `clee_master` column stores the resolved entity identifier assigned by the CLEE resolution stage. It enables tracking establishments across temporal snapshots. See the **CLEE Resolution Step** section above for the full two-phase algorithm, sliding window mechanism, and cascade matching details.
 
 - **Source**: Populated by `CLEEResolver` directly in Silver DuckDB via UPDATE
 - **Values**:
-  - Original CLEE (copied from `clee` when available)
-  - Temporal CLEE: `NEW_{REGION_PREFIX}-{uuid_hex_12}` for new entities without CLEE
+  - Original CLEE (copied from `clee` when available -- Phase 1 deterministic)
+  - Propagated CLEE (matched from a resolved reference period -- Phase 2 probabilistic)
+  - Synthetic CLEE: `NEW_{REGION_PREFIX}-{uuid_hex_12}` for new entities without match
 - **Force mode** (`--force`): Resets all `clee_master` to NULL, re-seeds from `clee`, then resolves remaining NULLs
 - **Incremental mode** (default): Only processes rows where `clee_master IS NULL`
 
