@@ -6,6 +6,8 @@
 # (mas falsos positivos), valores mas altos = menos matches (mas falsos negativos).
 # =============================================================================
 
+import os
+
 # --- RADIO ESPACIAL (pre-filtro BallTree) ---
 # Define el radio maximo (metros) para buscar candidatos en la Knowledge Base.
 # Solo negocios dentro de este radio son evaluados por la cascada de matching.
@@ -56,13 +58,23 @@ MIN_WEB_LENGTH = 5
 
 # --- PARALELISMO (multiprocessing) ---
 # Numero de workers para el loop de matching en propagate_clees().
-# None = auto (cpu_count - 2, minimo 1).
+# None = auto (cpu_count - 3, minimo 1).
 # Poner 1 para desactivar paralelismo (modo debug/secuencial).
-MATCH_WORKERS: int | None = None
+MATCH_WORKERS: int | None = int(os.environ.get("MATCH_WORKERS", "8"))
 
 # Tamano minimo de filas pendientes para activar multiprocessing.
 # Si hay menos filas que esto, el overhead de fork no vale la pena.
 MATCH_PARALLEL_THRESHOLD = 50_000
+
+# --- PARTICIONAMIENTO DE KB (control de RAM) ---
+# Numero maximo de filas por particion de la KB de referencia.
+# Si la KB excede este umbral, se divide en particiones que se procesan
+# secuencialmente contra el target, evitando OOM en maquinas con RAM limitada.
+# Cada particion construye su propio BallTree y materializa su propia copia
+# de las listas _shared_kb_*. No se pierde ningun match potencial.
+# Default: 1,500,000 filas (~0.5-0.8 GB de KB materializada por particion).
+# Configurable via variable de entorno KB_MAX_ROWS_PER_PARTITION.
+KB_MAX_ROWS_PER_PARTITION: int = int(os.environ.get("KB_MAX_ROWS_PER_PARTITION", "1500000"))
 
 
 # =============================================================================

@@ -18,6 +18,7 @@ serializacion. Esto mantiene el uso de RAM practicamente igual al
 modo secuencial (~2 GB extra para chunks + resultados, no N copias).
 """
 
+import gc
 import logging
 import multiprocessing as mp
 import os
@@ -27,6 +28,7 @@ import numpy as np
 import polars as pl
 
 from src_etl.utils.clee_resolution_config import (
+    KB_MAX_ROWS_PER_PARTITION,
     MATCH_PARALLEL_THRESHOLD,
     MATCH_WORKERS,
 )
@@ -323,6 +325,107 @@ def _run_matching_parallel(
     return all_results
 
 
+def _propagate_single_kb(
+    df_pending: pl.DataFrame,
+    kb_partition: pl.DataFrame,
+    spatial_tol: int,
+    partition_label: str = "",
+) -> pl.DataFrame:
+    """
+    Propaga clee_master desde UNA particion de KB a registros pendientes.
+
+    Funcion interna que ejecuta el matching completo (BallTree + cascada)
+    para una unica particion de la KB de referencia. Llamada una o mas
+    veces por propagate_clees() dependiendo de si la KB se particiono.
+
+    Args:
+        df_pending: DataFrame de filas sin clee_master (pendientes).
+        kb_partition: Particion de KB (o KB completa si no se particiono).
+        spatial_tol: Radio de busqueda espacial en metros.
+        partition_label: Etiqueta para logging (ej. "particion 1/3").
+
+    Returns:
+        df_pending con clee_master parcialmente poblado donde hubo match.
+    """
+    global _shared_kb_clee_masters, _shared_kb_names, _shared_kb_razones
+    global _shared_kb_acts, _shared_kb_tels, _shared_kb_emails
+    global _shared_kb_wwws, _shared_kb_cps
+
+    prefix = f"      [{partition_label}] " if partition_label else "      "
+
+    if df_pending.height == 0 or kb_partition.height == 0:
+        return df_pending
+
+    # 1. Pre-filtro espacial: BallTree sobre la particion de KB
+    logger.info(
+        f"{prefix}BallTree: construyendo indice ({kb_partition.height:,} refs, "
+        f"{df_pending.height:,} target, radio={spatial_tol}m)..."
+    )
+    t0 = time.perf_counter()
+    indices, _ = find_spatial_neighbors(kb_partition, df_pending, spatial_tol)
+    t_bt = time.perf_counter() - t0
+    logger.info(f"{prefix}BallTree: completado en {t_bt:.1f}s")
+
+    # 2. Materializar KB a variables globales para acceso COW en workers
+    logger.info(f"{prefix}Materializando KB ({kb_partition.height:,} filas x 8 columnas)...")
+    t0 = time.perf_counter()
+    _shared_kb_clee_masters = kb_partition["clee_master"].to_list()
+    _shared_kb_names = kb_partition["nom_estab"].to_list()
+    _shared_kb_razones = kb_partition["raz_social"].to_list()
+    _shared_kb_acts = kb_partition["nombre_act"].to_list()
+    _shared_kb_tels = kb_partition["tel_clean"].to_list()
+    _shared_kb_emails = kb_partition["email_clean"].to_list()
+    _shared_kb_wwws = kb_partition["www_clean"].to_list()
+    _shared_kb_cps = kb_partition["cod_postal"].to_list()
+    t_mat = time.perf_counter() - t0
+    logger.info(f"{prefix}KB materializada en {t_mat:.1f}s")
+
+    # 3. Convertir target a lista de dicts para el loop
+    logger.info(f"{prefix}Preparando {df_pending.height:,} filas target para matching...")
+    t0 = time.perf_counter()
+    target_rows = df_pending.to_dicts()
+    t_dicts = time.perf_counter() - t0
+    logger.info(f"{prefix}Target preparado en {t_dicts:.1f}s")
+
+    n_total = len(target_rows)
+    n_workers = _get_num_workers()
+
+    # 4. Elegir modo: paralelo si hay suficientes filas y mas de 1 worker
+    if n_total >= MATCH_PARALLEL_THRESHOLD and n_workers > 1:
+        match_results = _run_matching_parallel(target_rows, indices, n_workers)
+    else:
+        if n_workers > 1:
+            logger.info(
+                f"{prefix}{n_total:,} filas < {MATCH_PARALLEL_THRESHOLD:,} threshold, "
+                f"usando modo secuencial"
+            )
+        match_results = _run_matching_sequential(target_rows, indices)
+
+    # 5. Aplicar resultados a los dicts del target
+    n_matched = 0
+    for idx, clee in enumerate(match_results):
+        if clee is not None:
+            target_rows[idx]["clee_master"] = clee
+            n_matched += 1
+
+    logger.info(f"{prefix}{n_matched:,} matches encontrados en esta particion")
+
+    # 6. Reconstruir DataFrame con resultados
+    df_result = pl.DataFrame(target_rows).select(df_pending.columns)
+
+    # 7. Limpiar referencias globales (liberar KB para GC)
+    _shared_kb_clee_masters = []
+    _shared_kb_names = []
+    _shared_kb_razones = []
+    _shared_kb_acts = []
+    _shared_kb_tels = []
+    _shared_kb_emails = []
+    _shared_kb_wwws = []
+    _shared_kb_cps = []
+
+    return df_result
+
+
 def propagate_clees(
     df_target: pl.DataFrame,
     ref_kb: pl.DataFrame,
@@ -335,12 +438,20 @@ def propagate_clees(
     que aun no tienen clee_master contra una KB de un solo periodo de
     referencia (valores escalares, no listas acumuladas).
 
-    Algoritmo:
+    Si la KB excede KB_MAX_ROWS_PER_PARTITION filas, se divide en
+    particiones que se procesan secuencialmente. Cada particion construye
+    su propio BallTree y materializa su propia copia de _shared_kb_*.
+    Las filas que matchean en una particion ya no se evaluan en la
+    siguiente, reduciendo el trabajo progresivamente. No se pierde
+    ningun match potencial -- es funcionalmente equivalente a procesar
+    la KB completa, solo cambia el pico de RAM.
+
+    Algoritmo (por particion):
     1. Separa registros ya resueltos de pendientes (clee_master IS NULL)
-    2. Construye BallTree sobre ref_kb (max ~6M puntos)
+    2. Construye BallTree sobre la particion de KB
     3. Para cada pendiente, evalua vecinos espaciales con calculate_match_score()
     4. Si hay match -> asigna clee_master del vecino
-    5. Si no hay match -> deja clee_master como NULL (siguiente ronda lo intenta)
+    5. Si no hay match -> deja clee_master como NULL (siguiente particion o ronda)
 
     Paralelismo: Si hay mas de MATCH_PARALLEL_THRESHOLD filas pendientes,
     se usa multiprocessing para distribuir el loop de matching entre
@@ -362,10 +473,6 @@ def propagate_clees(
     Returns:
         df_target con clee_master parcialmente poblado donde hubo match.
     """
-    global _shared_kb_clee_masters, _shared_kb_names, _shared_kb_razones
-    global _shared_kb_acts, _shared_kb_tels, _shared_kb_emails
-    global _shared_kb_wwws, _shared_kb_cps
-
     # Separar resueltos de pendientes
     df_resolved = df_target.filter(
         (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
@@ -375,72 +482,61 @@ def propagate_clees(
     if df_pending.height == 0 or ref_kb.height == 0:
         return df_target
 
-    # 1. Pre-filtro espacial: BallTree sobre la KB de referencia
-    logger.info(
-        f"      BallTree: construyendo indice ({ref_kb.height:,} refs, "
-        f"{df_pending.height:,} target, radio={spatial_tol}m)..."
-    )
-    t0 = time.perf_counter()
-    indices, _ = find_spatial_neighbors(ref_kb, df_pending, spatial_tol)
-    t_bt = time.perf_counter() - t0
-    logger.info(f"      BallTree: completado en {t_bt:.1f}s")
-
-    # 2. Materializar KB a variables globales para acceso COW en workers
-    logger.info(f"      Materializando KB ({ref_kb.height:,} filas x 8 columnas)...")
-    t0 = time.perf_counter()
-    _shared_kb_clee_masters = ref_kb["clee_master"].to_list()
-    _shared_kb_names = ref_kb["nom_estab"].to_list()
-    _shared_kb_razones = ref_kb["raz_social"].to_list()
-    _shared_kb_acts = ref_kb["nombre_act"].to_list()
-    _shared_kb_tels = ref_kb["tel_clean"].to_list()
-    _shared_kb_emails = ref_kb["email_clean"].to_list()
-    _shared_kb_wwws = ref_kb["www_clean"].to_list()
-    _shared_kb_cps = ref_kb["cod_postal"].to_list()
-    t_mat = time.perf_counter() - t0
-    logger.info(f"      KB materializada en {t_mat:.1f}s")
-
-    # 3. Convertir target a lista de dicts para el loop
-    logger.info(f"      Preparando {df_pending.height:,} filas target para matching...")
-    t0 = time.perf_counter()
-    target_rows = df_pending.to_dicts()
-    t_dicts = time.perf_counter() - t0
-    logger.info(f"      Target preparado en {t_dicts:.1f}s")
-
-    n_total = len(target_rows)
-    n_workers = _get_num_workers()
-
-    # 4. Elegir modo: paralelo si hay suficientes filas y mas de 1 worker
-    if n_total >= MATCH_PARALLEL_THRESHOLD and n_workers > 1:
-        match_results = _run_matching_parallel(target_rows, indices, n_workers)
+    # Decidir si particionar la KB
+    if ref_kb.height <= KB_MAX_ROWS_PER_PARTITION:
+        # KB cabe en una sola particion -- logica directa (sin overhead)
+        df_pending = _propagate_single_kb(df_pending, ref_kb, spatial_tol)
     else:
-        if n_workers > 1:
-            logger.info(
-                f"      {n_total:,} filas < {MATCH_PARALLEL_THRESHOLD:,} threshold, "
-                f"usando modo secuencial"
+        # KB excede el umbral -- dividir en particiones secuenciales
+        n_partitions = (ref_kb.height + KB_MAX_ROWS_PER_PARTITION - 1) // KB_MAX_ROWS_PER_PARTITION
+        logger.info(
+            f"      KB grande ({ref_kb.height:,} filas) -> "
+            f"particionando en {n_partitions} sub-KBs "
+            f"de ~{KB_MAX_ROWS_PER_PARTITION:,} filas max"
+        )
+
+        for p_idx in range(n_partitions):
+            # Recalcular pendientes: filas ya matcheadas no se re-evaluan
+            still_pending = df_pending.filter(
+                (pl.col("clee_master").is_null()) | (pl.col("clee_master") == "")
             )
-        match_results = _run_matching_sequential(target_rows, indices)
+            already_matched = df_pending.filter(
+                (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+            )
 
-    # 5. Aplicar resultados a los dicts del target
-    n_matched = 0
-    for idx, clee in enumerate(match_results):
-        if clee is not None:
-            target_rows[idx]["clee_master"] = clee
-            n_matched += 1
+            if still_pending.height == 0:
+                logger.info(
+                    f"      Todas las filas resueltas tras particion {p_idx}/{n_partitions}. "
+                    f"Saltando particiones restantes."
+                )
+                break
 
-    # 6. Reconstruir DataFrame con resultados
-    df_newly_resolved = pl.DataFrame(target_rows).select(df_target.columns)
+            # Extraer particion de la KB
+            start = p_idx * KB_MAX_ROWS_PER_PARTITION
+            end = min(start + KB_MAX_ROWS_PER_PARTITION, ref_kb.height)
+            kb_partition = ref_kb.slice(start, end - start)
 
-    # 7. Limpiar referencias globales (liberar KB para GC cuando el caller haga del ref_kb)
-    _shared_kb_clee_masters = []
-    _shared_kb_names = []
-    _shared_kb_razones = []
-    _shared_kb_acts = []
-    _shared_kb_tels = []
-    _shared_kb_emails = []
-    _shared_kb_wwws = []
-    _shared_kb_cps = []
+            label = f"particion {p_idx + 1}/{n_partitions}"
+            logger.info(
+                f"      [{label}] KB slice: filas {start:,}-{end:,} "
+                f"({kb_partition.height:,} refs), "
+                f"{still_pending.height:,} pendientes"
+            )
 
-    return df_resolved.vstack(df_newly_resolved)
+            # Propagar contra esta particion
+            df_after = _propagate_single_kb(still_pending, kb_partition, spatial_tol, label)
+
+            # Liberar particion de KB
+            del kb_partition
+            gc.collect()
+
+            # Reunir: ya matcheados anteriormente + resultado de esta particion
+            df_pending = already_matched.vstack(df_after)
+
+            del df_after, still_pending, already_matched
+            gc.collect()
+
+    return df_resolved.vstack(df_pending)
 
 
 def assign_new_clees(

@@ -183,8 +183,9 @@ Defined in `clee_resolution_config.py`:
 | `LEGAL_NAME_MATCH_THRESH` | 80 | Direct match: legal name (razon social) |
 | `MIN_COMBINED_SIGNALS` | 2 | Combined match: minimum weak signals |
 | `PARTIAL_NAME_THRESH` | 60 | Partial name signal threshold |
-| `MATCH_WORKERS` | None (auto) | Multiprocessing worker count |
+| `MATCH_WORKERS` | 8 (env) | Multiprocessing worker count. Env: `MATCH_WORKERS` |
 | `MATCH_PARALLEL_THRESHOLD` | 50,000 | Minimum rows to activate multiprocessing |
+| `KB_MAX_ROWS_PER_PARTITION` | 1,500,000 (env) | Max KB rows before partitioning. Env: `KB_MAX_ROWS_PER_PARTITION` |
 
 ### Key Functions Reference
 
@@ -198,9 +199,10 @@ Defined in `clee_resolution_config.py`:
 | `_get_periods_with_clee_coverage()` | `clee_resolver.py:111` | Classifies periods as deterministic vs. probabilistic |
 | `_load_period()` | `clee_resolver.py:132` | Loads one period from Silver DuckDB |
 | `_write_period_results()` | `clee_resolver.py:166` | Writes clee_master back to DuckDB in 50K batches |
-| `build_single_period_kb()` | `entity_resolution.py:166` | Builds ephemeral KB from one reference period |
-| `propagate_clees()` | `entity_resolution.py:326` | Core propagation: BallTree + cascade scoring |
-| `assign_new_clees()` | `entity_resolution.py:446` | Assigns `NEW_{prefix}-{uuid12}` to unmatched rows |
+| `build_single_period_kb()` | `entity_resolution.py:168` | Builds ephemeral KB from one reference period |
+| `_propagate_single_kb()` | `entity_resolution.py:328` | Matching engine for one KB partition (BallTree + cascade) |
+| `propagate_clees()` | `entity_resolution.py:429` | Orchestrator: partitions KB if needed, delegates to `_propagate_single_kb` |
+| `assign_new_clees()` | `entity_resolution.py:542` | Assigns `NEW_{prefix}-{uuid12}` to unmatched rows |
 | `find_spatial_neighbors()` | `matching.py:40` | BallTree haversine spatial search |
 | `calculate_match_score()` | `matching.py:55` | Cascade matching: gate -> Path A/B/C |
 
