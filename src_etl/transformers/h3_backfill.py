@@ -16,6 +16,8 @@ Pipeline position: ingest -> normalize-dates -> h3-cells -> clee-resolution
 """
 
 import logging
+import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -26,7 +28,22 @@ from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_R
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
+# Logging dedicado: archivo propio + consola, independiente de como este
+# configurado el root logger (para que el progreso siempre sea visible al
+# correr `make h3-backfill` en terminal).
+_LOG_FILE = Path("./data/etl_h3_backfill.log")
+
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    _formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    _file_handler = logging.FileHandler(_LOG_FILE)
+    _file_handler.setFormatter(_formatter)
+    _stream_handler = logging.StreamHandler(sys.stdout)
+    _stream_handler.setFormatter(_formatter)
+    logger.addHandler(_file_handler)
+    logger.addHandler(_stream_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 # Filas elegibles: coordenadas presentes y dentro del dominio de h3
 # (h3_latlng_to_cell lanza error fuera de [-90,90]/[-180,180]).
@@ -41,6 +58,7 @@ UPDATE establecimientos
 SET h3_cell_9 = CAST(h3_latlng_to_cell(latitud, longitud, {H3_BLOCKING_RES}) AS BIGINT),
     h3_cell_5 = CAST(h3_latlng_to_cell(latitud, longitud, {H3_PARTITION_RES}) AS BIGINT)
 WHERE period = ?
+  AND {{state_clause}}
   AND {_COORDS_VALID_SQL}
   {{force_clause}}
 """
@@ -116,20 +134,91 @@ class H3CellBackfiller:
             """).fetchall()
         return [(r[0], r[1]) for r in rows]
 
-    def _backfill_period(self, period: date, force: bool) -> int:
+    def _get_pending_states(self, period: date, force: bool) -> list[tuple[str | None, int]]:
         """
-        Ejecuta el UPDATE de celdas H3 para un periodo.
+        Estados (cve_ent) con filas pendientes dentro de un periodo.
+
+        El batching por estado da dos cosas: progreso visible en consola
+        (32 ticks por periodo en vez de un UPDATE opaco de millones de
+        filas) y transacciones mas pequenhas (menos RAM pico por UPDATE).
 
         Returns:
-            Numero de filas actualizadas.
+            Lista de (cve_ent, filas_pendientes); cve_ent puede ser None.
+        """
+        null_clause = "" if force else "AND h3_cell_9 IS NULL"
+        with self._get_connection() as conn:
+            rows = conn.execute(f"""
+                SELECT cve_ent, COUNT(*) AS pending
+                FROM establecimientos
+                WHERE period = ?
+                  AND {_COORDS_VALID_SQL}
+                  {null_clause}
+                GROUP BY cve_ent
+                HAVING COUNT(*) > 0
+                ORDER BY cve_ent
+            """, [period]).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def _backfill_period(
+        self,
+        period: date,
+        force: bool,
+        progress: dict,
+    ) -> int:
+        """
+        Ejecuta el UPDATE de celdas H3 para un periodo, por lotes de estado.
+
+        Args:
+            period: Periodo a procesar.
+            force: Si True, recalcula todas las filas con coords validas.
+            progress: Estado mutable del avance global:
+                      {"done": filas ya procesadas, "total": filas totales,
+                       "t0": timestamp de inicio del run}.
+
+        Returns:
+            Numero de filas actualizadas en el periodo.
         """
         force_clause = "" if force else "AND h3_cell_9 IS NULL"
-        sql = _UPDATE_SQL_TEMPLATE.format(force_clause=force_clause)
+        states = self._get_pending_states(period, force)
+        period_updated = 0
 
         with self._get_connection() as conn:
-            result = conn.execute(sql, [period])
-            row = result.fetchone()
-            return row[0] if row else 0
+            for s_idx, (state, n_pending) in enumerate(states, start=1):
+                if state is None:
+                    state_clause = "cve_ent IS NULL"
+                    params: list = [period]
+                else:
+                    state_clause = "cve_ent = ?"
+                    params = [period, state]
+
+                sql = _UPDATE_SQL_TEMPLATE.format(
+                    state_clause=state_clause, force_clause=force_clause
+                )
+
+                t0 = time.perf_counter()
+                result = conn.execute(sql, params)
+                row = result.fetchone()
+                updated = row[0] if row else 0
+                elapsed = time.perf_counter() - t0
+
+                period_updated += updated
+                progress["done"] += updated
+
+                rate = updated / elapsed if elapsed > 0 else 0
+                pct = 100.0 * progress["done"] / progress["total"] if progress["total"] else 100.0
+                run_elapsed = time.perf_counter() - progress["t0"]
+                overall_rate = progress["done"] / run_elapsed if run_elapsed > 0 else 0
+                remaining = progress["total"] - progress["done"]
+                eta_min = (remaining / overall_rate / 60) if overall_rate > 0 else 0
+
+                logger.info(
+                    f"   {period} | edo {state or 'NULL'} ({s_idx}/{len(states)}): "
+                    f"{updated:,} filas en {elapsed:.1f}s ({rate:,.0f} filas/s) | "
+                    f"global {progress['done']:,}/{progress['total']:,} ({pct:.1f}%) "
+                    f"ETA ~{eta_min:.0f} min"
+                )
+
+        return period_updated
 
     def run(self, force: bool = False) -> bool:
         """
@@ -154,6 +243,9 @@ class H3CellBackfiller:
             f"(res {H3_BLOCKING_RES} + res {H3_PARTITION_RES}, "
             f"modo {'FORCE' if force else 'INCREMENTAL'})"
         )
+        logger.info(f"   Log detallado: {_LOG_FILE}")
+
+        progress = {"done": 0, "total": total_pending, "t0": time.perf_counter()}
 
         run_id = self.tracker.create_run(
             job_name="denue_h3_backfill",
@@ -166,6 +258,9 @@ class H3CellBackfiller:
         failed = False
 
         for idx, (period, n_pending) in enumerate(pending, start=1):
+            logger.info(
+                f"[{idx}/{len(pending)}] Periodo {period}: {n_pending:,} filas pendientes..."
+            )
             task_id = self.tracker.create_process_task(
                 run_id=run_id,
                 task_name=f"h3_cells_{period.isoformat()}",
@@ -176,7 +271,7 @@ class H3CellBackfiller:
             self.tracker.start_process_task(task_id)
 
             try:
-                updated = self._backfill_period(period, force)
+                updated = self._backfill_period(period, force, progress)
                 total_updated += updated
                 self.tracker.complete_process_task(
                     task_id=task_id,
@@ -184,7 +279,8 @@ class H3CellBackfiller:
                     rows_loaded=updated,
                 )
                 logger.info(
-                    f"   [{idx}/{len(pending)}] {period}: {updated:,} filas actualizadas"
+                    f"[{idx}/{len(pending)}] Periodo {period} completado: "
+                    f"{updated:,} filas actualizadas ✅"
                 )
             except Exception as e:
                 failed = True
