@@ -461,15 +461,42 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 ## Database
 
-### ORM Models (5 tables)
+### ORM Models (9 tables)
 
 | Model | Table | Primary Key | Rows |
 |-------|-------|------------|------|
 | `Establecimiento` | `establecimientos` | `id` (hash) | 100M+ |
-| `ActividadEconomica` | `denue_actividades_economicas` | `(codigo_act, nombre_act)` | 1,127 |
+| `ActividadEconomica` | `denue_actividades_economicas` | `codigo_act` | 1,127 |
+| `EstratoPersonal` | `denue_estratos_personal` | `per_ocu` | 8 |
+| `TipoVialidad` | `denue_tipos_vialidad` | `tipo_vial` | 39 |
+| `TipoAsentamiento` | `denue_tipos_asentamiento` | `tipo_asent` | 45 |
+| `TipoUnidadEconomica` | `denue_tipos_unidad_economica` | `tipounieco` | 3 |
 | `Entidad` | `denue_entidades` | `cve_ent` | 32 |
 | `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,478 |
 | `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 39,140 |
+
+### Domain normalization (no DuckDB ENUMs, no domain FKs on the fact table)
+
+The old DuckDB ENUM column types (`tipo_vial_type`, `tipo_asent_type`,
+`tipounieco_type`, `per_ocu_type`) were normalized away (migration
+`ae66f32a9bed`): those columns are plain VARCHAR and their domain lives in
+the `denue_tipos_*` / `denue_estratos_personal` catalog tables, seeded from
+the enums in `src_etl/db/enums.py` (single source of truth, loaders
+`dominios.py`/`estratos.py`).
+
+Linking strategy:
+- **Physical FKs**: only the 3 geography FKs (created with the table).
+  Deliberately NO FK from `establecimientos` to the domain/SCIAN catalogs:
+  every FK in DuckDB creates an implicit ART index on the referencing
+  columns (~77M rows -> massive writes measured ~1000x slower), and DuckDB
+  cannot `ALTER TABLE ... ADD CONSTRAINT` anyway.
+- **Integrity**: `EstablecimientoWriter.validate_integrity()` fail-fast
+  checks every ingested batch against `DOMAIN_CATALOGS` (derived from the
+  same enums that seed the catalogs).
+- **Navigation**: viewonly ORM relationships on `Establecimiento`
+  (`actividad`, `estrato`, `tipo_vialidad`, `tipo_asentamiento`,
+  `tipo_unidad`, `entidad`, `municipio`, `localidad`) declare the joins
+  without emitting FK DDL. In SQL, JOIN by the label columns directly.
 
 ### Establecimiento (40 columns)
 

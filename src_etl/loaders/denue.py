@@ -1,7 +1,7 @@
 import polars as pl
 
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
-from src_etl.utils.denue_schema import DB_FACT_COLUMNS, ENUM_CATALOGS
+from src_etl.utils.denue_schema import DB_FACT_COLUMNS, DOMAIN_CATALOGS
 from src_etl.utils.warehouse import DuckDBWarehouse, load_h3_extension
 
 
@@ -11,8 +11,15 @@ class EstablecimientoWriter(DuckDBWarehouse):
         self.table_id = "establecimientos"
 
     def validate_integrity(self, df: pl.DataFrame):
-        """Validador Fail-fast en Polars."""
-        for col, allowed in ENUM_CATALOGS.items():
+        """Validador fail-fast en Polars contra los dominios de catalogo.
+
+        Es la garantia de integridad referencial de las columnas de dominio
+        (tipo_vial/tipo_asent/tipounieco/per_ocu): se valida ANTES de
+        insertar en vez de con FKs fisicos sobre la tabla de hechos (cada FK
+        en DuckDB crea un indice ART implicito sobre 77M filas -- costo de
+        escritura medido ~1000x en este repo; ver AGENTS.md).
+        """
+        for col, allowed in DOMAIN_CATALOGS.items():
             if col not in df.columns:
                 continue
             invalid = (
@@ -32,16 +39,21 @@ class EstablecimientoWriter(DuckDBWarehouse):
         self.validate_integrity(df)
 
         with self._get_connection() as conn:
-            # DDL actualizado con nombres directos
+            # Columnas de dominio como VARCHAR: su dominio vive en los
+            # catalogos denue_tipos_* / denue_estratos_personal (sembrados
+            # de los mismos enums que valida validate_integrity), no en
+            # tipos ENUM de DuckDB. Sin FK fisico hacia esos catalogos a
+            # proposito (indice ART implicito por FK = escrituras masivas
+            # lentas); la integridad la da validate_integrity() pre-insert.
             conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.table_id} (
                     id VARCHAR PRIMARY KEY,
                     clee VARCHAR, clee_propagado_radio VARCHAR, clee_propagado_h3 VARCHAR,
                     nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
-                    tipo_vial tipo_vial_type,
-                    tipo_asent tipo_asent_type,
-                    tipounieco tipounieco_type,
-                    per_ocu per_ocu_type,
+                    tipo_vial VARCHAR,
+                    tipo_asent VARCHAR,
+                    tipounieco VARCHAR,
+                    per_ocu VARCHAR,
                     nom_vial VARCHAR, tipo_v_e_1 VARCHAR, nom_v_e_1 VARCHAR,
                     tipo_v_e_2 VARCHAR, nom_v_e_2 VARCHAR, tipo_v_e_3 VARCHAR,
                     nom_v_e_3 VARCHAR, numero_ext VARCHAR, letra_ext VARCHAR,

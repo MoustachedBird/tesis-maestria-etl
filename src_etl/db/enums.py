@@ -10,9 +10,11 @@ from enum import Enum
 
 class TipoVial(str, Enum):
     """
-    Road/Street Type Classifications (33 values).
+    Road/Street Type Classifications (39 values).
 
     Official INEGI catalog for types of thoroughfares and streets.
+    Single source of truth for the `denue_tipos_vialidad` catalog table and
+    the ingest-time domain validation (DOMAIN_CATALOGS in denue_schema.py).
     """
 
     NINGUNO = "NINGUNO"
@@ -45,6 +47,12 @@ class TipoVial(str, Enum):
     AUTOPISTA = "AUTOPISTA"
     BRECHA = "BRECHA"
     VEREDA = "VEREDA"
+    CALLE_DE_RODAJE = "CALLE DE RODAJE"
+    PUENTE = "PUENTE"
+    TUNEL = "TUNEL"
+    PASO_A_DESNIVEL = "PASO A DESNIVEL"
+    GLORIETA = "GLORIETA"
+    RAMPA = "RAMPA"
     LIBRAMIENTO = "LIBRAMIENTO"
     COSTERA = "COSTERA"
     OTRA = "OTRA (ESPECIFICAR)"
@@ -55,6 +63,8 @@ class TipoAsentamiento(str, Enum):
     Settlement Type Classifications (45 values).
 
     Official INEGI catalog for types of human settlements and zones.
+    Single source of truth for the `denue_tipos_asentamiento` catalog table
+    and the ingest-time domain validation (DOMAIN_CATALOGS in denue_schema.py).
     """
 
     NINGUNO = "NINGUNO"
@@ -109,11 +119,31 @@ class TipoUnidadEconomica(str, Enum):
     Economic Unit Type (3 values).
 
     Classification of establishment permanence type.
+    Single source of truth for the `denue_tipos_unidad_economica` catalog
+    table (label + descripcion) and the ingest-time domain validation.
     """
 
     NINGUNO = "NINGUNO"
     FIJO = "FIJO"  # Fixed/Permanent establishment
     SEMIFIJO = "SEMIFIJO"  # Semi-fixed/Temporary establishment
+
+    def get_descripcion(self) -> str:
+        """
+        Human-readable meaning of the permanence type.
+
+        Materialized into the `denue_tipos_unidad_economica` catalog so the
+        semantics live in SQL, not only in Python.
+
+        Examples:
+            >>> TipoUnidadEconomica.FIJO.get_descripcion()
+            'Establecimiento fijo (instalacion permanente)'
+        """
+        mapping = {
+            "NINGUNO": "No especificado",
+            "FIJO": "Establecimiento fijo (instalacion permanente)",
+            "SEMIFIJO": "Establecimiento semifijo (instalacion temporal o movil)",
+        }
+        return mapping[self.value]
 
 
 class PersonalOcupado(str, Enum):

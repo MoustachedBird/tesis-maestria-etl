@@ -2,7 +2,7 @@
 ENUM class tests.
 
 Tests for all 4 ENUM classes defined in src/db/enums.py:
-- TipoVial (33 values)
+- TipoVial (39 values)
 - TipoAsentamiento (45 values)
 - TipoUnidadEconomica (3 values)
 - PersonalOcupado (7 values + helper methods)
@@ -159,11 +159,20 @@ class TestPersonalOcupado:
 
 @pytest.mark.unit
 class TestTipoVial:
-    """Test TipoVial enum (33 road/street types)."""
+    """Test TipoVial enum (39 road/street types, aligned with DOMAIN_CATALOGS)."""
 
     def test_enum_values_count(self):
-        """Verify TipoVial has 33 values."""
-        assert len(TipoVial) == 33
+        """Verify TipoVial has 39 values (the full INEGI domain)."""
+        assert len(TipoVial) == 39
+
+    def test_infrastructure_road_types_exist(self):
+        """Values added when syncing with the ingest domain (DOMAIN_CATALOGS)."""
+        assert TipoVial.CALLE_DE_RODAJE.value == "CALLE DE RODAJE"
+        assert TipoVial.PUENTE.value == "PUENTE"
+        assert TipoVial.TUNEL.value == "TUNEL"
+        assert TipoVial.PASO_A_DESNIVEL.value == "PASO A DESNIVEL"
+        assert TipoVial.GLORIETA.value == "GLORIETA"
+        assert TipoVial.RAMPA.value == "RAMPA"
 
     def test_common_road_types_exist(self):
         """Test most common road types exist."""

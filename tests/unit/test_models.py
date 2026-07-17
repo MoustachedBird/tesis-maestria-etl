@@ -74,43 +74,10 @@ class TestEstablecimientoHelpers:
         """Test coordinate validation when coordinates are None."""
         assert sample_establecimiento_minimal.is_valid_location is False
 
-    def test_get_employee_range(self, sample_establecimiento):
-        """Test employee range parsing from ENUM."""
-        min_emp, max_emp = sample_establecimiento.get_employee_range()
-
-        assert min_emp == 11
-        assert max_emp == 30
-
-    def test_get_employee_range_micro(self, sample_establecimiento_minimal):
-        """Test employee range for micro business."""
-        min_emp, max_emp = sample_establecimiento_minimal.get_employee_range()
-
-        assert min_emp == 0
-        assert max_emp == 5
-
-    def test_get_business_size_small(self, sample_establecimiento):
-        """Test business size categorization for small business."""
-        size = sample_establecimiento.get_business_size()
-
-        assert size == "Small"
-
-    def test_get_business_size_micro(self, sample_establecimiento_minimal):
-        """Test business size categorization for micro business."""
-        size = sample_establecimiento_minimal.get_business_size()
-
-        assert size == "Micro"
-
-    def test_get_scian_sector(self, sample_establecimiento):
-        """Test SCIAN sector extraction (2 digits)."""
-        sector = sample_establecimiento.get_scian_sector()
-
-        assert sector == "72"
-
-    def test_get_scian_subsector(self, sample_establecimiento):
-        """Test SCIAN subsector extraction (3 digits)."""
-        subsector = sample_establecimiento.get_scian_subsector()
-
-        assert subsector == "722"
+    # NOTA: los tests de get_employee_range/get_business_size/
+    # get_scian_sector/get_scian_subsector se eliminaron junto con esos
+    # helpers: su semantica vive en los catalogos denue_estratos_personal y
+    # denue_actividades_economicas (ver tests/unit/test_dominio_catalogs.py).
 
     def test_is_fixed_establishment_true(self, sample_establecimiento):
         """Test fixed establishment check (permanent)."""
@@ -424,14 +391,9 @@ class TestQueries:
             is_valid = real_sample_establecimiento.is_valid_location
             assert isinstance(is_valid, bool)
 
-        # Test employee range
+        # Test domain values (semantics now live in the catalog tables)
         if real_sample_establecimiento.per_ocu:
-            min_emp, max_emp = real_sample_establecimiento.get_employee_range()
-            assert min_emp >= 0
-            assert max_emp >= min_emp
+            assert isinstance(real_sample_establecimiento.per_ocu, str)
 
-        # Test SCIAN sector
         if real_sample_establecimiento.codigo_act:
-            sector = real_sample_establecimiento.get_scian_sector()
-            assert sector is not None
-            assert len(sector) == 2
+            assert len(real_sample_establecimiento.codigo_act) >= 2

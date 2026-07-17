@@ -18,6 +18,9 @@ Usage:
 
 from pathlib import Path
 
+from src_etl.loaders.dominios import (
+    load_seeds_sqlalchemy as load_dominios,
+)
 from src_etl.loaders.estratos import (
     load_seeds_sqlalchemy as load_estratos,
 )
@@ -86,6 +89,11 @@ def seed_catalog_tables(
         print("\n  Personnel strata catalog...")
         estratos_stats = load_estratos(connection)
         stats.update(estratos_stats)
+
+        # 4. Domain-type catalogs (generated from enums, no parquet)
+        print("\n  Domain-type catalogs (vialidad/asentamiento/unidad)...")
+        dominios_stats = load_dominios(connection)
+        stats.update(dominios_stats)
 
         print("\n" + "=" * 70)
         print("All Seed Data Loaded Successfully")

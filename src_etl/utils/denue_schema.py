@@ -2,6 +2,13 @@
 Constants and configurations for DENUE data normalization.
 """
 
+from src_etl.db.enums import (
+    PersonalOcupado,
+    TipoAsentamiento,
+    TipoUnidadEconomica,
+    TipoVial,
+)
+
 # MASTER SCHEMA: Todas las columnas que deben existir en el Warehouse final.
 MASTER_COLUMNS = [
     "id",
@@ -57,10 +64,10 @@ DB_FACT_COLUMNS = [
     "nom_estab",
     "raz_social",
     "codigo_act",
-    "tipo_vial",  # enum
-    "tipo_asent",  # enum
-    "tipounieco",  # enum
-    "per_ocu",  # enum
+    "tipo_vial",  # dominio: catalogo denue_tipos_vialidad
+    "tipo_asent",  # dominio: catalogo denue_tipos_asentamiento
+    "tipounieco",  # dominio: catalogo denue_tipos_unidad_economica
+    "per_ocu",  # dominio: catalogo denue_estratos_personal
     "nom_vial",
     "tipo_v_e_1",
     "nom_v_e_1",
@@ -186,104 +193,17 @@ ENTITY_VALUE_NORMALIZATION = {
     "EDO. DE MÉXICO": "ESTADO DE MÉXICO",
 }
 
-ENUM_CATALOGS = {
-    "tipo_vial": [
-        "NINGUNO",
-        "SIN REFERENCIA",
-        "ANDADOR",
-        "AMPLIACION",
-        "AVENIDA",
-        "BOULEVARD",
-        "CALLE",
-        "CALLEJON",
-        "CALZADA",
-        "CAMINO",
-        "CARRETERA",
-        "CERRADA",
-        "CIRCUITO",
-        "CIRCUNVALACION",
-        "CONTINUACION",
-        "CORREDOR",
-        "DIAGONAL",
-        "EJE VIAL",
-        "PASAJE",
-        "PEATONAL",
-        "PERIFERICO",
-        "PLAZA",
-        "PRIVADA",
-        "PROLONGACION",
-        "RETORNO",
-        "TERRACERIA",
-        "VIADUCTO",
-        "AUTOPISTA",
-        "BRECHA",
-        "VEREDA",
-        "CALLE DE RODAJE",
-        "PUENTE",
-        "TUNEL",
-        "PASO A DESNIVEL",
-        "GLORIETA",
-        "RAMPA",
-        "LIBRAMIENTO",
-        "COSTERA",
-        "OTRA (ESPECIFICAR)",
-    ],
-    "tipo_asent": [
-        "NINGUNO",
-        "AEROPUERTO",
-        "AMPLIACION",
-        "BARRIO",
-        "CANTON",
-        "CIUDAD",
-        "CIUDAD INDUSTRIAL",
-        "COLONIA",
-        "CONDOMINIO",
-        "CONJUNTO HABITACIONAL",
-        "CORREDOR INDUSTRIAL",
-        "COTO",
-        "CUARTEL",
-        "EJIDO",
-        "EXHACIENDA",
-        "FRACCION",
-        "FRACCIONAMIENTO",
-        "GRANJA",
-        "HACIENDA",
-        "INGENIO",
-        "MANZANA",
-        "PARAJE",
-        "PARQUE INDUSTRIAL",
-        "PRIVADA",
-        "PROLONGACION",
-        "PUEBLO",
-        "PUERTO",
-        "RANCHO",
-        "RANCHERIA",
-        "REGION",
-        "RESIDENCIAL",
-        "RINCONADA",
-        "SECCION",
-        "SECTOR",
-        "SUPERMANZANA",
-        "UNIDAD",
-        "UNIDAD HABITACIONAL",
-        "VILLA",
-        "ZONA FEDERAL",
-        "ZONA INDUSTRIAL",
-        "ZONA MILITAR",
-        "ZONA NAVAL",
-        "LOCALIDAD",
-        "PARQUE",
-        "OTRA (ESPECIFICAR)",
-    ],
-    "tipounieco": ["NINGUNO", "FIJO", "SEMIFIJO"],
-    "per_ocu": [
-        "NINGUNO",
-        "0 A 5 PERSONAS",
-        "6 A 10 PERSONAS",
-        "11 A 30 PERSONAS",
-        "31 A 50 PERSONAS",
-        "51 A 100 PERSONAS",
-        "101 A 250 PERSONAS",
-        "251 Y MAS PERSONAS",
-    ],
+DOMAIN_CATALOGS = {
+    "tipo_vial": [t.value for t in TipoVial],
+    "tipo_asent": [t.value for t in TipoAsentamiento],
+    "tipounieco": [t.value for t in TipoUnidadEconomica],
+    "per_ocu": [t.value for t in PersonalOcupado],
 }
+"""Dominios validos por columna de establecimientos (columna -> valores).
+
+DERIVADO de los enums de `src_etl/db/enums.py` (fuente unica de verdad;
+los mismos enums siembran las tablas de catalogo `denue_tipos_*` y
+`denue_estratos_personal`). Usado por `EstablecimientoWriter.
+validate_integrity()` como validacion fail-fast en el ingest: sustituye a
+los antiguos tipos ENUM de DuckDB (migracion que normaliza las columnas a
+VARCHAR + catalogo relacionado)."""

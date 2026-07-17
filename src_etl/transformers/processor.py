@@ -17,12 +17,12 @@ import polars as pl
 from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
 from src_etl.loaders.denue import EstablecimientoWriter
+from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_etl.utils.denue_schema import (
     COLUMN_ALIASES,
     ENTITY_VALUE_NORMALIZATION,
-    ENUM_CATALOGS,
     MASTER_COLUMNS,
     REQUIRED_COLUMNS,
 )
@@ -144,6 +144,12 @@ class BronzeToSilverProcessor:
         Delegates to domain-specific loaders:
         - geography: entidades, municipios, localidades
         - scian: actividades_economicas
+        - dominios: tipos_vialidad, tipos_asentamiento, tipos_unidad_economica
+
+        Los dominios de tipo son tablas de catalogo (denue_tipos_*), NO tipos
+        ENUM de DuckDB: el dominio es dato consultable/evolucionable, y la
+        validacion fail-fast del ingest la hace validate_integrity() con
+        DOMAIN_CATALOGS (derivado de los mismos enums que siembran las tablas).
         """
         seeds_dir = self.data_root / "seeds"
 
@@ -152,18 +158,10 @@ class BronzeToSilverProcessor:
                 logger.warning("Dropping fact table for integrity constraint reset...")
                 conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
 
-            # Create ENUM types
-            for name, values in ENUM_CATALOGS.items():
-                type_name = f"{name}_type"
-                if not conn.execute(
-                    f"SELECT 1 FROM pg_type WHERE typname = '{type_name}'"
-                ).fetchone():
-                    vals_sql = ", ".join([f"'{v}'" for v in values])
-                    conn.execute(f"CREATE TYPE {type_name} AS ENUM ({vals_sql})")
-
             # Load seed catalogs via loaders
             load_geography_seeds(conn, seeds_dir, force=force)
             load_scian_seeds(conn, seeds_dir, force=force)
+            load_dominios_seeds(conn, force=force)
 
     def _clean_raw_data(self, zip_path: Path, period: str) -> tuple[pl.DataFrame, dict[str, Any]]:
         """

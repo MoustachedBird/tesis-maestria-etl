@@ -445,6 +445,46 @@ de los CSV de INEGI (no normalizar Silver).
       (2026-07-16) sin errores — catálogo SCIAN normalizado + estratos
       sembrados. Gold hereda en el próximo `make load`.
 
+## N2.5 — Normalización de dominios ENUM + linkeo de catálogos (2026-07-17)
+
+Los 4 dominios de tipo vivían como tipos ENUM de DuckDB en `establecimientos`
+y los catálogos nuevos (p. ej. `denue_estratos_personal`) no se relacionaban
+con nada. Normalizado:
+
+- [x] 3 catálogos nuevos sembrados desde los enums (fuente única,
+      `loaders/dominios.py`): `denue_tipos_vialidad` (39),
+      `denue_tipos_asentamiento` (45), `denue_tipos_unidad_economica`
+      (3, con `descripcion` — semántica FIJO/SEMIFIJO ahora en SQL).
+- [x] Migración `ae66f32a9bed`: crea+siembra catálogos, convierte las 4
+      columnas ENUM → VARCHAR (datos preservados) y borra los tipos.
+      Maneja 3 limitaciones de DuckDB verificadas: ALTER bloqueado por
+      CUALQUIER índice de usuario (baile drop→recrear), DROP INDEX debe
+      commitearse antes del ALTER (commit intermedio a nivel DBAPI), y
+      DROP TYPE con dependencia fantasma de sesión (best-effort).
+- [x] `TipoVial` (enums.py) sincronizado con el dominio real del ingest:
+      33 → 39 valores (faltaban CALLE DE RODAJE, PUENTE, TUNEL, PASO A
+      DESNIVEL, GLORIETA, RAMPA); `ENUM_CATALOGS` → `DOMAIN_CATALOGS`,
+      ahora DERIVADO de los enums (antes lista duplicada a mano).
+- [x] **Linkeo**: relationships viewonly en `Establecimiento` (`actividad`,
+      `estrato`, `tipo_vialidad`, `tipo_asentamiento`, `tipo_unidad`,
+      `entidad`, `municipio`, `localidad`). SIN FK físico hacia los
+      catálogos de dominio A PROPÓSITO: cada FK en DuckDB crea un índice
+      ART implícito sobre 77M filas (escrituras ~1000x más lentas, medido)
+      y DuckDB no soporta ADD CONSTRAINT. Integridad = validate_integrity()
+      del ingest (mismo dominio que siembra los catálogos). FKs de
+      geografía (físicos, preexistentes) se conservan.
+- [x] Helpers redundantes de `Establecimiento` podados (get_employee_range,
+      get_business_size, get_scian_sector/subsector — ítem de la auditoría
+      de código muerto): esa semántica vive en los catálogos.
+- [x] Writer DDL → VARCHAR; `_bootstrap_seeds` ya no crea tipos ENUM y
+      siembra los dominios. Verificado: cadena de 8 migraciones desde cero,
+      ciclo downgrade→upgrade, y simulación del Silver real (columnas ENUM
+      + índice + datos → convertido con datos intactos y JOINs funcionando).
+      Tests nuevos `test_dominio_catalogs.py` (11); suite 168 en verde.
+- [ ] **Aplicar al Silver real: `make db-migrate` (lo corre el usuario)**.
+      Nota: recrea `ix_estab_h3_9` (77M filas, varios minutos). Después,
+      `make load` propaga el esquema a Gold.
+
 ## N3 — Dimensión de entidad económica (la clave para la tesis)
 
 Depende de que la resolución CLEE esté estable. Es la misma tabla que la
