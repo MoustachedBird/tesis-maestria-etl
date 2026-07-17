@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -30,6 +31,47 @@ def connect_configured(
     conn.execute(f"SET memory_limit='{settings.DUCKDB_MEMORY_LIMIT}'")
     conn.execute(f"SET threads={settings.DUCKDB_THREADS}")
     return conn
+
+
+def load_h3_extension(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+    """
+    Carga la extension comunitaria h3 en una conexion (instala si falta).
+
+    Punto unico para el patron LOAD/INSTALL: lo usan el backfill de celdas
+    (h3_backfill) y el INSERT del ingest (EstablecimientoWriter).
+    """
+    try:
+        conn.execute("LOAD h3")
+    except duckdb.Error:
+        conn.execute("INSTALL h3 FROM community; LOAD h3")
+    return conn
+
+
+def get_distinct_periods(
+    conn: duckdb.DuckDBPyConnection,
+    descending: bool = False,
+) -> list[date]:
+    """
+    Periodos distintos de establecimientos, ordenados cronologicamente.
+
+    Query unica compartida por los stages (antes existian 3 variantes:
+    clee_resolver, date_normalizer y h3_backfill implementaban cada uno
+    la suya).
+
+    Args:
+        conn: Conexion DuckDB abierta al Silver.
+        descending: True = mas reciente primero (orden del resolver CLEE).
+
+    Returns:
+        Lista de dates de periodo.
+    """
+    order = "DESC" if descending else "ASC"
+    rows = conn.execute(f"""
+        SELECT DISTINCT period FROM establecimientos
+        WHERE period IS NOT NULL
+        ORDER BY period {order}
+    """).fetchall()
+    return [r[0] for r in rows]
 
 
 class DuckDBWarehouse:

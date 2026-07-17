@@ -322,3 +322,51 @@ def get_logger(name: str | None = None) -> structlog.BoundLogger:
     if name:
         return structlog.get_logger(name)
     return structlog.get_logger()
+
+
+def get_stage_logger(name: str, log_file: Path) -> "logging.Logger":
+    """
+    Logger estandar de stage: archivo dedicado + consola, sin side effects.
+
+    Punto UNICO de configuracion de logging para los stages del transform
+    (normalize-dates, h3-cells, ingest, etc.). Reemplaza los
+    `logging.basicConfig()` a nivel de modulo que existian en varios
+    stages: aquellos configuraban el ROOT logger de todo el proceso al
+    importar (gana el primero importado), pisandose entre si. Este helper
+    configura solo el logger nombrado, con `propagate=False` para no
+    duplicar lineas si el root tambien tiene handlers.
+
+    Idempotente: si el logger ya tiene handlers, se retorna tal cual
+    (seguro llamarlo en cada import del modulo).
+
+    Args:
+        name: Nombre del logger (usar __name__ del modulo del stage).
+        log_file: Archivo de log dedicado del stage (ej. data/etl_h3.log).
+
+    Returns:
+        logging.Logger configurado con FileHandler + StreamHandler(stdout).
+
+    Example:
+        >>> logger = get_stage_logger(__name__, Path("./data/etl_process.log"))
+        >>> logger.info("stage started")
+    """
+    import logging as _logging
+    import sys as _sys
+
+    logger = _logging.getLogger(name)
+    if logger.handlers:
+        return logger
+
+    formatter = _logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = _logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    stream_handler = _logging.StreamHandler(_sys.stdout)
+    stream_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+    logger.setLevel(_logging.INFO)
+    logger.propagate = False
+    return logger

@@ -29,7 +29,6 @@ import polars as pl
 from src_etl.utils.clee_resolution_config import (
     SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,
-    TEXT_COLS_TO_SANITIZE,
 )
 from src_etl.utils.entity_resolution import (
     assign_new_clees,
@@ -38,7 +37,7 @@ from src_etl.utils.entity_resolution import (
     propagate_clees,
 )
 from src_etl.utils.matching import clean_contact_columns
-from src_etl.utils.warehouse import connect_configured
+from src_etl.utils.warehouse import connect_configured, get_distinct_periods
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
@@ -105,14 +104,7 @@ class CLEEResolver:
             Example: [date(2024, 11, 1), date(2024, 5, 1), ...]
         """
         with self._get_connection() as conn:
-            rows = conn.execute("""
-                SELECT DISTINCT period
-                FROM establecimientos
-                WHERE period IS NOT NULL
-                ORDER BY period DESC
-            """).fetchall()
-
-        return [r[0] for r in rows]
+            return get_distinct_periods(conn, descending=True)
 
     def _get_periods_with_clee_coverage(self) -> dict[date, bool]:
         """
@@ -157,11 +149,8 @@ class CLEEResolver:
         if df.is_empty():
             return df
 
-        # Sanitize nulls in text columns
-        df = df.with_columns(
-            [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in df.columns]
-        )
-
+        # clean_contact_columns es el punto unico de sanitizacion
+        # (rellena nulos de texto + deriva tel/email/www _clean)
         return clean_contact_columns(df)
 
     # ------------------------------------------------------------------

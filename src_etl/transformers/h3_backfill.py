@@ -15,35 +15,21 @@ como de computo para periodos nuevos en cada corrida del transform.
 Pipeline position: ingest -> normalize-dates -> h3-cells -> clee-resolution
 """
 
-import logging
-import sys
 import time
 from datetime import date
 from pathlib import Path
 
 import duckdb
 
+from src_etl.core.logging import get_stage_logger
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
-from src_etl.utils.warehouse import connect_configured
+from src_etl.utils.warehouse import connect_configured, load_h3_extension
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
-# Logging dedicado: archivo propio + consola, independiente de como este
-# configurado el root logger (para que el progreso siempre sea visible al
-# correr `make h3-backfill` en terminal).
 _LOG_FILE = Path("./data/etl_h3_backfill.log")
 
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    _formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    _file_handler = logging.FileHandler(_LOG_FILE)
-    _file_handler.setFormatter(_formatter)
-    _stream_handler = logging.StreamHandler(sys.stdout)
-    _stream_handler.setFormatter(_formatter)
-    logger.addHandler(_file_handler)
-    logger.addHandler(_stream_handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+logger = get_stage_logger(__name__, _LOG_FILE)
 
 # Filas elegibles: coordenadas presentes y dentro del dominio de h3
 # (h3_latlng_to_cell lanza error fuera de [-90,90]/[-180,180]).
@@ -53,10 +39,18 @@ _COORDS_VALID_SQL = """
     AND longitud BETWEEN -180 AND 180
 """
 
+# h3_cell_5 se deriva como PADRE de h3_cell_9 (no directo del punto):
+# la jerarquia H3 no es perfectamente anidada y ~6.5% de los puntos cerca
+# de bordes caen en un res-5 distinto al padre de su res-9. Para el
+# particionado de Fase 4 necesitamos que todas las filas de una misma
+# celda de blocking (res 9) compartan particion (res 5) -- eso solo lo
+# garantiza cell_to_parent.
 _UPDATE_SQL_TEMPLATE = f"""
 UPDATE establecimientos
 SET h3_cell_9 = CAST(h3_latlng_to_cell(latitud, longitud, {H3_BLOCKING_RES}) AS BIGINT),
-    h3_cell_5 = CAST(h3_latlng_to_cell(latitud, longitud, {H3_PARTITION_RES}) AS BIGINT)
+    h3_cell_5 = CAST(h3_cell_to_parent(
+        h3_latlng_to_cell(latitud, longitud, {H3_BLOCKING_RES}), {H3_PARTITION_RES}
+    ) AS BIGINT)
 WHERE period = ?
   AND {{state_clause}}
   AND {_COORDS_VALID_SQL}
@@ -99,12 +93,7 @@ class H3CellBackfiller:
         settings aplicados (el UPDATE sobre periodos de millones de filas
         no debe rebasar el presupuesto de RAM de la maquina).
         """
-        conn = connect_configured(self.silver_db_path)
-        try:
-            conn.execute("LOAD h3")
-        except duckdb.Error:
-            conn.execute("INSTALL h3 FROM community; LOAD h3")
-        return conn
+        return load_h3_extension(connect_configured(self.silver_db_path))
 
     def _get_pending_periods(self, force: bool) -> list[tuple[date, int]]:
         """

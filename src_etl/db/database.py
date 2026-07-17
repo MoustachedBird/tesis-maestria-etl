@@ -170,7 +170,3 @@ def drop_db() -> None:
 
     engine = get_engine()
     Base.metadata.drop_all(bind=engine)
-
-
-# For backward compatibility with existing code
-DuckDBWarehouse = get_db

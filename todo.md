@@ -85,19 +85,24 @@ columnas ausentes → `""`).
 - [x] Smoke test en DuckDB scratch: coords válidas pobladas, nulas/fuera
       de rango saltadas, filas ya pobladas intactas, celdas idénticas a
       h3-py, re-run idempotente (0 pendientes).
-- [ ] **Backfill del Silver real (~100M filas): BLOQUEADO — DBeaver
-      mantiene lock sobre `data/silver/denue.duckdb`.** Cerrar la conexión
-      de DBeaver y correr `make h3-backfill`.
-- [ ] Verificación post-backfill: % de filas con celda no nula ≈ % con
-      coords válidas; spot-check de celdas contra h3-py.
-- [ ] **Computar columnas derivadas en el INSERT del ingest, no en UPDATE**
-      (decisión 2026-07-17, tras confirmar que el UPDATE de DuckDB tiene
-      sink single-thread + costo de índice ART): al ingerir un periodo
-      nuevo, calcular `h3_cell_9`/`h3_cell_5` (y evaluar `fecha_alta_date`)
-      en el DataFrame de Polars ANTES del INSERT — las filas nacen
-      completas, los stages h3-cells/normalize-dates quedan como red de
-      seguridad incremental y desaparece el write-path lento para datos
-      nuevos. Tocar `processor.py`/`EstablecimientoWriter`.
+- [x] Backfill del Silver real completado por el usuario (2026-07-17):
+      76,758,727/76,758,727 filas, 19 periodos, 100% de coords válidas.
+- [x] Verificación post-backfill: celdas no nulas == filas con coords
+      válidas (76.7M); spot-check 2,000 filas vs h3-py: res-9 idéntica.
+      **Hallazgo**: la res-5 directa del punto difería del padre de la
+      res-9 en 6.52% de filas (la jerarquía H3 no anida perfecto).
+      Corregido: `h3_cell_5 := parent(h3_cell_9)` (5,002,823 filas en 1s —
+      sin índice sobre h3_cell_5 no hay mantenimiento ART; confirma que
+      la lentitud del backfill era 100% el índice). SQL del backfill
+      actualizado para usar `h3_cell_to_parent` en futuras corridas.
+- [x] **Columnas H3 computadas en el INSERT del ingest**
+      (`EstablecimientoWriter.upsert`): expresiones h3 vectorizadas por
+      DuckDB dentro del INSERT SELECT (guard de coords válidas, NULL si
+      faltan), DDL del writer actualizado. Los periodos nuevos nacen con
+      celdas; el stage h3-cells queda como red de seguridad incremental.
+      `fecha_alta_date` se queda en normalize-dates a propósito: portar
+      el parser de 6 formatos a Polars duplicaría la lógica en dos
+      motores (va contra la centralización).
 
 ## Fase 4 — Reemplazar BallTree por blocking H3
 
@@ -270,24 +275,23 @@ vivir en UN lugar. Hallazgos ordenados por valor.
 
 ## Duplicado transversal — centralizar
 
-- [ ] **Setup de logging repetido 3 veces con efectos colaterales**:
-      `date_normalizer.py:25` y `processor.py:35` llaman
-      `logging.basicConfig()` A NIVEL DE MÓDULO (side effect al importar:
-      el primero que se importa gana y configura el root logger para todo
-      el proceso); `h3_backfill.py` usa handlers dedicados; el extractor
-      usa `core/logging.py` (structlog). Acción: helper único
-      `get_stage_logger(name, log_file)` en `core/logging.py` (patrón
-      handlers-dedicados + propagate=False, como h3_backfill) y eliminar
-      los `basicConfig` de módulo.
-- [ ] **Query de periodos implementada 3 veces**:
-      `clee_resolver._get_sorted_periods()` (DESC),
-      `date_normalizer._get_all_periods()` (ASC),
-      `h3_backfill._get_pending_periods()` (con agregado). Acción: util
-      compartida `get_periods(conn, order)` en `utils/warehouse.py`.
-- [ ] **Sanitización de nulos en 3 lugares**: `TEXT_COLS_TO_SANITIZE` en
-      `_load_period()`, `fill_null` dentro de `clean_contact_columns()`,
-      y relleno en `build_single_period_kb()`. Acción: consolidar en
-      `clean_contact_columns()` como único punto de sanitización.
+- [x] **Logging centralizado** (2026-07-17): helper único
+      `get_stage_logger(name, log_file)` en `core/logging.py` (handlers
+      dedicados + propagate=False). Eliminados los `logging.basicConfig()`
+      a nivel de módulo de `date_normalizer` y `processor` (configuraban
+      el root logger de todo el proceso al importar); `h3_backfill`
+      migrado al helper. Regla: stages nuevos usan `get_stage_logger`.
+- [x] **Query de periodos unificada**: `get_distinct_periods(conn,
+      descending)` en `utils/warehouse.py`, usada por `clee_resolver` y
+      `date_normalizer`. (La de `h3_backfill` es un agregado por periodo
+      con filtros propios — query distinta, se queda.)
+- [x] **Sanitización consolidada**: `clean_contact_columns()` es el punto
+      único (rellena `TEXT_COLS_TO_SANITIZE` presentes + deriva
+      tel/email/www `_clean`); `_load_period()` ya no duplica el fill.
+      El relleno de `build_single_period_kb()` se conserva como defensa
+      del path de KB cacheada (parquet externo).
+- [x] **`load_h3_extension(conn)`** en `utils/warehouse.py`: patrón
+      LOAD/INSTALL en un solo lugar (usado por h3_backfill y el writer).
 - [ ] (Opcional, valor medio) Boilerplate de stage repetido: create_run →
       task por periodo → complete_run en `date_normalizer`, `h3_backfill`
       y `clee_resolver`. Un `StageRunner` lo unificaría; evaluar si vale
@@ -300,9 +304,9 @@ vivir en UN lugar. Hallazgos ordenados por valor.
 
 ## Código muerto / borrable
 
-- [ ] `db/database.py:176`: alias `DuckDBWarehouse = get_db` ("backward
-      compatibility") — 0 usos, y colisiona de nombre con
-      `utils.warehouse.DuckDBWarehouse` (¡son cosas distintas!). Borrar.
+- [x] `db/database.py`: alias muerto `DuckDBWarehouse = get_db` eliminado
+      (2026-07-17) — 0 usos y colisionaba de nombre con
+      `utils.warehouse.DuckDBWarehouse`.
 - [ ] `AGENTS.md` referencia `src_etl/transformers/_legacy/` que YA NO
       existe. Actualizar layout (junto con lo demás pendiente de Fase 6).
 - [ ] (Opcional) Helpers de `Establecimiento` en `models.py`: 10 métodos

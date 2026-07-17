@@ -1,7 +1,8 @@
 import polars as pl
 
+from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
 from src_etl.utils.denue_schema import DB_FACT_COLUMNS, ENUM_CATALOGS
-from src_etl.utils.warehouse import DuckDBWarehouse
+from src_etl.utils.warehouse import DuckDBWarehouse, load_h3_extension
 
 
 class EstablecimientoWriter(DuckDBWarehouse):
@@ -52,6 +53,7 @@ class EstablecimientoWriter(DuckDBWarehouse):
                     correoelec VARCHAR, www VARCHAR,
                     latitud DOUBLE, longitud DOUBLE,
                     fecha_alta_str VARCHAR, fecha_alta_date DATE, period DATE NOT NULL,
+                    h3_cell_9 BIGINT, h3_cell_5 BIGINT,
                     FOREIGN KEY (cve_ent) REFERENCES denue_entidades(cve_ent),
                     FOREIGN KEY (cve_ent, cve_mun) REFERENCES denue_municipios(cve_ent, cve_mun),
                     FOREIGN KEY (cve_ent, cve_mun, cve_loc) REFERENCES denue_localidades(cve_ent, cve_mun, cve_loc)
@@ -59,11 +61,32 @@ class EstablecimientoWriter(DuckDBWarehouse):
             """)
 
             # Build column list and SELECT expressions, using NULL for missing columns
-            cols_sql = ", ".join(DB_FACT_COLUMNS)
             select_exprs = [
                 col if col in df.columns else f"NULL AS {col}" for col in DB_FACT_COLUMNS
             ]
-            select_sql = ", ".join(select_exprs)
+
+            # Celdas H3 calculadas EN el INSERT (vectorizado por DuckDB):
+            # las filas nacen completas y el stage h3-cells queda solo como
+            # red de seguridad incremental. Evita el write-path lento de
+            # UPDATE (sink single-thread + mantenimiento de indice ART).
+            # h3_cell_5 = padre de h3_cell_9 (la jerarquia H3 no anida
+            # perfecto; el padre garantiza co-particion en Fase 4).
+            if "latitud" in df.columns and "longitud" in df.columns:
+                load_h3_extension(conn)
+                coords_ok = (
+                    "latitud BETWEEN -90 AND 90 AND longitud BETWEEN -180 AND 180"
+                )
+                cell9 = f"h3_latlng_to_cell(latitud, longitud, {H3_BLOCKING_RES})"
+                h3_exprs = [
+                    f"CASE WHEN {coords_ok} THEN CAST({cell9} AS BIGINT) END AS h3_cell_9",
+                    f"CASE WHEN {coords_ok} THEN CAST(h3_cell_to_parent({cell9}, "
+                    f"{H3_PARTITION_RES}) AS BIGINT) END AS h3_cell_5",
+                ]
+            else:
+                h3_exprs = ["NULL AS h3_cell_9", "NULL AS h3_cell_5"]
+
+            cols_sql = ", ".join(DB_FACT_COLUMNS + ["h3_cell_9", "h3_cell_5"])
+            select_sql = ", ".join(select_exprs + h3_exprs)
             conn.execute(
                 f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {select_sql} FROM df"
             )

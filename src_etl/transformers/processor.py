@@ -8,8 +8,6 @@ This module contains the core transformation logic, integrated with
 MetadataTracker for comprehensive observability.
 """
 
-import logging
-import sys
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -17,6 +15,7 @@ from typing import Any
 import polars as pl
 
 from src_etl.core.config import settings
+from src_etl.core.logging import get_stage_logger
 from src_etl.loaders.denue import EstablecimientoWriter
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
@@ -30,14 +29,8 @@ from src_etl.utils.denue_schema import (
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
-# Setup logging
-log_file = Path("./data/etl_process.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger(__name__)
+# Logging de stage centralizado (sin basicConfig: no toca el root logger)
+logger = get_stage_logger(__name__, Path("./data/etl_process.log"))
 
 
 class BronzeToSilverProcessor:

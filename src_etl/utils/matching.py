@@ -29,6 +29,7 @@ from src_etl.utils.clee_resolution_config import (
     MIN_TEL_LENGTH,
     MIN_WEB_LENGTH,
     PARTIAL_NAME_THRESH,
+    TEXT_COLS_TO_SANITIZE,
 )
 
 
@@ -47,25 +48,28 @@ def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
     """
     Normaliza campos de contacto para comparacion exacta en el matching.
 
-    Genera las columnas derivadas que consume la cascada:
-      - tel_clean: telefono solo digitos (sin espacios/guiones/parentesis)
-      - email_clean: email en minusculas sin espacios
-      - www_clean: web en minusculas sin espacios
-    y rellena con "" los nulos de nom_estab/raz_social/nombre_act
-    (datos de encuesta: cualquier campo puede venir vacio).
+    Punto UNICO de sanitizacion pre-matching (antes estaba repartida en
+    3 lugares: aqui, _load_period y build_single_period_kb):
+      1. Rellena con "" los nulos de TODAS las columnas de texto del
+         matching (TEXT_COLS_TO_SANITIZE) presentes en el DataFrame
+         (datos de encuesta: cualquier campo puede venir vacio).
+      2. Genera las columnas derivadas que consume la cascada:
+         - tel_clean: telefono solo digitos
+         - email_clean: email en minusculas sin espacios
+         - www_clean: web en minusculas sin espacios
 
     Debe aplicarse a todo DataFrame que entre al matching (target o KB);
     `CLEEResolver._load_period()` lo hace automaticamente.
     """
+    fill_exprs = [pl.col(c).fill_null("") for c in TEXT_COLS_TO_SANITIZE if c in df.columns]
+    if fill_exprs:
+        df = df.with_columns(fill_exprs)
+
     return df.with_columns(
         [
             pl.col("telefono").str.replace_all(r"[^0-9]", "").alias("tel_clean"),
             pl.col("correoelec").str.to_lowercase().str.strip_chars().alias("email_clean"),
             pl.col("www").str.to_lowercase().str.strip_chars().alias("www_clean"),
-            # Llenar nulos para evitar crash en listas
-            pl.col("nom_estab").fill_null(""),
-            pl.col("raz_social").fill_null(""),
-            pl.col("nombre_act").fill_null(""),
         ]
     )
 

@@ -9,25 +9,18 @@ metadata database.
 Pipeline position: ingest -> normalize-dates -> clee-resolution
 """
 
-import logging
-import sys
 from datetime import date
 from pathlib import Path
 
 import duckdb
 
-from src_etl.utils.warehouse import connect_configured
+from src_etl.core.logging import get_stage_logger
+from src_etl.utils.warehouse import connect_configured, get_distinct_periods
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
-# Setup logging
-log_file = Path("./data/etl_normalize.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger(__name__)
+# Logging de stage centralizado (sin basicConfig: no toca el root logger)
+logger = get_stage_logger(__name__, Path("./data/etl_normalize.log"))
 
 # Spanish month names -> two-digit month numbers
 SPANISH_MONTHS: dict[str, str] = {
@@ -146,10 +139,7 @@ class DateNormalizer:
         """
         conn = connect_configured(self.silver_db_path, read_only=True)
         try:
-            result = conn.execute(
-                "SELECT DISTINCT period FROM establecimientos ORDER BY period"
-            ).fetchall()
-            return [row[0] for row in result]
+            return get_distinct_periods(conn)
         finally:
             conn.close()
 
