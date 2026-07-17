@@ -11,13 +11,17 @@ el pre-filtro espacial a blocking con celdas H3.
 código (migración Alembic + modelo ORM) y se aplican en un paso controlado.
 
 **PREMISA DE OPTIMIZACIÓN: toda mejora debe optimizar tiempo de ejecución Y
-uso de RAM a la vez** — el pipeline corre en una Mac M4 Pro/Max (límite
-DuckDB 8GB en .env), no en un servidor. Nada de caches sin cota, KBs
-monolíticas en RAM ni matrices gigantes precomputadas; preferir procesamiento
-columnar/streaming, caches acotados o en disco, y liberar memoria entre
-pasadas. Además, los datos DENUE provienen de encuestas: cualquier campo
-puede venir vacío o faltar en un periodo completo — todo código de matching
-debe tolerarlo (`fill_null("")`, columnas ausentes → `""`).
+uso de RAM a la vez, aprovechando correctamente la CPU con paralelización** —
+el pipeline corre en una Mac M4 Pro/Max (límite DuckDB 8GB en .env), no en
+un servidor. Nada de caches sin cota, KBs monolíticas en RAM ni matrices
+gigantes precomputadas; preferir procesamiento columnar/streaming, caches
+acotados o en disco, y liberar memoria entre pasadas. Para CPU: preferir el
+paralelismo interno de los motores (DuckDB threads, Polars, rapidfuzz
+workers) antes que multiprocessing manual, y cuando se use multiprocessing,
+fork+COW sin copiar datos grandes. Además, los datos DENUE provienen de
+encuestas: cualquier campo puede venir vacío o faltar en un periodo
+completo — todo código de matching debe tolerarlo (`fill_null("")`,
+columnas ausentes → `""`).
 
 ---
 
@@ -120,6 +124,103 @@ debe tolerarlo (`fill_null("")`, columnas ausentes → `""`).
       pico de RAM) vs baseline.
 - [ ] Actualizar `AGENTS.md` (sección CLEE Resolution: blocking H3, nuevas
       constantes, columnas nuevas) y este `todo.md`.
+
+---
+
+# Auditoría de paralelización por etapa (2026-07-17)
+
+Estado del aprovechamiento de CPU en cada etapa del pipeline, y los casos
+donde la paralelización NO es posible (con la razón).
+
+## Estado actual por etapa
+
+| Etapa | Paralelismo hoy | Estado |
+|-------|-----------------|--------|
+| Extract (descargas) | 3 descargas concurrentes (`max_parallel_downloads`) | ✅ OK — network-bound, más concurrencia no ayuda |
+| Extract (scraping Selenium) | Secuencial | ⛔ No paralelizable (ver abajo) |
+| Ingest (ZIP→Silver) | Polars `read_csv` multihilo interno; loop de archivos secuencial | ✅ Aceptable — el parseo (lo caro) usa todos los cores; el INSERT es single-writer |
+| normalize-dates | UPDATE SQL → paralelismo interno de DuckDB | ✅ OK — DuckDB paraleliza el UPDATE internamente |
+| h3-cells | UPDATE SQL → paralelismo interno de DuckDB (threads de settings) | ✅ OK |
+| CLEE matching (cascada) | `multiprocessing.Pool` fork+COW, ≥50K filas, `MATCH_WORKERS` | ✅ OK |
+| CLEE BallTree (build+query) | **Single-thread** (sklearn no expone n_jobs en `query_radius`) | ⚠️ Hot spot no paralelo — se resuelve en Fase 4 (H3-join en DuckDB, paralelo por diseño); no invertir en paralelizar BallTree |
+| CLEE escritura resultados | Batches secuenciales de 50K vía temp table | ✅ Aceptable — single-writer |
+| Load (Silver→Gold) | Copia de archivo única | ⛔ No paralelizable (ver abajo) |
+
+## Casos donde la paralelización NO es posible (razones)
+
+- **DuckDB es single-writer por archivo**: no se pueden procesar periodos
+  en procesos paralelos para UPDATEs (normalize-dates, h3-cells, escritura
+  CLEE). Compensación: cada UPDATE individual sí usa todos los threads de
+  DuckDB internamente.
+- **Ventana deslizante CLEE**: los periodos target se resuelven
+  secuencialmente por DEPENDENCIA DE DATOS inherente — cada periodo
+  resuelto se convierte en referencia del siguiente. Solo el matching
+  interno de cada pasada es paralelizable (ya lo está).
+- **Load Silver→Gold**: copia de un solo archivo de ~22GB — I/O-bound del
+  disco, paralelizar no aporta.
+- **Scraping Selenium**: una sola sesión de navegador contra el sitio de
+  INEGI (estado de sesión + cortesía con el servidor); las descargas
+  resultantes sí van en paralelo.
+
+## Acciones pendientes detectadas por la auditoría
+
+- [x] **BUG de config corregido (2026-07-17): `DUCKDB_THREADS` y
+      `DUCKDB_MEMORY_LIMIT` ahora se aplican** vía
+      `utils/warehouse.py:connect_configured()` en `clee_resolver`,
+      `date_normalizer`, `h3_backfill` y `DuckDBWarehouse`. Regla: toda
+      conexión nueva a Silver/Gold debe usar ese helper, nunca
+      `duckdb.connect()` directo.
+- [ ] Aplicar `connect_configured()` también en `processor.py` /
+      `loaders/denue.py` (escritura del ingest) — pendiente de revisar
+      cómo gestionan sus conexiones.
+- [ ] **Balanceo de chunks en matching paralelo**: los chunks son slices
+      contiguos (1 por worker); zonas densas (CDMX) vs rurales generan
+      workers desbalanceados. Usar ~4× chunks que workers con
+      `imap_unordered` (ya se usa) para que los rápidos tomen más trabajo.
+- [ ] `assign_new_clees()` usa `map_elements` (lambda Python por fila,
+      single-thread): generar los UUIDs en bulk (lista Python + Series).
+      Impacto menor (solo filas sin match).
+- [ ] (Ya anotado en Fase 1) Vectorizar scoring con `rapidfuzz.process.cpdist
+      (workers=-1)` — paralelismo C multihilo sin overhead de fork/pickle.
+      Eliminaría de raíz el residuo de COW del fork (ver abajo).
+
+## Verificación de seguridad RAM del paralelismo (2026-07-17)
+
+**fork + copy-on-write en CPython es imperfecto**: los refcounts y los
+flags del GC escriben en las cabeceras de los objetos Python, así que
+cuando un worker itera las listas `_shared_kb_*`, las páginas tocadas se
+copian de facto. Peor caso teórico: cada worker materializa la partición
+de KB que toca (~0.5GB con `KB_MAX_ROWS_PER_PARTITION=1000000`).
+
+Mitigaciones aplicadas:
+- `gc.freeze()` antes del fork / `gc.unfreeze()` después
+  (`entity_resolution.py:_run_matching_parallel`): elimina las escrituras
+  del GC en los hijos (las de refcount son inherentes a CPython).
+- `KB_MAX_ROWS_PER_PARTITION` acota el tamaño de lo compartido — es el
+  knob principal de RAM del matching (documentado en .env.example).
+- Presupuesto peor caso con config actual (6 workers × ~0.5GB partición +
+  padre + DuckDB 8GB): ~12-14GB — seguro en la M4 Pro/Max.
+- Solución definitiva si se quiere eliminar el residuo: cpdist (sin fork).
+
+**Chunks del target**: se picklean slices columnares (7 listas), costo
+temporal ~2× el target en el padre durante el fan-out — acotado y muy
+inferior al costo previo de los dicts.
+
+## Variables de entorno normalizadas (2026-07-17)
+
+- [x] `extractors/denue.py` hardcodeaba `max_retries=3,
+      max_parallel_downloads=3, timeout_seconds=300` al construir
+      `DownloadConfig`, silenciando las env vars `DOWNLOAD_*`. Corregido:
+      solo fija `download_directory`; el resto viene del entorno.
+- [x] `.env`: `DOWNLOAD_MAX_PARALLEL_DOWNLOADS=3`, `DOWNLOAD_MAX_RETRIES=3`,
+      `DOWNLOAD_TIMEOUT_SECONDS=300` explícitas (mismos valores efectivos
+      que el hardcode — sin cambio de comportamiento).
+- [x] `.env.example`: todas las variables de recursos documentadas con
+      ejemplos simples (qué hace cada una, regla práctica de MATCH_WORKERS,
+      knob de RAM de KB_MAX_ROWS_PER_PARTITION, etc.).
+- [x] `.env.test`: recursos mínimos y deterministas para la suite
+      (MATCH_WORKERS=1 secuencial, DUCKDB_THREADS=2, MEMORY_LIMIT=2GB,
+      descargas sin paralelismo).
 
 ---
 

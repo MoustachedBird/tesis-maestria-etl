@@ -16,6 +16,7 @@ from pathlib import Path
 
 import duckdb
 
+from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
@@ -143,7 +144,7 @@ class DateNormalizer:
         Returns:
             Sorted list of period dates
         """
-        conn = duckdb.connect(str(self.silver_db_path), read_only=True)
+        conn = connect_configured(self.silver_db_path, read_only=True)
         try:
             result = conn.execute(
                 "SELECT DISTINCT period FROM establecimientos ORDER BY period"
@@ -296,7 +297,7 @@ class DateNormalizer:
         session_total_normalized = 0
 
         # Open a single connection for all periods (efficiency)
-        conn = duckdb.connect(str(self.silver_db_path))
+        conn = connect_configured(self.silver_db_path)
         try:
             for idx, period in enumerate(periods, start=1):
                 period_str = str(period)

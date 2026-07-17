@@ -38,6 +38,7 @@ from src_etl.utils.entity_resolution import (
     propagate_clees,
 )
 from src_etl.utils.matching import clean_contact_columns
+from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
@@ -84,8 +85,8 @@ class CLEEResolver:
         self.kb_cache_dir = self.silver_db_path.parent / "kb_cache"
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get a DuckDB connection to Silver warehouse."""
-        return duckdb.connect(str(self.silver_db_path))
+        """Get a DuckDB connection to Silver warehouse (settings limits applied)."""
+        return connect_configured(self.silver_db_path)
 
     def _count_unresolved(self) -> int:
         """Count rows where clee_master IS NULL."""

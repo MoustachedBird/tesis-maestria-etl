@@ -45,13 +45,11 @@ class DenueExtractor:
         self.base_url = "https://www.inegi.org.mx/app/descarga/"
         self.base_url_inegi = "https://www.inegi.org.mx"
 
-        # Configuration
-        self.config = config or DownloadConfig(
-            download_directory=self.output_dir,
-            max_retries=3,
-            max_parallel_downloads=3,
-            timeout_seconds=300,
-        )
+        # Configuration: solo se fija el directorio; retries, timeouts y
+        # paralelismo vienen del entorno (variables DOWNLOAD_*, ver
+        # download_config.py y .env.example). Antes se hardcodeaban aqui,
+        # lo que silenciaba esas variables.
+        self.config = config or DownloadConfig(download_directory=self.output_dir)
 
         # Metadata tracker
         # Try to read from environment variable first, otherwise compute default path

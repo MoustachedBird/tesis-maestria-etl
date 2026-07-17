@@ -23,8 +23,8 @@ from pathlib import Path
 
 import duckdb
 
-from src_etl.core.config import settings
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
+from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
@@ -93,15 +93,13 @@ class H3CellBackfiller:
         self.silver_db_path = Path(silver_db_path)
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Conexion a Silver con la extension h3 cargada y limites de recursos.
+        """Conexion a Silver con la extension h3 cargada.
 
-        Respeta DUCKDB_MEMORY_LIMIT / DUCKDB_THREADS de settings: el UPDATE
-        sobre periodos de millones de filas no debe rebasar el presupuesto
-        de RAM de la maquina (premisa: tiempo Y memoria).
+        Usa connect_configured(): DUCKDB_MEMORY_LIMIT / DUCKDB_THREADS de
+        settings aplicados (el UPDATE sobre periodos de millones de filas
+        no debe rebasar el presupuesto de RAM de la maquina).
         """
-        conn = duckdb.connect(str(self.silver_db_path))
-        conn.execute(f"SET memory_limit='{settings.DUCKDB_MEMORY_LIMIT}'")
-        conn.execute(f"SET threads={settings.DUCKDB_THREADS}")
+        conn = connect_configured(self.silver_db_path)
         try:
             conn.execute("LOAD h3")
         except duckdb.Error:

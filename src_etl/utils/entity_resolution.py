@@ -384,22 +384,33 @@ def _run_matching_parallel(
     # usamos threads ni frameworks de UI (solo listas Python + rapidfuzz C).
     # imap_unordered retorna resultados tan pronto como cada worker termina,
     # permitiendo al padre loguear progreso. Se reordenan por chunk_id.
+    #
+    # RAM: el COW en CPython es imperfecto -- los refcounts y los flags del
+    # GC escriben en las cabeceras de los objetos, copiando paginas al
+    # tocarlas. gc.freeze() mueve todo lo existente a la generacion
+    # permanente ANTES del fork, eliminando las escrituras del GC en los
+    # hijos (las de refcount son inevitables, por eso KB_MAX_ROWS_PER_
+    # PARTITION acota el tamanho de lo compartido).
+    gc.freeze()
     fork_ctx = mp.get_context("fork")
     ordered_results: list[list[str | None] | None] = [None] * len(chunks)
 
-    with fork_ctx.Pool(processes=len(chunks), initializer=_init_worker) as pool:
-        completed = 0
-        total_matched = 0
+    try:
+        with fork_ctx.Pool(processes=len(chunks), initializer=_init_worker) as pool:
+            completed = 0
+            total_matched = 0
 
-        for chunk_id, result_list in pool.imap_unordered(_match_chunk, chunks):
-            ordered_results[chunk_id] = result_list
-            completed += 1
-            chunk_matched = sum(1 for r in result_list if r is not None)
-            total_matched += chunk_matched
-            logger.info(
-                f"      Chunk {completed}/{len(chunks)} completado: "
-                f"{chunk_matched:,} matches ({len(result_list):,} filas)"
-            )
+            for chunk_id, result_list in pool.imap_unordered(_match_chunk, chunks):
+                ordered_results[chunk_id] = result_list
+                completed += 1
+                chunk_matched = sum(1 for r in result_list if r is not None)
+                total_matched += chunk_matched
+                logger.info(
+                    f"      Chunk {completed}/{len(chunks)} completado: "
+                    f"{chunk_matched:,} matches ({len(result_list):,} filas)"
+                )
+    finally:
+        gc.unfreeze()
 
     # Concatenar resultados en orden original de chunks
     all_results: list[str | None] = []
