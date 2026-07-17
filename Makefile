@@ -1,4 +1,4 @@
-.PHONY: help setup extract transform load clee-resolution h3-backfill pipeline clean db-migrate db-downgrade db-seed db-reset test
+.PHONY: help setup extract transform load clee-resolution clee-resolution-h3 h3-backfill pipeline clean db-migrate db-downgrade db-seed db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
@@ -33,11 +33,14 @@ transform: ## Transform raw data (Bronze -> Silver)
 load: ## Load Silver -> Gold
 	$(PYTHON) -m src_etl.main load $(ARGS)
 
-clee-resolution: ## Run CLEE Resolution (Entity Resolution)
+clee-resolution: ## Run CLEE Resolution (radio/BallTree -> clee_propagado_radio)
 	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-h3-cells --clee-resolution $(ARGS)
 
+clee-resolution-h3: ## Run CLEE Resolution (H3 blocking -> clee_propagado_h3)
+	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-h3-cells --no-clee-resolution --clee-resolution-h3 $(ARGS)
+
 h3-backfill: ## Backfill H3 cells (h3_cell_9/h3_cell_5) in Silver
-	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells $(ARGS)
+	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --no-h3-cells --h3-cells $(ARGS)
 
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry

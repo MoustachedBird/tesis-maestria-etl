@@ -7,6 +7,7 @@ Provides three-tier logging:
 3. Error logs - Separate file for errors only
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -324,7 +325,7 @@ def get_logger(name: str | None = None) -> structlog.BoundLogger:
     return structlog.get_logger()
 
 
-def get_stage_logger(name: str, log_file: Path) -> "logging.Logger":
+def get_stage_logger(name: str, log_file: Path) -> logging.Logger:
     """
     Logger estandar de stage: archivo dedicado + consola, sin side effects.
 
@@ -350,23 +351,22 @@ def get_stage_logger(name: str, log_file: Path) -> "logging.Logger":
         >>> logger = get_stage_logger(__name__, Path("./data/etl_process.log"))
         >>> logger.info("stage started")
     """
-    import logging as _logging
     import sys as _sys
 
-    logger = _logging.getLogger(name)
+    logger = logging.getLogger(name)
     if logger.handlers:
         return logger
 
-    formatter = _logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    file_handler = _logging.FileHandler(log_file)
+    file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(formatter)
-    stream_handler = _logging.StreamHandler(_sys.stdout)
+    stream_handler = logging.StreamHandler(_sys.stdout)
     stream_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
-    logger.setLevel(_logging.INFO)
+    logger.setLevel(logging.INFO)
     logger.propagate = False
     return logger

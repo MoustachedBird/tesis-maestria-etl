@@ -34,7 +34,8 @@ from src_etl.utils.entity_resolution import (
     assign_new_clees,
     build_single_period_kb,
     get_region_prefix,
-    propagate_clees,
+    propagate_clees_h3,
+    propagate_clees_radio,
 )
 from src_etl.utils.matching import clean_contact_columns
 from src_etl.utils.warehouse import connect_configured, get_distinct_periods
@@ -60,10 +61,27 @@ class CLEEResolver:
                      (incremental, preserves already-assigned values).
     """
 
+    # Metodos disponibles: mapea method -> (columna destino, funcion de
+    # propagacion, sufijo de prefijo de region). Un solo lugar para registrar
+    # nuevos metodos de propagacion sin duplicar el orquestador.
+    METHODS = {
+        "radio": {
+            "column": "clee_propagado_radio",
+            "propagate": propagate_clees_radio,
+            "prefix_suffix": "",
+        },
+        "h3": {
+            "column": "clee_propagado_h3",
+            "propagate": propagate_clees_h3,
+            "prefix_suffix": "H3",
+        },
+    }
+
     def __init__(
         self,
         silver_db_path: Path,
         tracker: MetadataTracker,
+        method: str = "radio",
     ):
         """
         Initialize CLEE resolution stage.
@@ -71,28 +89,40 @@ class CLEEResolver:
         Args:
             silver_db_path: Path to Silver DuckDB warehouse
             tracker: MetadataTracker instance for job/task tracking
+            method: "radio" (BallTree, columna clee_propagado_radio) o
+                "h3" (blocking H3, columna clee_propagado_h3). Ambos metodos
+                comparten TODO el motor de ventana deslizante; solo cambian
+                la columna destino y el generador de candidatos.
         """
+        if method not in self.METHODS:
+            raise ValueError(f"Metodo desconocido '{method}'. Opciones: {list(self.METHODS)}")
+
         self.silver_db_path = Path(silver_db_path)
         self.tracker = tracker
+        self.method = method
+
+        cfg = self.METHODS[method]
+        self.master_column: str = cfg["column"]
+        self._propagate = cfg["propagate"]
+        self._prefix_suffix: str = cfg["prefix_suffix"]
 
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
 
-        # KB cache: cada periodo de referencia se carga de DuckDB (JOIN +
-        # limpieza) O(T x R) veces en la ventana deslizante. La KB preparada
-        # (10 columnas) se cachea en parquet tras la primera construccion.
-        self.kb_cache_dir = self.silver_db_path.parent / "kb_cache"
+        # KB cache por metodo: la identidad cacheada difiere entre radio y h3,
+        # asi que cada metodo tiene su subdirectorio.
+        self.kb_cache_dir = self.silver_db_path.parent / "kb_cache" / method
 
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Get a DuckDB connection to Silver warehouse (settings limits applied)."""
         return connect_configured(self.silver_db_path)
 
     def _count_unresolved(self) -> int:
-        """Count rows where clee_propagado_radio IS NULL."""
+        """Count rows where the method's master column IS NULL."""
         with self._get_connection() as conn:
-            return conn.execute("""
+            return conn.execute(f"""
                 SELECT COUNT(*) FROM establecimientos
-                WHERE clee_propagado_radio IS NULL
+                WHERE {self.master_column} IS NULL
             """).fetchone()[0]
 
     def _get_sorted_periods(self) -> list[date]:
@@ -176,7 +206,7 @@ class CLEEResolver:
             return pl.read_parquet(cache_path)
 
         df_ref = self._load_period(period)
-        ref_kb = build_single_period_kb(df_ref)
+        ref_kb = build_single_period_kb(df_ref, self.master_column)
         del df_ref
         gc.collect()
 
@@ -214,12 +244,12 @@ class CLEEResolver:
 
     def _write_period_results(self, mapping: pl.DataFrame) -> int:
         """
-        Write clee_propagado_radio assignments for a single period to Silver DuckDB.
+        Write master-column assignments for a single period to Silver DuckDB.
 
         Uses batched UPDATE statements via temp table for efficiency.
 
         Args:
-            mapping: DataFrame with columns [id, clee_propagado_radio]
+            mapping: DataFrame with columns [id, <master_column>]
 
         Returns:
             Number of rows updated
@@ -227,6 +257,7 @@ class CLEEResolver:
         if mapping.is_empty():
             return 0
 
+        col = self.master_column
         total = mapping.height
         batch_size = 50_000
         updated = 0
@@ -236,12 +267,12 @@ class CLEEResolver:
                 batch = mapping.slice(offset, batch_size)
 
                 conn.execute(
-                    "CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, clee_propagado_radio VARCHAR)"
+                    f"CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, {col} VARCHAR)"
                 )
                 conn.execute("INSERT INTO _clee_updates SELECT * FROM batch")
-                result = conn.execute("""
+                result = conn.execute(f"""
                     UPDATE establecimientos e
-                    SET clee_propagado_radio = u.clee_propagado_radio
+                    SET {col} = u.{col}
                     FROM _clee_updates u
                     WHERE e.id = u.id
                 """)
@@ -284,26 +315,27 @@ class CLEEResolver:
             f"[FASE 1] Resolucion deterministica: {len(deterministic_periods)} periodos con CLEE"
         )
 
+        col = self.master_column
         with self._get_connection() as conn:
             if force:
-                # Reset all clee_propagado_radio first
-                conn.execute("UPDATE establecimientos SET clee_propagado_radio = NULL")
+                # Reset SOLO la columna de este metodo (no toca la del otro)
+                conn.execute(f"UPDATE establecimientos SET {col} = NULL")
 
-            # Copy clee -> clee_propagado_radio for all rows with CLEE
-            conn.execute("""
+            # Copy clee -> master_column for all rows with CLEE
+            conn.execute(f"""
                 UPDATE establecimientos
-                SET clee_propagado_radio = clee
+                SET {col} = clee
                 WHERE clee IS NOT NULL AND clee != ''
             """)
 
             # Count seeded rows
-            count = conn.execute("""
+            count = conn.execute(f"""
                 SELECT COUNT(*) FROM establecimientos
-                WHERE clee_propagado_radio IS NOT NULL
+                WHERE {col} IS NOT NULL
             """).fetchone()[0]
 
         logger.info(
-            f"   clee_propagado_radio = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
+            f"   {col} = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
         )
 
         return deterministic_periods
@@ -369,22 +401,23 @@ class CLEEResolver:
                 continue
 
             target_total = df_target.height
+            col = self.master_column
 
-            # Ensure clee_propagado_radio column exists and is NULL for this period
-            if "clee_propagado_radio" not in df_target.columns:
-                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias("clee_propagado_radio"))
+            # Ensure master_column exists and is NULL for this period
+            if col not in df_target.columns:
+                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias(col))
             else:
                 df_target = df_target.with_columns(
-                    pl.when(pl.col("clee_propagado_radio") == "")
+                    pl.when(pl.col(col) == "")
                     .then(pl.lit(None).cast(pl.Utf8))
-                    .otherwise(pl.col("clee_propagado_radio"))
-                    .alias("clee_propagado_radio")
+                    .otherwise(pl.col(col))
+                    .alias(col)
                 )
 
             # Sliding window: compare against each resolved period
             for ref_period in resolved_periods:
                 # Count how many still need resolution
-                still_missing = df_target.filter(pl.col("clee_propagado_radio").is_null()).height
+                still_missing = df_target.filter(pl.col(col).is_null()).height
                 if still_missing == 0:
                     break
 
@@ -393,24 +426,24 @@ class CLEEResolver:
                 # Load reference KB (from parquet cache after first build)
                 ref_kb = self._get_ref_kb(ref_period)
 
-                # Propagate CLEEs from reference to target
-                df_target = propagate_clees(df_target, ref_kb, self.spatial_tol)
+                # Propagate identities from reference to target (metodo activo)
+                df_target = self._propagate(df_target, ref_kb, self.spatial_tol)
 
                 del ref_kb
                 gc.collect()
 
             # Assign NEW CLEEs to remaining unresolved rows
-            still_missing = df_target.filter(pl.col("clee_propagado_radio").is_null()).height
+            still_missing = df_target.filter(pl.col(col).is_null()).height
             if still_missing > 0:
                 logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
-                df_target = assign_new_clees(df_target, region_prefix)
+                df_target = assign_new_clees(df_target, region_prefix, col)
 
             # Write results to DuckDB immediately (no accumulation in RAM)
-            mapping = df_target.select(["id", "clee_propagado_radio"])
+            mapping = df_target.select(["id", col])
             rows_written = self._write_period_results(mapping)
             total_resolved += rows_written
 
-            # Sus clee_propagado_radio cambiaron: invalidar KB cacheada (si existia)
+            # Su identidad cambio: invalidar KB cacheada (si existia)
             self._invalidate_kb_cache(target_period)
 
             logger.info(
@@ -461,7 +494,7 @@ class CLEEResolver:
                 "SELECT DISTINCT cve_ent FROM establecimientos ORDER BY cve_ent"
             ).fetchall()
         state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
-        prefix = get_region_prefix(state_list)
+        prefix = get_region_prefix(state_list) + self._prefix_suffix
         logger.info(f"   Prefijo de region (namespace): {prefix}")
 
         # --- Phase 1: Deterministic resolution ---
@@ -496,13 +529,13 @@ class CLEEResolver:
         """
         if force:
             logger.warning(
-                "MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los clee_propagado_radio."
+                f"MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los {self.master_column}."
             )
             self._clear_kb_cache()
 
-        # Create job run
+        # Create job run (job_name distingue el metodo en metadata)
         run_id = self.tracker.create_run(
-            job_name="denue_clee_resolver",
+            job_name=f"denue_clee_resolver_{self.method}",
             job_type="CLEE_RESOLUTION",
             trigger_type="MANUAL",
         )
@@ -510,7 +543,7 @@ class CLEEResolver:
         # Create a single CLEE resolution task for the national run
         task_id = self.tracker.create_clee_resolution_task(
             run_id=run_id,
-            task_name="clee_resolution_national",
+            task_name=f"clee_resolution_national_{self.method}",
             region_group="NATIONAL",
             state_list=["ALL"],
         )

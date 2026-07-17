@@ -81,9 +81,16 @@ class DenuePipelineOrchestrator:
             silver_db_path=self.silver_db_path,
         )
 
+        # Un resolver por metodo (misma maquinaria, distinta columna destino).
         self.clee_resolver = CLEEResolver(
             silver_db_path=self.silver_db_path,
             tracker=self.tracker,
+            method="radio",
+        )
+        self.clee_resolver_h3 = CLEEResolver(
+            silver_db_path=self.silver_db_path,
+            tracker=self.tracker,
+            method="h3",
         )
 
         self.date_normalizer = DateNormalizer(
@@ -214,21 +221,53 @@ class DenuePipelineOrchestrator:
         Returns:
             True if successful, False otherwise
         """
-        logger.info("Starting CLEE RESOLUTION stage (Entity Resolution)")
+        logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> clee_propagado_radio)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
 
         try:
             success = self.clee_resolver.run(force=force)
 
             if success:
-                logger.info("CLEE RESOLUTION stage completed successfully")
+                logger.info("CLEE RESOLUTION (radio) stage completed successfully")
             else:
-                logger.warning("CLEE RESOLUTION stage completed with errors")
+                logger.warning("CLEE RESOLUTION (radio) stage completed with errors")
 
             return success
 
         except Exception as e:
-            logger.error(f"CLEE RESOLUTION stage failed: {e}")
+            logger.error(f"CLEE RESOLUTION (radio) stage failed: {e}")
+            raise
+
+    def run_clee_resolution_h3_stage(self, force: bool = False) -> bool:
+        """
+        Run CLEE resolution stage with H3 cell blocking.
+
+        Same sliding-window entity resolution as the radio method, but
+        candidates come from H3 cell blocking (grid_disk + exact haversine
+        post-filter). Results are written to the `clee_propagado_h3` column,
+        independent from `clee_propagado_radio` (side-by-side comparison).
+
+        Args:
+            force: If True, reset all clee_propagado_h3 values and re-run.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> clee_propagado_h3)")
+        logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
+
+        try:
+            success = self.clee_resolver_h3.run(force=force)
+
+            if success:
+                logger.info("CLEE RESOLUTION (h3) stage completed successfully")
+            else:
+                logger.warning("CLEE RESOLUTION (h3) stage completed with errors")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"CLEE RESOLUTION (h3) stage failed: {e}")
             raise
 
     def run_load_stage(self, force: bool = False) -> bool:

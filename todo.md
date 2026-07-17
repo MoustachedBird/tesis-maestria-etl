@@ -128,37 +128,51 @@ me dice nada"):
       AGENTS.md). Limitación DuckDB manejada: ALTER exige soltar/recrear los
       13 índices de la tabla (definiciones impresas antes como respaldo;
       fallback manual documentado en la migración).
-- [ ] Aplicar al Silver real: `make db-migrate` (CON CONFIRMACIÓN).
-      **OJO: recrear los 13 índices ART sobre 77M filas tomará decenas de
-      minutos** — costo único del rename. El código ya habla
-      `clee_propagado_radio`, así que resolver/normalizar FALLARÁ contra el
-      Silver hasta correr esta migración.
-- [ ] Resolver H3: parametrizar `CLEEResolver`/`entity_resolution` con la
-      columna destino (`target_column="clee_propagado_h3"`) y el generador de
-      candidatos. Fase 1 determinística: `clee_propagado_h3 = clee` (igual
-      que el baseline, mismas referencias iniciales).
-- [ ] Generación de candidatos = join por celda: target expandido con
-      `grid_disk(h3_cell_9, k=3)` (k=3 en res 9 garantiza cubrir ≥500m en
-      el peor caso) contra `h3_cell_9` de la KB.
-- [ ] Post-filtro haversine exacto ≤ `SPATIAL_RADIUS_M` (vectorizado) para
-      recuperar el radio exacto de 500m — misma semántica espacial que el
-      baseline; la cascada de matching (gate + paths) se REUTILIZA tal
-      cual, solo cambia el pre-filtro.
-- [ ] Particionado espacial por `h3_cell_5` en vez de slices arbitrarios de
-      KB (`KB_MAX_ROWS_PER_PARTITION`): las filas pendientes solo consultan
-      particiones con solape espacial real (h3_cell_5 = parent(h3_cell_9)
-      garantiza co-partición).
-- [ ] Config: `H3_GRID_DISK_K = 3` en `clee_resolution_config.py`
-      (H3_BLOCKING_RES y H3_PARTITION_RES ya existen).
-- [ ] KB cache: los parquets de `kb_cache/` deben incluir `h3_cell_9` (y la
-      columna resuelta correspondiente al método) — invalidar cache al
-      arrancar la resolución H3 por primera vez.
-- [ ] **Métrica de paridad** (primera clase, no opcional): % de filas donde
-      ambos métodos asignan el mismo CLEE propagado. Los sintéticos NEW_*
-      difieren por construcción (UUIDs aleatorios) — compararlos como
-      "ambos sin match", no por valor exacto.
-- [ ] Benchmark tiempo/RAM de la pasada H3 vs baseline BallTree (el serial
-      del BallTree era ~15% — validar la ganancia real).
+- [x] Aplicado al Silver real por el usuario (2026-07-17): columnas
+      renombradas/añadidas. **NOTA post-migración**: la recreación de índices
+      no completó — el Silver quedó solo con `ix_estab_h3_9` (los ~12 de
+      queries analíticas se perdieron; no afectan la resolución, solo queries
+      ad-hoc). Recrearlos es un paso aparte de decenas de minutos si el
+      análisis los necesita (ver "Índices pendientes" abajo).
+- [x] Resolver parametrizado por método (`CLEEResolver(method="radio"|"h3")`,
+      dict `METHODS`): columna destino + `propagate_*` + sufijo de prefijo.
+      Fase 1 determinística escribe `{columna} = clee`; force resetea SOLO
+      la columna del método (no pisa la del otro).
+- [x] Diseño "una función por columna, sin duplicar": core privado
+      `_propagate_clees(df, kb, tol, master_column, neighbor_finder)` +
+      wrappers `propagate_clees_radio` / `propagate_clees_h3`. KB identidad
+      neutralizada a `clee_id` (agnóstica de método).
+- [x] `find_h3_neighbors` (matching.py): candidatos por `grid_disk(h3_cell_9,
+      k=3)` como joins de Polars (multihilo, streaming) + post-filtro
+      haversine exacto ≤ SPATIAL_RADIUS_M en el motor de expresiones.
+      **Verificado: produce EXACTAMENTE los mismos vecinos que el BallTree**
+      (0 diferencias en 1500 filas sintéticas). Misma cascada reutilizada.
+- [x] Config `H3_GRID_DISK_K = 3`; `h3_cell_9`/`h3_cell_5` + ambas columnas
+      clee añadidas a SILVER_READ_QUERY y COLS_NEEDED_FOR_MATCHING.
+- [x] KB cache separado por método (`kb_cache/{radio|h3}/`); KB_COLUMNS
+      incluye `h3_cell_9`.
+- [x] Orquestador: `run_clee_resolution_h3_stage()`; CLI
+      `--clee-resolution-h3` (default OFF); `make clee-resolution-h3`.
+      NEW_* de H3 llevan sufijo de prefijo (no colisionan con radio).
+- [x] **Paridad verificada end-to-end** (scratch, esquema real, 2 periodos):
+      ambos métodos poblaron 800/800 filas con asignaciones IDÉNTICAS
+      (800/800 propagados coinciden radio==h3). 157 tests en verde.
+- [ ] Correr H3 sobre el Silver real: `make clee-resolution-h3` (radio ya
+      está poblado). Luego medir paridad real y benchmark tiempo/RAM H3 vs
+      BallTree.
+- [ ] (Opcional) Particionado de KB por `h3_cell_5` en vez de slices para
+      podar particiones sin solape — optimización, no correctitud (el slice
+      actual ya es correcto para ambos métodos).
+
+## Índices pendientes de recrear en el Silver real (2026-07-17)
+
+La migración de rename recreó índices en scratch pero en el Silver real solo
+sobrevivió `ix_estab_h3_9`. Los definidos en `models.py`/migración base
+(ix_estab_geo, ix_estab_clee, ix_estab_coords, ix_estab_postal, etc.) NO
+están. No afectan la resolución CLEE (que usa ix_estab_h3_9 y scans), pero sí
+las queries analíticas de la tesis. Recrearlos con:
+`CREATE INDEX ix_estab_geo ON establecimientos(cve_ent,cve_mun,cve_loc);` etc.
+Costo: decenas de min (ART sobre 77M). Hacerlo cuando el análisis los pida.
 
 ## Fase 5 — (Opcional, habilitado por H3) KB consolidada
 

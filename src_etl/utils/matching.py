@@ -97,6 +97,126 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
     )
 
 
+_EARTH_RADIUS_M = 6_371_000.0
+
+
+def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
+    """
+    Genera candidatos espaciales por blocking de celdas H3 (sustituto del
+    BallTree). Misma interfaz de retorno: (indices, distances).
+
+    Algoritmo (todo vectorizado en Polars = multihilo, sin loop por fila):
+      1. grid_disk(cell, H3_GRID_DISK_K) SOLO sobre las celdas distintas del
+         target (muchas filas comparten celda) -> pares (celda_target,
+         celda_vecina). k=3 en res 9 cubre >=500m en el peor caso.
+      2. Join target -> celdas vecinas -> join con KB por celda: produce los
+         pares candidatos (tgt_idx, kb_idx) como hash joins de Polars.
+      3. Post-filtro haversine EXACTO <= radius_meters (en el motor de
+         expresiones), recuperando la misma semantica de radio que el
+         BallTree. Se corre en modo streaming para acotar el pico de RAM.
+      4. Ordena por distancia ascendente y agrupa por target -> arrays por
+         fila (mismo formato que query_radius con sort_results=True).
+
+    Requiere columna `h3_cell_9` en ambos DataFrames (filas sin coords la
+    tienen NULL -> 0 candidatos, igual que el baseline las descartaria).
+
+    Retorna: (indices, distances) -- np.ndarray(object) de longitud
+    target_df.height; cada elemento es un np.ndarray de indices posicionales
+    de KB (o distancias) ordenado por cercania.
+    """
+    from h3.api import basic_int as h3i
+
+    from src_etl.utils.clee_resolution_config import H3_GRID_DISK_K
+
+    n_target = target_df.height
+
+    def _empty_result():
+        arr = np.empty(n_target, dtype=object)
+        for i in range(n_target):
+            arr[i] = np.array([], dtype=np.int64)
+        dist = np.empty(n_target, dtype=object)
+        for i in range(n_target):
+            dist[i] = np.array([], dtype=np.float64)
+        return arr, dist
+
+    if ref_df.height == 0 or n_target == 0:
+        return _empty_result()
+
+    kb = ref_df.select(
+        pl.int_range(pl.len(), dtype=pl.Int64).alias("kb_idx"),
+        pl.col("h3_cell_9").alias("kb_cell"),
+        pl.col("latitud").alias("kb_lat"),
+        pl.col("longitud").alias("kb_lon"),
+    ).drop_nulls("kb_cell")
+
+    tg = target_df.select(
+        pl.int_range(pl.len(), dtype=pl.Int64).alias("tgt_idx"),
+        pl.col("h3_cell_9").alias("tgt_cell"),
+        pl.col("latitud").alias("tgt_lat"),
+        pl.col("longitud").alias("tgt_lon"),
+    )
+
+    # 1. grid_disk solo por celda distinta del target (loop C corto)
+    distinct_cells = tg.get_column("tgt_cell").drop_nulls().unique().to_list()
+    if not distinct_cells:
+        return _empty_result()
+
+    disk_pairs: list[tuple[int, int]] = []
+    for cell in distinct_cells:
+        for nb in h3i.grid_disk(cell, H3_GRID_DISK_K):
+            disk_pairs.append((cell, nb))
+    disk = pl.DataFrame(
+        disk_pairs, schema={"tgt_cell": pl.Int64, "nb_cell": pl.Int64}, orient="row"
+    )
+
+    # 2-3. Joins + haversine exacto (lazy/streaming para acotar RAM)
+    rad = np.pi / 180.0
+    pairs = (
+        tg.lazy()
+        .join(disk.lazy(), on="tgt_cell", how="inner")
+        .join(kb.lazy(), left_on="nb_cell", right_on="kb_cell", how="inner")
+        .with_columns(
+            (
+                2
+                * _EARTH_RADIUS_M
+                * (
+                    (
+                        ((pl.col("kb_lat") - pl.col("tgt_lat")) * rad / 2).sin() ** 2
+                        + (pl.col("tgt_lat") * rad).cos()
+                        * (pl.col("kb_lat") * rad).cos()
+                        * ((pl.col("kb_lon") - pl.col("tgt_lon")) * rad / 2).sin() ** 2
+                    )
+                    .sqrt()
+                    .arcsin()
+                )
+            ).alias("dist_m")
+        )
+        .filter(pl.col("dist_m") <= radius_meters)
+        .select("tgt_idx", "kb_idx", "dist_m")
+        .sort(["tgt_idx", "dist_m"])
+        .group_by("tgt_idx", maintain_order=True)
+        .agg(pl.col("kb_idx"), pl.col("dist_m"))
+        .collect(streaming=True)
+    )
+
+    # 4. Dispersar a arrays por fila alineados a 0..n_target-1
+    indices = np.empty(n_target, dtype=object)
+    distances = np.empty(n_target, dtype=object)
+    for i in range(n_target):
+        indices[i] = np.array([], dtype=np.int64)
+        distances[i] = np.array([], dtype=np.float64)
+
+    for tgt_idx, kb_idx_list, dist_list in zip(
+        pairs.get_column("tgt_idx").to_list(),
+        pairs.get_column("kb_idx").to_list(),
+        pairs.get_column("dist_m").to_list(),
+    ):
+        indices[tgt_idx] = np.asarray(kb_idx_list, dtype=np.int64)
+        distances[tgt_idx] = np.asarray(dist_list, dtype=np.float64)
+
+    return indices, distances
+
+
 @cache
 def _activity_ratio_cached(act_a: str, act_b: str) -> float:
     """token_set_ratio memoizado para pares de actividades SCIAN.

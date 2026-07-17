@@ -63,7 +63,14 @@ def transform(
         help="Backfill H3 cells (h3_cell_9/h3_cell_5) from coordinates",
     ),
     clee_resolution: bool = typer.Option(
-        True, "--clee-resolution/--no-clee-resolution", help="Run CLEE resolution sub-step"
+        True,
+        "--clee-resolution/--no-clee-resolution",
+        help="Run CLEE resolution (radio/BallTree -> clee_propagado_radio)",
+    ),
+    clee_resolution_h3: bool = typer.Option(
+        False,
+        "--clee-resolution-h3/--no-clee-resolution-h3",
+        help="Run CLEE resolution (H3 blocking -> clee_propagado_h3), comparison track",
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
@@ -71,9 +78,9 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution.
-    Control each with --ingest, --normalize-dates, --h3-cells and
-    --clee-resolution flags.
+    Sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution
+    [-> clee-resolution-h3]. Control each with --ingest, --normalize-dates,
+    --h3-cells, --clee-resolution and --clee-resolution-h3 flags.
     """
     if source != "denue":
         console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
@@ -103,8 +110,12 @@ def transform(
             success = transformer.run_h3_cells_stage(force=force)
 
         if clee_resolution and success:
-            console.print("[bold magenta]   Running: clee-resolution[/bold magenta]")
+            console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
             success = transformer.run_clee_resolution_stage(force=force)
+
+        if clee_resolution_h3 and success:
+            console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
+            success = transformer.run_clee_resolution_h3_stage(force=force)
 
         if success:
             console.print("[bold green]Transform completed successfully.[/bold green]")

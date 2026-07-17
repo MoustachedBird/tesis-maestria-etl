@@ -21,6 +21,11 @@ H3_BLOCKING_RES = 9
 # Resolucion de particionado grueso: res 5 ~ arista 8.5km. Permite podar
 # particiones de KB sin solape espacial con el target.
 H3_PARTITION_RES = 5
+# Anillos de grid_disk para generar candidatos alrededor de la celda del
+# target. k=3 en res 9 (arista ~174m) cubre >=500m en el peor caso (borde
+# de celda), garantizando que ningun candidato dentro de SPATIAL_RADIUS_M
+# se pierda antes del post-filtro haversine exacto.
+H3_GRID_DISK_K = 3
 
 # --- GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ---
 # Umbral minimo de similitud fuzzy en nombre_act (actividad SCIAN).
@@ -95,6 +100,9 @@ COLS_NEEDED_FOR_MATCHING = [
     "id",
     "clee",
     "clee_propagado_radio",
+    "clee_propagado_h3",
+    "h3_cell_9",
+    "h3_cell_5",
     "nom_estab",
     "raz_social",
     "codigo_act",
@@ -120,6 +128,9 @@ SILVER_READ_QUERY = """
         e.id,
         e.clee,
         e.clee_propagado_radio,
+        e.clee_propagado_h3,
+        e.h3_cell_9,
+        e.h3_cell_5,
         e.nom_estab,
         e.raz_social,
         e.codigo_act,
