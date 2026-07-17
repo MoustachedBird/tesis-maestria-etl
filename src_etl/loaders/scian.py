@@ -18,15 +18,25 @@ SEED_FILE = "seed_actividades.parquet"
 TABLE_NAME = "denue_actividades_economicas"
 DISPLAY_NAME = "economic_activities"
 
-# Table DDL
+# Table DDL. PK is codigo_act alone (nombre_act depends functionally on it);
+# sector/subsector/rama materialize the SCIAN hierarchy from the code prefix.
 TABLE_DDL = (
     "CREATE TABLE {table} ("
-    "codigo_act VARCHAR, nombre_act VARCHAR, "
-    "PRIMARY KEY (codigo_act, nombre_act))"
+    "codigo_act VARCHAR PRIMARY KEY, nombre_act VARCHAR NOT NULL, "
+    "sector VARCHAR NOT NULL, subsector VARCHAR NOT NULL, rama VARCHAR NOT NULL)"
 )
 
-# Expected columns for validation
+# Expected columns for validation (seed parquet; hierarchy is derived at load)
 EXPECTED_COLUMNS = ["codigo_act", "nombre_act"]
+
+
+def _with_scian_hierarchy(df: pl.DataFrame) -> pl.DataFrame:
+    """Derive sector/subsector/rama columns from the 6-digit SCIAN code."""
+    return df.with_columns(
+        pl.col("codigo_act").str.slice(0, 2).alias("sector"),
+        pl.col("codigo_act").str.slice(0, 3).alias("subsector"),
+        pl.col("codigo_act").str.slice(0, 4).alias("rama"),
+    )
 
 
 def ensure_table(conn, force: bool = False):
@@ -74,7 +84,12 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
     # Only load if table is empty or force mode
     existing = conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}").fetchone()[0]
     if existing == 0:
-        conn.execute(f"INSERT INTO {TABLE_NAME} SELECT * FROM '{seed_path}'")
+        conn.execute(f"""
+            INSERT INTO {TABLE_NAME}
+            SELECT codigo_act, nombre_act,
+                   substr(codigo_act, 1, 2), substr(codigo_act, 1, 3), substr(codigo_act, 1, 4)
+            FROM '{seed_path}'
+        """)
         logger.info(f"Seed loaded: {TABLE_NAME} from {SEED_FILE}")
 
     return {DISPLAY_NAME: row_count}
@@ -102,6 +117,22 @@ def load_seeds_sqlalchemy(
     df = pl.read_parquet(seed_path)
     if len(df) == 0:
         return {DISPLAY_NAME: 0}
+
+    # Schema-aware: the seed migration (dff9d0804542) replays against the
+    # legacy 2-column table; the hierarchy columns only exist after the
+    # normalization migration (173b3ded90cd) recreates the catalog.
+    table_columns = {
+        row[0]
+        for row in connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = :table"
+            ),
+            {"table": TABLE_NAME},
+        )
+    }
+    if "sector" in table_columns:
+        df = _with_scian_hierarchy(df)
 
     if truncate:
         connection.execute(text(f"DELETE FROM {TABLE_NAME}"))

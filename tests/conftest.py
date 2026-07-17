@@ -306,6 +306,9 @@ def sample_actividad_economica() -> ActividadEconomica:
     return ActividadEconomica(
         codigo_act="722515",
         nombre_act="Restaurantes con servicio de preparación de alimentos a la carta o de comida corrida",
+        sector="72",
+        subsector="722",
+        rama="7225",
     )
 
 

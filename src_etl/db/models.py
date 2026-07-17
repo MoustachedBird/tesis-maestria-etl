@@ -12,9 +12,11 @@ import re
 from datetime import date
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     Float,
     Index,
+    Integer,
     String,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -145,6 +147,16 @@ class Establecimiento(Base):
     latitud: Mapped[float | None] = mapped_column(Float, comment="Latitude (WGS84)")
     longitud: Mapped[float | None] = mapped_column(Float, comment="Longitude (WGS84)")
 
+    # ===== H3 SPATIAL INDEX (CLEE resolution blocking) =====
+    h3_cell_9: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment="H3 cell index at resolution 9 (~174m edge) for spatial blocking",
+    )
+    h3_cell_5: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment="H3 cell index at resolution 5 (~8.5km edge) for spatial partitioning",
+    )
+
     # ===== CONTACT INFORMATION =====
     telefono: Mapped[str | None] = mapped_column(String(50), comment="Phone number")
     correoelec: Mapped[str | None] = mapped_column(String(200), comment="Email address")
@@ -176,6 +188,8 @@ class Establecimiento(Base):
         Index("ix_estab_type_size", "tipounieco", "per_ocu"),
         # CLEE lookups
         Index("ix_estab_clee", "clee"),
+        # H3 blocking key (CLEE resolution)
+        Index("ix_estab_h3_9", "h3_cell_9"),
     )
 
     # ===== HELPER METHODS =====
@@ -409,20 +423,59 @@ class ActividadEconomica(Base):
     SCIAN Economic Activity Catalog.
 
     Stores the catalog of economic activities based on SCIAN classification.
+    PK is `codigo_act` alone (nombre_act depends functionally on it).
+    The SCIAN hierarchy (sector/subsector/rama) is materialized as columns
+    derived from the 6-digit code prefix, so it is queryable in plain SQL.
     """
 
     __tablename__ = "denue_actividades_economicas"
 
-    # Composite Primary Key
     codigo_act: Mapped[str] = mapped_column(
-        String(10), primary_key=True, comment="SCIAN activity code"
+        String(10), primary_key=True, comment="SCIAN activity code (6 digits)"
     )
     nombre_act: Mapped[str] = mapped_column(
-        String(500), primary_key=True, comment="Activity description"
+        String(500), nullable=False, comment="Activity description"
+    )
+    sector: Mapped[str] = mapped_column(
+        String(2), nullable=False, index=True, comment="SCIAN sector (first 2 digits)"
+    )
+    subsector: Mapped[str] = mapped_column(
+        String(3), nullable=False, comment="SCIAN subsector (first 3 digits)"
+    )
+    rama: Mapped[str] = mapped_column(
+        String(4), nullable=False, comment="SCIAN rama (first 4 digits)"
     )
 
     def __repr__(self) -> str:
         return f"<ActividadEconomica(codigo={self.codigo_act}, nombre={self.nombre_act[:30]})>"
+
+
+class EstratoPersonal(Base):
+    """
+    Personnel Size Strata Catalog.
+
+    Materializes the INEGI employee-count ranges (per_ocu) with their numeric
+    bounds and business-size category, making SME classification queryable in
+    plain SQL. Seeded from the `PersonalOcupado` enum (single source of truth).
+    """
+
+    __tablename__ = "denue_estratos_personal"
+
+    per_ocu: Mapped[str] = mapped_column(
+        String(50), primary_key=True, comment="Employee count range label (INEGI)"
+    )
+    empleados_min: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Minimum employees in range"
+    )
+    empleados_max: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Maximum employees in range (999999 = open-ended)"
+    )
+    categoria: Mapped[str] = mapped_column(
+        String(10), nullable=False, comment="Business size: Micro, Small, Medium, Large, Unknown"
+    )
+
+    def __repr__(self) -> str:
+        return f"<EstratoPersonal(per_ocu={self.per_ocu}, categoria={self.categoria})>"
 
 
 class Entidad(Base):

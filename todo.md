@@ -1,0 +1,184 @@
+# TODO — Optimización de la resolución CLEE (hot path + blocking H3)
+
+Plan derivado de la revisión de eficiencia de la propagación CLEE (2026-07-16).
+El cuello de botella dominante es el loop de matching en Python (gate de
+actividad fuzzy recalculado por par + round-trip `to_dicts()`), no el BallTree.
+Se atacan primero los quick wins sin cambio arquitectónico y después se migra
+el pre-filtro espacial a blocking con celdas H3.
+
+**REGLA DE ORO: no correr migraciones ni `ALTER TABLE` sobre los `.duckdb` de
+`data/` sin confirmación explícita.** Los cambios de esquema se preparan en
+código (migración Alembic + modelo ORM) y se aplican en un paso controlado.
+
+---
+
+## Fase 1 — Quick wins en el hot path (sin cambio de arquitectura)
+
+- [ ] **Memoizar el gate de actividad SCIAN** (`matching.py:calculate_match_score`):
+      `nombre_act` viene de un catálogo de 1,127 valores → precomputar la matriz
+      de similitud (1127×1127 con `rapidfuzz.process.cpdist`, <1s) indexada por
+      `codigo_act`, o como mínimo `functools.lru_cache` sobre pares de strings.
+      Evaluar reemplazar el fuzzy sobre nombres por comparación de prefijos de
+      `codigo_act` (el código SCIAN es jerárquico).
+- [ ] **Eliminar round-trip `to_dicts()` / `pl.DataFrame(dicts)`** en
+      `entity_resolution.py:_propagate_single_kb`: producir `match_results`
+      alineado por índice de fila y aplicarlo con
+      `with_columns(pl.coalesce(...))` sobre `df_pending` intacto. Si se
+      conserva el loop por dicts, seleccionar solo las ~8 columnas de matching
+      antes de convertir.
+- [ ] **Ordenar vecinos por distancia**: `find_spatial_neighbors` ya retorna
+      distancias (hoy se descartan). Ordenar candidatos por cercanía mejora
+      precisión y adelanta el `break` de NAME/RAZON.
+- [ ] **Cache de KBs preparadas en disco** (`data/silver/kb_cache/{period}.parquet`):
+      hoy cada referencia se recarga de DuckDB (JOIN + clean) O(T×R) veces.
+      Invalidar el cache cuando el periodo se re-resuelve o con `--force`.
+- [ ] (Opcional) Vectorizar el scoring con `rapidfuzz.process.cpdist` sobre
+      pares aplanados `(target_idx, ref_idx)` — probablemente vuelve innecesario
+      el `multiprocessing.Pool` y su pickling de chunks.
+- [ ] Benchmark antes/después sobre un periodo muestra (tiempo por pasada
+      target×ref, matches idénticos al baseline).
+
+## Fase 2 — Esquema H3 (migración Alembic + ORM)
+
+- [x] Migración Alembic `74b0a3dad572_add_h3_cell_columns_to_establecimientos`:
+      añade `h3_cell_9` (BIGINT, blocking res 9 ≈ arista 174m) y `h3_cell_5`
+      (BIGINT, particionado grueso res 5 ≈ arista 8.5km) + índice
+      `ix_estab_h3_9`. Idempotente, mismo patrón que `ae36cad63494`.
+- [x] Modelo ORM `Establecimiento`: columnas `h3_cell_9` / `h3_cell_5` +
+      índice en `__table_args__` (necesario para el path DuckDB `create_all`).
+- [ ] Añadir dependencia: `uv add h3` (y evaluar `polars-h3` para cómputo
+      vectorizado; alternativa: extensión comunitaria `h3` de DuckDB).
+- [ ] Aplicar esquema a los warehouses existentes (CON CONFIRMACIÓN):
+      - PostgreSQL: `make db-migrate`
+      - Silver/Gold DuckDB existentes: `ALTER TABLE establecimientos ADD COLUMN
+        h3_cell_9 BIGINT; ADD COLUMN h3_cell_5 BIGINT;`
+
+## Fase 3 — Cómputo y backfill de celdas H3
+
+- [ ] Ingest (`processor.py`): calcular `h3_cell_9`/`h3_cell_5` desde
+      `latitud`/`longitud` al escribir a Silver (NULL si faltan coords).
+- [ ] Backfill de filas existentes (~100M) en Silver: por lotes con la
+      extensión `h3` de DuckDB (`h3_latlng_to_cell(latitud, longitud, 9)`)
+      o Polars + h3 vectorizado. Registrar avance en metadata.
+- [ ] Verificación: % de filas con celda no nula ≈ % con coords válidas;
+      spot-check de celdas contra coordenadas conocidas.
+
+## Fase 4 — Reemplazar BallTree por blocking H3
+
+- [ ] Generación de candidatos = join por celda: target expandido con
+      `grid_disk(h3_cell_9, k=3)` (k=3 en res 9 garantiza cubrir ≥500m en el
+      peor caso) contra `h3_cell_9` de la KB.
+- [ ] Post-filtro haversine exacto ≤ `SPATIAL_RADIUS_M` (vectorizado en
+      Polars/numpy) para recuperar el radio exacto de 500m.
+- [ ] Sustituir `find_spatial_neighbors` manteniendo la interfaz
+      (indices, distances) para no tocar la cascada de matching.
+- [ ] Particionado espacial por `h3_cell_5` en vez de slices arbitrarios de
+      KB (`KB_MAX_ROWS_PER_PARTITION`): las filas pendientes solo consultan
+      particiones con solape espacial real.
+- [ ] Config: nuevas constantes en `clee_resolution_config.py`
+      (`H3_BLOCKING_RES = 9`, `H3_GRID_DISK_K = 3`, `H3_PARTITION_RES = 5`).
+
+## Fase 5 — (Opcional, habilitado por H3) KB consolidada
+
+- [ ] Evaluar KB nacional deduplicada por `clee_master` (atributos del periodo
+      más reciente): con candidatos generados vía join en DuckDB (out-of-core),
+      la RAM deja de ser la restricción y el loop T×R colapsa a una pasada por
+      target.
+
+## Fase 6 — Validación y documentación
+
+- [ ] Paridad de matches: correr un periodo muestra con BallTree vs H3 y
+      comparar asignaciones de `clee_master` (deben ser ≈ idénticas; diferencias
+      solo por el post-filtro exacto vs radio BallTree).
+- [ ] `uv run pytest` en verde + tests nuevos para cómputo de celdas y
+      generación de candidatos.
+- [ ] Benchmark final del pipeline completo de resolución (tiempo total,
+      pico de RAM) vs baseline.
+- [ ] Actualizar `AGENTS.md` (sección CLEE Resolution: blocking H3, nuevas
+      constantes, columnas nuevas) y este `todo.md`.
+
+---
+
+# TODO — Normalización del esquema (Gold)
+
+Derivado de la revisión de normalización de `models.py` (2026-07-16).
+Diagnóstico: catálogos geográficos OK (3NF), pero hay un PK compuesto erróneo
+en actividades (2NF), atributos de entidad repetidos por periodo en
+`establecimientos` (3NF), un grupo repetitivo de calles cruzadas (1NF) y
+enums (`per_ocu`, `tipounieco`) cuya semántica vive solo en Python.
+Objetivo: **esquema estrella en Gold** — Silver se queda ancho como espejo
+de los CSV de INEGI (no normalizar Silver).
+
+## N1 — Bugfix catálogo SCIAN (prioridad alta, alimenta Fase 1 del gate)
+
+- [x] Cambiar PK de `denue_actividades_economicas` de `(codigo_act, nombre_act)`
+      a `codigo_act` solo. Verificado en seed: 1,127 códigos únicos de 6
+      dígitos, cero duplicados.
+- [x] Materializar jerarquía SCIAN como columnas: `sector` (2 díg.),
+      `subsector` (3 díg.), `rama` (4 díg.).
+- [x] Migración Alembic `173b3ded90cd` (recrear tabla, DuckDB no soporta
+      DROP CONSTRAINT: create-new → copy → drop → rename; aborta si detecta
+      códigos con nombres múltiples) + modelo ORM + `scian.py`.
+- [x] Seed parquet NO se modifica: la jerarquía se deriva del código al
+      cargar (`_with_scian_hierarchy`). El loader es esquema-consciente para
+      que la migración de seeds vieja (`dff9d0804542`) siga siendo replayable.
+
+## N2 — Catálogo de estratos de personal (barata, valor inmediato)
+
+- [x] Nueva tabla `denue_estratos_personal`: `per_ocu` PK, `empleados_min`,
+      `empleados_max`, `categoria` (Micro/Small/Medium/Large/Unknown, valores
+      del enum como fuente de verdad).
+- [x] Migración Alembic `bbe078d563ac` + modelo ORM `EstratoPersonal` +
+      loader `src_etl/loaders/estratos.py` (genera las 8 filas desde
+      `PersonalOcupado`; integrado a `seed_catalog_tables`).
+- [x] Verificado: cadena completa de 6 migraciones corre limpia contra un
+      DuckDB scratch desde cero; ciclo downgrade→upgrade de las 2 nuevas OK;
+      PK rechaza duplicados; 157 tests passed (baseline intacto).
+- [ ] Aplicar a los warehouses reales (CON CONFIRMACIÓN): `make db-migrate`
+      contra Silver (env.py apunta a Silver DuckDB).
+
+## N3 — Dimensión de entidad económica (la clave para la tesis)
+
+Depende de que la resolución CLEE esté estable. Es la misma tabla que la
+"KB consolidada" de la Fase 5 del plan CLEE — un solo artefacto, dos usos.
+
+- [ ] Nueva tabla `entidades_economicas` (una fila por `clee_master`):
+      `clee_master` PK, `es_sintetica` (prefijo NEW_*), atributos del periodo
+      más reciente (`nom_estab`, `raz_social`, `codigo_act`, `cve_ent`,
+      `cve_mun`, `cod_postal`, `latitud`, `longitud`, `h3_cell_9`),
+      `primer_periodo`, `ultimo_periodo`, `n_periodos`, `fecha_alta_date`.
+- [ ] Paso de construcción en el pipeline (post CLEE-resolution, en Load):
+      agregación por `clee_master` sobre Silver → tabla en Gold.
+- [ ] Migración Alembic + modelo ORM.
+- [ ] `establecimientos` pasa a leerse como tabla de observaciones
+      (hechos por periodo); documentar el patrón de consulta de
+      supervivencia/mortalidad sobre la dimensión.
+- [ ] OJO: los `clee_master` sintéticos (NEW_*) no son estables entre corridas
+      con `--force` — reconstruir la dimensión tras cada re-resolución.
+
+## N4 — (Opcional) 1NF de calles cruzadas
+
+- [ ] Tabla `establecimiento_vialidades` (`establecimiento_id` FK,
+      `secuencia` 1-3, `tipo_vial`, `nom_vial`) reemplazando
+      `tipo_v_e_1/2/3` + `nom_v_e_1/2/3`. Solo si se necesita consultarlas;
+      valor analítico bajo (no se usan en matching).
+
+## Decisiones: qué NO normalizar
+
+- Silver completo (espejo de fuente, ancho a propósito).
+- Dirección/asentamientos como catálogos (la compresión columnar de DuckDB
+  ya deduplica esos strings).
+- Contacto (telefono/correoelec/www) en tabla aparte.
+- Duplicados derivados aceptados como lineage/performance: `fecha_alta_str`
+  + `fecha_alta_date`, `clee` + `clee_master`, `h3_cell_5` (derivable de
+  `h3_cell_9`).
+
+---
+
+## Notas
+
+- Índices H3 válidos caben en BIGINT firmado (bit alto siempre 0).
+- Res 9: arista promedio ≈ 174m; res 5: ≈ 8.5km.
+- El plan anterior de este archivo (reestructuración a monolito modular en
+  `app/`) fue reemplazado por decisión del usuario el 2026-07-16; recuperable
+  del historial de la conversación si se retoma.

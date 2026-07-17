@@ -18,6 +18,9 @@ Usage:
 
 from pathlib import Path
 
+from src_etl.loaders.estratos import (
+    load_seeds_sqlalchemy as load_estratos,
+)
 from src_etl.loaders.geography import (
     load_seeds_sqlalchemy as load_geography,
 )
@@ -78,6 +81,11 @@ def seed_catalog_tables(
         print("\n  SCIAN activity catalog...")
         scian_stats = load_scian(connection, seeds_dir)
         stats.update(scian_stats)
+
+        # 3. Personnel strata (generated from PersonalOcupado enum, no parquet)
+        print("\n  Personnel strata catalog...")
+        estratos_stats = load_estratos(connection)
+        stats.update(estratos_stats)
 
         print("\n" + "=" * 70)
         print("All Seed Data Loaded Successfully")
