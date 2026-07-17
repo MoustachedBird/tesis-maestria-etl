@@ -90,6 +90,14 @@ columnas ausentes → `""`).
       de DBeaver y correr `make h3-backfill`.
 - [ ] Verificación post-backfill: % de filas con celda no nula ≈ % con
       coords válidas; spot-check de celdas contra h3-py.
+- [ ] **Computar columnas derivadas en el INSERT del ingest, no en UPDATE**
+      (decisión 2026-07-17, tras confirmar que el UPDATE de DuckDB tiene
+      sink single-thread + costo de índice ART): al ingerir un periodo
+      nuevo, calcular `h3_cell_9`/`h3_cell_5` (y evaluar `fecha_alta_date`)
+      en el DataFrame de Polars ANTES del INSERT — las filas nacen
+      completas, los stages h3-cells/normalize-dates quedan como red de
+      seguridad incremental y desaparece el write-path lento para datos
+      nuevos. Tocar `processor.py`/`EstablecimientoWriter`.
 
 ## Fase 4 — Reemplazar BallTree por blocking H3
 
@@ -252,6 +260,71 @@ inferior al costo previo de los dicts.
 - [x] `.env.test`: recursos mínimos y deterministas para la suite
       (MATCH_WORKERS=1 secuencial, DUCKDB_THREADS=2, MEMORY_LIMIT=2GB,
       descargas sin paralelismo).
+
+---
+
+# Auditoría de reutilización / duplicación / código muerto (2026-07-17)
+
+Directriz: lo transversal (logging, conexiones, patrones de stage) debe
+vivir en UN lugar. Hallazgos ordenados por valor.
+
+## Duplicado transversal — centralizar
+
+- [ ] **Setup de logging repetido 3 veces con efectos colaterales**:
+      `date_normalizer.py:25` y `processor.py:35` llaman
+      `logging.basicConfig()` A NIVEL DE MÓDULO (side effect al importar:
+      el primero que se importa gana y configura el root logger para todo
+      el proceso); `h3_backfill.py` usa handlers dedicados; el extractor
+      usa `core/logging.py` (structlog). Acción: helper único
+      `get_stage_logger(name, log_file)` en `core/logging.py` (patrón
+      handlers-dedicados + propagate=False, como h3_backfill) y eliminar
+      los `basicConfig` de módulo.
+- [ ] **Query de periodos implementada 3 veces**:
+      `clee_resolver._get_sorted_periods()` (DESC),
+      `date_normalizer._get_all_periods()` (ASC),
+      `h3_backfill._get_pending_periods()` (con agregado). Acción: util
+      compartida `get_periods(conn, order)` en `utils/warehouse.py`.
+- [ ] **Sanitización de nulos en 3 lugares**: `TEXT_COLS_TO_SANITIZE` en
+      `_load_period()`, `fill_null` dentro de `clean_contact_columns()`,
+      y relleno en `build_single_period_kb()`. Acción: consolidar en
+      `clean_contact_columns()` como único punto de sanitización.
+- [ ] (Opcional, valor medio) Boilerplate de stage repetido: create_run →
+      task por periodo → complete_run en `date_normalizer`, `h3_backfill`
+      y `clee_resolver`. Un `StageRunner` lo unificaría; evaluar si vale
+      el churn.
+- [x] Conexiones DuckDB: YA centralizadas en `connect_configured()`
+      (2026-07-17). `EstablecimientoWriter` hereda de `DuckDBWarehouse`,
+      así que el ingest también quedó cubierto.
+- Paralelización: SIN duplicación — vive solo en `entity_resolution.py`
+  (`_get_num_workers` es la única fuente de workers). Nada que hacer.
+
+## Código muerto / borrable
+
+- [ ] `db/database.py:176`: alias `DuckDBWarehouse = get_db` ("backward
+      compatibility") — 0 usos, y colisiona de nombre con
+      `utils.warehouse.DuckDBWarehouse` (¡son cosas distintas!). Borrar.
+- [ ] `AGENTS.md` referencia `src_etl/transformers/_legacy/` que YA NO
+      existe. Actualizar layout (junto con lo demás pendiente de Fase 6).
+- [ ] (Opcional) Helpers de `Establecimiento` en `models.py`: 10 métodos
+      con 0 usos fuera de models/tests. Varios ahora duplican al esquema:
+      `get_scian_sector/subsector` ≈ columnas `sector`/`subsector`;
+      `get_employee_range/get_business_size` ≈ `denue_estratos_personal`.
+      Podar los redundantes si se quiere reducir superficie (los tests
+      que los cubren se ajustan).
+- Artefactos locales regenerables (no trackeados, borrar cuando estorben):
+  `htmlcov/`, `coverage.xml`.
+- `data/metadata.duckdb.backup_pre_rename` (~2GB): backup manual previo al
+  rename — SOLO el usuario decide borrarlo (política de datos).
+
+## Reutilizable existente (para Fase 4, no reinventar)
+
+- `connect_configured()` para toda conexión nueva.
+- Patrón kb_cache parquet (`_get_ref_kb`) para cualquier cache de derivados.
+- `H3_BLOCKING_RES`/`H3_PARTITION_RES` + columnas ya pobladas.
+- Columna `sector` del catálogo SCIAN para el gate por prefijo (opcional
+  Fase 1) sin recomputar nada.
+- Patrón de logging con progreso/ETA de `h3_backfill` como plantilla del
+  helper centralizado.
 
 ---
 
