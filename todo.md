@@ -184,6 +184,37 @@ donde la paralelización NO es posible (con la razón).
       (workers=-1)` — paralelismo C multihilo sin overhead de fork/pickle.
       Eliminaría de raíz el residuo de COW del fork (ver abajo).
 
+## Medición empírica de escalado (2026-07-17, M4 Max 14 cores / 36GB)
+
+Benchmark sintético 160K target × 200K KB (matches idénticos 96,004 en
+los tres casos; medido con 1 core ocupado por el backfill H3):
+
+| MATCH_WORKERS | Tiempo | Speedup | RSS máx proceso padre |
+|---------------|--------|---------|----------------------|
+| 1 (secuencial)| 28.50s | 1.0x    | 1.38GB |
+| 6             | 8.26s  | 3.5x    | 1.74GB |
+| 11            | 6.17s  | 4.6x    | 1.78GB |
+
+Análisis (Amdahl): fracción serial ≈ 4.2s (~15%) = BallTree build/query +
+preparación columnar + ensamblado — techo teórico ~7x con workers
+infinitos. Ese 15% serial lo elimina la Fase 4 (H3-join en DuckDB,
+paralelo por diseño). Acciones tomadas/conclusiones:
+
+- [x] `MATCH_WORKERS` subido de 6 → 10 en `.env` (los 10 P-cores; los
+      4 E-cores aportan poco y el default auto cpu-3=11 mostró retornos
+      decrecientes). RAM peor caso con 10 workers: 10×0.5GB COW residual
+      + padre + DuckDB 8GB ≈ 16-17GB « 36GB. Seguro.
+- [ ] **Hallazgo backfill H3: el UPDATE de DuckDB corre con sink
+      single-thread** (~2,000 filas/s observadas, 1 core) — el costo real
+      es la reescritura de filas + mantenimiento del índice ART
+      `ix_estab_h3_9` fila a fila, no el cómputo h3. Para futuros re-runs
+      con `--force`: DROP INDEX ix_estab_h3_9 → backfill → CREATE INDEX
+      (orden de magnitud más rápido). No aplica al flujo incremental
+      normal (periodos nuevos son ~1-4M filas).
+- Memoria del sistema durante backfill real: 90% libre, RSS del proceso
+  9.6GB (el memory_limit de DuckDB gobierna buffers, no el RSS total del
+  proceso — extensiones y Python van aparte; margen amplio en 36GB).
+
 ## Verificación de seguridad RAM del paralelismo (2026-07-17)
 
 **fork + copy-on-write en CPython es imperfecto**: los refcounts y los
