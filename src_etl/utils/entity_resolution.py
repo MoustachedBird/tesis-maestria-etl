@@ -19,6 +19,7 @@ modo secuencial (~2 GB extra para chunks + resultados, no N copias).
 """
 
 import gc
+import hashlib
 import logging
 import multiprocessing as mp
 import os
@@ -40,8 +41,6 @@ from src_etl.utils.matching import (
 
 logger = logging.getLogger(__name__)
 
-# Columnas minimas que la KB necesita para el algoritmo de matching.
-# Cualquier otra columna es innecesaria y consume RAM sin aportar.
 KB_COLUMNS = [
     "clee_master",
     "latitud",
@@ -54,8 +53,41 @@ KB_COLUMNS = [
     "www_clean",
     "cod_postal",
 ]
+"""Columnas minimas que la KB de referencia necesita para el matching.
+
+Contrato de `build_single_period_kb()`: la KB retornada tiene EXACTAMENTE
+estas 10 columnas (las de texto ausentes en el periodo fuente se crean
+como ""). Cualquier otra columna es innecesaria y consume RAM sin aportar.
+`clee_master`, `latitud` y `longitud` son obligatorias en el origen
+(identidad a propagar + coordenadas para el BallTree).
+"""
 
 PROGRESS_LOG_INTERVAL = 100_000
+"""Cada cuantas filas target el loop secuencial loguea progreso.
+
+Solo aplica al modo secuencial (`_run_matching_sequential`); en modo
+paralelo el progreso se reporta por chunk completado. Subirlo reduce ruido
+en logs de periodos grandes; bajarlo da feedback mas granular en debug.
+"""
+
+TARGET_MATCH_COLUMNS = [
+    "nom_estab",
+    "raz_social",
+    "nombre_act",
+    "tel_clean",
+    "email_clean",
+    "www_clean",
+    "cod_postal",
+]
+"""Columnas del target que participan en el matching, en orden posicional.
+
+El orden DEBE coincidir con los primeros 7 parametros de
+`calculate_match_score()` (t_name, t_raz, t_act, t_tel, t_email, t_web,
+t_cp): `_propagate_single_kb()` extrae estas columnas como tuple de listas
+y los loops las desempaquetan por posicion. Se usan listas columnares en
+vez de `to_dicts()` para no materializar millones de dicts de ~20 campos
+(ahorra GBs de RAM y el costo de reconstruir el DataFrame).
+"""
 
 # ---------------------------------------------------------------------------
 # Variables globales para compartir KB entre workers via fork() + COW.
@@ -85,22 +117,25 @@ def _init_worker() -> None:
 
 
 def _match_chunk(
-    chunk_data: tuple[int, list[dict], list[np.ndarray]],
+    chunk_data: tuple[int, tuple[list[str], ...], list[np.ndarray]],
 ) -> tuple[int, list[str | None]]:
     """
     Worker function: procesa un chunk de filas target contra la KB completa.
 
     Se ejecuta en un proceso hijo. Accede a la KB via variables globales
-    del modulo (heredadas por fork, COW, sin copia real en RAM).
+    del modulo (heredadas por fork, COW, sin copia real en RAM). El target
+    llega como tuple de listas columnares (TARGET_MATCH_COLUMNS), mucho mas
+    barato de picklear que listas de dicts.
 
     Args:
-        chunk_data: Tupla (chunk_id, target_rows_slice, indices_slice)
+        chunk_data: Tupla (chunk_id, target_cols_slice, indices_slice)
 
     Returns:
         Tupla (chunk_id, resultados). chunk_id se usa para reordenar
         los resultados cuando se usa imap_unordered.
     """
-    chunk_id, target_rows, indices_slice = chunk_data
+    chunk_id, target_cols, indices_slice = chunk_data
+    t_names, t_razones, t_acts, t_tels, t_emails, t_webs, t_cps = target_cols
 
     # Referencia local a las globales (micro-optimizacion: evita LOAD_GLOBAL repetido)
     kb_clees = _shared_kb_clee_masters
@@ -114,19 +149,25 @@ def _match_chunk(
 
     results: list[str | None] = []
 
-    for idx, row in enumerate(target_rows):
+    for idx in range(len(t_names)):
         neighbors = indices_slice[idx]
         if len(neighbors) == 0:
             results.append(None)
             continue
 
-        # Sanitizar nulos
-        safe_row = {k: (v if v is not None else "") for k, v in row.items()}
+        # Vecinos ordenados por distancia: el primer COMBINED es el mas
+        # cercano y se conserva; un match directo (mas fuerte) lo reemplaza.
         best_clee = None
 
         for n_idx in neighbors:
             is_match, strategy = calculate_match_score(
-                safe_row,
+                t_names[idx],
+                t_razones[idx],
+                t_acts[idx],
+                t_tels[idx],
+                t_emails[idx],
+                t_webs[idx],
+                t_cps[idx],
                 kb_names[n_idx],
                 kb_razones[n_idx],
                 kb_acts[n_idx],
@@ -137,9 +178,11 @@ def _match_chunk(
             )
 
             if is_match:
-                best_clee = kb_clees[n_idx]
                 if strategy in ("NAME_MATCH", "RAZON_MATCH"):
+                    best_clee = kb_clees[n_idx]
                     break
+                if best_clee is None:
+                    best_clee = kb_clees[n_idx]
 
         results.append(best_clee)
 
@@ -147,7 +190,13 @@ def _match_chunk(
 
 
 def _get_num_workers() -> int:
-    """Calcula el numero de workers a usar (reserva 1 core para padre/log + 2 OS)."""
+    """
+    Calcula el numero de workers para el matching paralelo.
+
+    Prioridad: MATCH_WORKERS (env/.env) si esta definido; si no,
+    cpu_count - 3 (reserva 1 core para el proceso padre/logging y 2 para
+    el OS). Retornar 1 desactiva el paralelismo (se usa el loop secuencial).
+    """
     if MATCH_WORKERS is not None:
         return max(1, MATCH_WORKERS)
     cpu = os.cpu_count() or 4
@@ -155,14 +204,35 @@ def _get_num_workers() -> int:
 
 
 def get_region_prefix(state_list: list[str]) -> str:
-    """Genera un prefijo corto unico para namespacing de IDs temporales."""
+    """
+    Genera un prefijo corto y determinista para namespacing de IDs sinteticos.
+
+    Se usa en los CLEEs temporales `NEW_{prefix}-{uuid12}` que
+    `assign_new_clees()` asigna a establecimientos sin match. El prefijo
+    identifica la region procesada (un estado -> "AGU_123"; varios ->
+    "REG_4567") para poder distinguir corridas regionales en el warehouse.
+
+    Args:
+        state_list: Lista de nombres/claves de estados incluidos en la corrida.
+
+    Returns:
+        Prefijo estable para la misma lista de estados (hash truncado).
+
+    Nota: usa hashlib (no hash() builtin) porque hash() de strings esta
+    randomizado por proceso (PYTHONHASHSEED) y romperia la estabilidad
+    del prefijo entre corridas.
+    """
+
+    def _stable_hash(s: str, mod: int) -> int:
+        return int(hashlib.sha256(s.encode("utf-8")).hexdigest()[:8], 16) % mod
+
     if len(state_list) > 1:
         combined = "".join(sorted([s[:3] for s in state_list]))
-        return f"REG_{abs(hash(combined)) % 10000:04d}"
+        return f"REG_{_stable_hash(combined, 10000):04d}"
     else:
         state = state_list[0]
         clean_state = state.replace(" ", "").upper()
-        return f"{clean_state[:3]}_{abs(hash(state)) % 1000:03d}"
+        return f"{clean_state[:3]}_{_stable_hash(state, 1000):03d}"
 
 
 def build_single_period_kb(df_ref: pl.DataFrame) -> pl.DataFrame:
@@ -184,7 +254,10 @@ def build_single_period_kb(df_ref: pl.DataFrame) -> pl.DataFrame:
         (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
     ).select(available_cols)
 
-    # Rellenar nulos en campos de texto para evitar crashes en comparacion
+    # Rellenar nulos en campos de texto para evitar crashes en comparacion.
+    # Datos de encuesta: un campo puede venir vacio o incluso faltar en un
+    # periodo entero -- las columnas ausentes se crean como "" para que la
+    # KB siempre tenga exactamente KB_COLUMNS.
     text_cols = [
         "nom_estab",
         "raz_social",
@@ -198,23 +271,29 @@ def build_single_period_kb(df_ref: pl.DataFrame) -> pl.DataFrame:
     if fill_exprs:
         kb = kb.with_columns(fill_exprs)
 
-    return kb
+    missing_cols = [c for c in text_cols if c not in kb.columns]
+    if missing_cols:
+        kb = kb.with_columns([pl.lit("").alias(c) for c in missing_cols])
+
+    return kb.select(KB_COLUMNS)
 
 
 def _run_matching_sequential(
-    target_rows: list[dict],
+    target_cols: tuple[list[str], ...],
     indices: np.ndarray,
 ) -> list[str | None]:
     """
     Matching secuencial (fallback o cuando hay pocas filas).
 
-    Identico al loop original. Usa las variables _shared_kb_* del modulo.
+    Mismo loop que _match_chunk pero con logging de progreso.
+    Usa las variables _shared_kb_* del modulo.
     """
-    n_total = len(target_rows)
+    t_names, t_razones, t_acts, t_tels, t_emails, t_webs, t_cps = target_cols
+    n_total = len(t_names)
     results: list[str | None] = []
     n_matched = 0
 
-    for idx, row in enumerate(target_rows):
+    for idx in range(n_total):
         if idx > 0 and idx % PROGRESS_LOG_INTERVAL == 0:
             logger.info(
                 f"      Progreso: {idx:,}/{n_total:,} filas procesadas, "
@@ -226,12 +305,17 @@ def _run_matching_sequential(
             results.append(None)
             continue
 
-        safe_row = {k: (v if v is not None else "") for k, v in row.items()}
         best_clee = None
 
         for n_idx in neighbors:
             is_match, strategy = calculate_match_score(
-                safe_row,
+                t_names[idx],
+                t_razones[idx],
+                t_acts[idx],
+                t_tels[idx],
+                t_emails[idx],
+                t_webs[idx],
+                t_cps[idx],
                 _shared_kb_names[n_idx],
                 _shared_kb_razones[n_idx],
                 _shared_kb_acts[n_idx],
@@ -242,9 +326,11 @@ def _run_matching_sequential(
             )
 
             if is_match:
-                best_clee = _shared_kb_clee_masters[n_idx]
                 if strategy in ("NAME_MATCH", "RAZON_MATCH"):
+                    best_clee = _shared_kb_clee_masters[n_idx]
                     break
+                if best_clee is None:
+                    best_clee = _shared_kb_clee_masters[n_idx]
 
         results.append(best_clee)
         if best_clee:
@@ -257,7 +343,7 @@ def _run_matching_sequential(
 
 
 def _run_matching_parallel(
-    target_rows: list[dict],
+    target_cols: tuple[list[str], ...],
     indices: np.ndarray,
     n_workers: int,
 ) -> list[str | None]:
@@ -265,27 +351,29 @@ def _run_matching_parallel(
     Matching paralelo: particiona filas en chunks, un proceso por chunk.
 
     Usa multiprocessing.Pool con fork(). La KB se comparte via variables
-    globales del modulo (COW). Solo los chunks de target_rows y sus
-    indices se serializan (pickle) para enviar a cada worker.
+    globales del modulo (COW). Solo los slices columnares del target y sus
+    indices se serializan (pickle) para enviar a cada worker -- mucho mas
+    liviano que picklear listas de dicts.
 
     Args:
-        target_rows: Lista de dicts (filas pendientes).
+        target_cols: Tuple de listas columnares (TARGET_MATCH_COLUMNS).
         indices: Array de arrays de vecinos (del BallTree).
         n_workers: Numero de procesos hijo.
 
     Returns:
-        Lista de clee_master (None si no hubo match), misma longitud que target_rows.
+        Lista de clee_master (None si no hubo match), misma longitud que el target.
     """
-    n_total = len(target_rows)
+    n_total = len(target_cols[0])
     chunk_size = (n_total + n_workers - 1) // n_workers  # ceil division
 
-    chunks: list[tuple[int, list[dict], list[np.ndarray]]] = []
+    chunks: list[tuple[int, tuple[list[str], ...], list[np.ndarray]]] = []
     for i in range(n_workers):
         start = i * chunk_size
         end = min(start + chunk_size, n_total)
         if start >= n_total:
             break
-        chunks.append((i, target_rows[start:end], indices[start:end]))
+        cols_slice = tuple(col[start:end] for col in target_cols)
+        chunks.append((i, cols_slice, indices[start:end]))
 
     logger.info(f"      Paralelizando: {len(chunks)} workers, ~{chunk_size:,} filas/worker")
 
@@ -380,43 +468,48 @@ def _propagate_single_kb(
     t_mat = time.perf_counter() - t0
     logger.info(f"{prefix}KB materializada en {t_mat:.1f}s")
 
-    # 3. Convertir target a lista de dicts para el loop
-    # Capturamos el esquema ANTES de to_dicts() para usarlo al reconstruir.
-    # Esto evita errores de inferencia cuando columnas dispersas (ej. www_clean)
-    # tienen muchos nulls al inicio y Polars infiere tipo Null en vez de Utf8.
-    original_schema = df_pending.schema
-
+    # 3. Extraer solo las columnas de matching como listas columnares.
+    # Nada de to_dicts(): el DataFrame original queda intacto y los
+    # resultados se aplican por indice de fila al final.
     logger.info(f"{prefix}Preparando {df_pending.height:,} filas target para matching...")
     t0 = time.perf_counter()
-    target_rows = df_pending.to_dicts()
-    t_dicts = time.perf_counter() - t0
-    logger.info(f"{prefix}Target preparado en {t_dicts:.1f}s")
+    # Datos de encuesta: una columna puede faltar en un periodo entero;
+    # se sustituye por "" (misma semantica que campo vacio).
+    target_cols = tuple(
+        df_pending[c].fill_null("").to_list()
+        if c in df_pending.columns
+        else [""] * df_pending.height
+        for c in TARGET_MATCH_COLUMNS
+    )
+    t_prep = time.perf_counter() - t0
+    logger.info(f"{prefix}Target preparado en {t_prep:.1f}s")
 
-    n_total = len(target_rows)
+    n_total = df_pending.height
     n_workers = _get_num_workers()
 
     # 4. Elegir modo: paralelo si hay suficientes filas y mas de 1 worker
     if n_total >= MATCH_PARALLEL_THRESHOLD and n_workers > 1:
-        match_results = _run_matching_parallel(target_rows, indices, n_workers)
+        match_results = _run_matching_parallel(target_cols, indices, n_workers)
     else:
         if n_workers > 1:
             logger.info(
                 f"{prefix}{n_total:,} filas < {MATCH_PARALLEL_THRESHOLD:,} threshold, "
                 f"usando modo secuencial"
             )
-        match_results = _run_matching_sequential(target_rows, indices)
+        match_results = _run_matching_sequential(target_cols, indices)
 
-    # 5. Aplicar resultados a los dicts del target
-    n_matched = 0
-    for idx, clee in enumerate(match_results):
-        if clee is not None:
-            target_rows[idx]["clee_master"] = clee
-            n_matched += 1
+    del target_cols
 
+    # 5. Aplicar resultados por indice: todas las filas de df_pending llegan
+    # con clee_master NULL/"", asi que reemplazar la columna completa con los
+    # resultados (None donde no hubo match) es equivalente y evita reconstruir
+    # el DataFrame desde dicts.
+    n_matched = sum(1 for clee in match_results if clee is not None)
     logger.info(f"{prefix}{n_matched:,} matches encontrados en esta particion")
 
-    # 6. Reconstruir DataFrame con esquema original (evita inferencia erronea)
-    df_result = pl.DataFrame(target_rows, schema=original_schema).select(df_pending.columns)
+    df_result = df_pending.with_columns(
+        pl.Series("clee_master", match_results, dtype=pl.Utf8)
+    )
 
     # 7. Limpiar referencias globales (liberar KB para GC)
     _shared_kb_clee_masters = []

@@ -1,4 +1,19 @@
+"""
+Utilidades de matching espacial y difuso para la resolucion CLEE.
+
+Contiene los tres bloques del algoritmo de matching:
+  - Pre-filtro espacial: BallTree haversine (`find_spatial_neighbors`)
+  - Gate de actividad SCIAN memoizado (`passes_activity_gate`)
+  - Cascada de matching por candidato (`calculate_match_score`)
+
+Los umbrales viven en `clee_resolution_config.py` para calibracion sin
+tocar codigo. Este modulo se importa dentro del hot loop de
+`entity_resolution.py`: cualquier cambio aqui impacta directamente el
+tiempo de corrida sobre ~100M de filas.
+"""
+
 import uuid
+from functools import cache
 
 import numpy as np
 import polars as pl
@@ -17,13 +32,31 @@ from src_etl.utils.clee_resolution_config import (
 )
 
 
-def generate_temp_clee():
-    """Genera un UUID seguro para nuevos negocios."""
+def generate_temp_clee() -> str:
+    """
+    Genera el sufijo aleatorio (12 hex) de un CLEE sintetico.
+
+    Se usa en `assign_new_clees()` para formar `NEW_{prefix}-{uuid12}`.
+    NO es estable entre corridas con --force: no usarlo como FK permanente
+    en sistemas downstream (ver AGENTS.md, seccion CLEE Resolution).
+    """
     return uuid.uuid4().hex[:12]
 
 
 def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """Normaliza telefonos, emails y webs para comparacion exacta."""
+    """
+    Normaliza campos de contacto para comparacion exacta en el matching.
+
+    Genera las columnas derivadas que consume la cascada:
+      - tel_clean: telefono solo digitos (sin espacios/guiones/parentesis)
+      - email_clean: email en minusculas sin espacios
+      - www_clean: web en minusculas sin espacios
+    y rellena con "" los nulos de nom_estab/raz_social/nombre_act
+    (datos de encuesta: cualquier campo puede venir vacio).
+
+    Debe aplicarse a todo DataFrame que entre al matching (target o KB);
+    `CLEEResolver._load_period()` lo hace automaticamente.
+    """
     return df.with_columns(
         [
             pl.col("telefono").str.replace_all(r"[^0-9]", "").alias("tel_clean"),
@@ -40,6 +73,12 @@ def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
 def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
     """
     Ejecuta BallTree para encontrar indices vecinos.
+
+    Los vecinos se retornan ordenados por distancia ascendente
+    (sort_results=True): el candidato mas cercano se evalua primero,
+    lo que mejora precision (un COMBINED_MATCH cercano gana sobre uno
+    lejano) y adelanta el break de los matches directos.
+
     Retorna: (indices, distances)
     """
     ref_coords = np.radians(ref_df.select(["latitud", "longitud"]).to_numpy())
@@ -49,11 +88,49 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
     radius_rad = radius_meters / 6371000
 
     tree = BallTree(ref_coords, metric="haversine")
-    return tree.query_radius(target_coords, r=radius_rad, return_distance=True)
+    return tree.query_radius(
+        target_coords, r=radius_rad, return_distance=True, sort_results=True
+    )
+
+
+@cache
+def _activity_ratio_cached(act_a: str, act_b: str) -> float:
+    """token_set_ratio memoizado para pares de actividades SCIAN.
+
+    nombre_act proviene de un catalogo de ~1,127 valores, asi que el
+    universo de pares distintos es acotado (~1.27M en el peor caso) y el
+    hit-rate del cache es masivo: el gate pasa de costar un fuzzy por par
+    candidato a un lookup de dict.
+    """
+    return fuzz.token_set_ratio(act_a, act_b)
+
+
+def passes_activity_gate(t_act: str, kb_act: str) -> bool:
+    """Gate obligatorio de actividad SCIAN (memoizado).
+
+    Fast path: igualdad exacta (el caso dominante entre vecinos del mismo
+    giro) evita incluso el lookup. La clave del cache se normaliza por
+    orden lexicografico porque token_set_ratio es simetrico.
+    """
+    if not kb_act:
+        return False
+    if t_act == kb_act:
+        return True
+    if t_act <= kb_act:
+        score = _activity_ratio_cached(t_act, kb_act)
+    else:
+        score = _activity_ratio_cached(kb_act, t_act)
+    return score > ACTIVITY_GATE_THRESH
 
 
 def calculate_match_score(
-    t_row: dict,
+    t_name: str,
+    t_raz: str,
+    t_act: str,
+    t_tel: str,
+    t_email: str,
+    t_web: str,
+    t_cp: str,
     kb_name: str,
     kb_razon: str,
     kb_act: str,
@@ -65,11 +142,12 @@ def calculate_match_score(
     """
     Calcula el match siguiendo una cascada jerarquica con umbrales calibrables.
 
-    Compara un registro objetivo contra UN candidato de la KB (valores escalares,
-    no listas). Cada candidato es un establecimiento de un solo periodo de
-    referencia.
+    Compara un registro objetivo contra UN candidato de la KB. Recibe
+    escalares planos (no dicts) para evitar materializar el target como
+    lista de diccionarios en el hot loop.
 
     GATE (obligatorio): Actividad SCIAN fuzzy > ACTIVITY_GATE_THRESH
+                        (memoizado -- ver passes_activity_gate)
     Path A: Razon social fuzzy > LEGAL_NAME_MATCH_THRESH  -> match directo
     Path B: Nombre comercial fuzzy > BUSINESS_NAME_MATCH_THRESH -> match directo
     Path C: 2+ senales debiles coinciden (nombre parcial, tel, email, web, CP)
@@ -79,7 +157,13 @@ def calculate_match_score(
     calibracion futura.
 
     Args:
-        t_row: Diccionario con datos del registro objetivo
+        t_name: Nombre comercial del registro objetivo
+        t_raz: Razon social del registro objetivo
+        t_act: Actividad economica del registro objetivo
+        t_tel: Telefono limpio del registro objetivo
+        t_email: Email limpio del registro objetivo
+        t_web: Web limpia del registro objetivo
+        t_cp: Codigo postal del registro objetivo
         kb_name: Nombre comercial del candidato KB
         kb_razon: Razon social del candidato KB
         kb_act: Actividad economica del candidato KB
@@ -96,18 +180,15 @@ def calculate_match_score(
 
     # === GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ===
     # Un negocio no puede ser el mismo si su giro cambio drasticamente.
-    t_act = t_row.get("nombre_act", "")
-    if not kb_act or fuzz.token_set_ratio(t_act, kb_act) <= ACTIVITY_GATE_THRESH:
+    if not passes_activity_gate(t_act, kb_act):
         return False, "DIFF_ACTIVITY"
 
     # === PATH A: MATCH DIRECTO POR RAZON SOCIAL ===
-    t_raz = t_row.get("raz_social", "")
     if len(t_raz) > 2 and kb_razon and len(kb_razon) > 2:
         if fuzz.token_sort_ratio(t_raz, kb_razon) > LEGAL_NAME_MATCH_THRESH:
             return True, "RAZON_MATCH"
 
     # === PATH B: MATCH DIRECTO POR NOMBRE COMERCIAL ===
-    t_name = t_row.get("nom_estab", "")
     if len(t_name) > 2 and kb_name and len(kb_name) > 2:
         if fuzz.token_sort_ratio(t_name, kb_name) > BUSINESS_NAME_MATCH_THRESH:
             return True, "NAME_MATCH"
@@ -123,22 +204,18 @@ def calculate_match_score(
             signals += 1
 
     # Senal 2: Telefono exacto
-    t_tel = t_row.get("tel_clean", "")
     if len(t_tel) >= MIN_TEL_LENGTH and kb_tel and t_tel == kb_tel:
         signals += 1
 
     # Senal 3: Email exacto
-    t_email = t_row.get("email_clean", "")
     if len(t_email) >= MIN_EMAIL_LENGTH and kb_email and t_email == kb_email:
         signals += 1
 
     # Senal 4: Web exacto
-    t_web = t_row.get("www_clean", "")
     if len(t_web) >= MIN_WEB_LENGTH and kb_www and t_web == kb_www:
         signals += 1
 
     # Senal 5: Codigo postal igual
-    t_cp = t_row.get("cod_postal", "")
     if t_cp and kb_cp and t_cp == kb_cp:
         signals += 1
 

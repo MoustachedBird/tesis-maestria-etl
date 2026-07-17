@@ -78,6 +78,11 @@ class CLEEResolver:
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
 
+        # KB cache: cada periodo de referencia se carga de DuckDB (JOIN +
+        # limpieza) O(T x R) veces en la ventana deslizante. La KB preparada
+        # (10 columnas) se cachea en parquet tras la primera construccion.
+        self.kb_cache_dir = self.silver_db_path.parent / "kb_cache"
+
     def _get_connection(self) -> duckdb.DuckDBPyConnection:
         """Get a DuckDB connection to Silver warehouse."""
         return duckdb.connect(str(self.silver_db_path))
@@ -157,6 +162,60 @@ class CLEEResolver:
         )
 
         return clean_contact_columns(df)
+
+    # ------------------------------------------------------------------
+    # KB cache (parquet por periodo de referencia)
+    # ------------------------------------------------------------------
+
+    def _kb_cache_path(self, period: date) -> Path:
+        """Path del parquet de KB cacheada para un periodo."""
+        return self.kb_cache_dir / f"{period.isoformat()}.parquet"
+
+    def _get_ref_kb(self, period: date) -> pl.DataFrame:
+        """
+        Obtiene la KB de un periodo de referencia, usando cache en disco.
+
+        Primera vez: carga el periodo de DuckDB (JOIN + limpieza), construye
+        la KB de 10 columnas y la persiste en parquet (escritura atomica via
+        tmp + rename). Siguientes veces: lee el parquet directo, evitando
+        re-materializar el periodo completo (~19 columnas) en RAM.
+        """
+        cache_path = self._kb_cache_path(period)
+        if cache_path.exists():
+            logger.info(f"   KB de {period} desde cache ({cache_path.name})")
+            return pl.read_parquet(cache_path)
+
+        df_ref = self._load_period(period)
+        ref_kb = build_single_period_kb(df_ref)
+        del df_ref
+        gc.collect()
+
+        self.kb_cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(".parquet.tmp")
+        ref_kb.write_parquet(tmp_path)
+        tmp_path.rename(cache_path)
+        logger.info(f"   KB de {period} cacheada ({ref_kb.height:,} filas)")
+
+        return ref_kb
+
+    def _invalidate_kb_cache(self, period: date) -> None:
+        """Borra la KB cacheada de un periodo (tras re-escribir sus clee_master)."""
+        cache_path = self._kb_cache_path(period)
+        if cache_path.exists():
+            cache_path.unlink()
+
+    def _clear_kb_cache(self) -> None:
+        """Borra todo el cache de KBs (modo --force)."""
+        if not self.kb_cache_dir.exists():
+            return
+        removed = 0
+        for f in self.kb_cache_dir.glob("*.parquet"):
+            f.unlink()
+            removed += 1
+        for f in self.kb_cache_dir.glob("*.parquet.tmp"):
+            f.unlink()
+        if removed:
+            logger.info(f"   KB cache limpiado ({removed} archivos)")
 
     def _get_total_rows(self) -> int:
         """Get total row count in establecimientos."""
@@ -341,12 +400,8 @@ class CLEEResolver:
 
                 logger.info(f"   vs {ref_period} ({still_missing:,} pendientes)...")
 
-                # Load reference period and build lightweight KB
-                df_ref = self._load_period(ref_period)
-                ref_kb = build_single_period_kb(df_ref)
-
-                del df_ref
-                gc.collect()
+                # Load reference KB (from parquet cache after first build)
+                ref_kb = self._get_ref_kb(ref_period)
 
                 # Propagate CLEEs from reference to target
                 df_target = propagate_clees(df_target, ref_kb, self.spatial_tol)
@@ -364,6 +419,9 @@ class CLEEResolver:
             mapping = df_target.select(["id", "clee_master"])
             rows_written = self._write_period_results(mapping)
             total_resolved += rows_written
+
+            # Sus clee_master cambiaron: invalidar KB cacheada (si existia)
+            self._invalidate_kb_cache(target_period)
 
             logger.info(
                 f"   ✅ {target_period} resuelto: {rows_written:,} filas escritas "
@@ -450,6 +508,7 @@ class CLEEResolver:
             logger.warning(
                 "MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los clee_master."
             )
+            self._clear_kb_cache()
 
         # Create job run
         run_id = self.tracker.create_run(

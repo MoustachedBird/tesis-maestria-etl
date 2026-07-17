@@ -10,33 +10,45 @@ el pre-filtro espacial a blocking con celdas H3.
 `data/` sin confirmación explícita.** Los cambios de esquema se preparan en
 código (migración Alembic + modelo ORM) y se aplican en un paso controlado.
 
+**PREMISA DE OPTIMIZACIÓN: toda mejora debe optimizar tiempo de ejecución Y
+uso de RAM a la vez** — el pipeline corre en una Mac M4 Pro/Max (límite
+DuckDB 8GB en .env), no en un servidor. Nada de caches sin cota, KBs
+monolíticas en RAM ni matrices gigantes precomputadas; preferir procesamiento
+columnar/streaming, caches acotados o en disco, y liberar memoria entre
+pasadas. Además, los datos DENUE provienen de encuestas: cualquier campo
+puede venir vacío o faltar en un periodo completo — todo código de matching
+debe tolerarlo (`fill_null("")`, columnas ausentes → `""`).
+
 ---
 
-## Fase 1 — Quick wins en el hot path (sin cambio de arquitectura)
+## Fase 1 — Quick wins en el hot path (sin cambio de arquitectura) ✅ 2026-07-17
 
-- [ ] **Memoizar el gate de actividad SCIAN** (`matching.py:calculate_match_score`):
-      `nombre_act` viene de un catálogo de 1,127 valores → precomputar la matriz
-      de similitud (1127×1127 con `rapidfuzz.process.cpdist`, <1s) indexada por
-      `codigo_act`, o como mínimo `functools.lru_cache` sobre pares de strings.
-      Evaluar reemplazar el fuzzy sobre nombres por comparación de prefijos de
-      `codigo_act` (el código SCIAN es jerárquico).
-- [ ] **Eliminar round-trip `to_dicts()` / `pl.DataFrame(dicts)`** en
-      `entity_resolution.py:_propagate_single_kb`: producir `match_results`
-      alineado por índice de fila y aplicarlo con
-      `with_columns(pl.coalesce(...))` sobre `df_pending` intacto. Si se
-      conserva el loop por dicts, seleccionar solo las ~8 columnas de matching
-      antes de convertir.
-- [ ] **Ordenar vecinos por distancia**: `find_spatial_neighbors` ya retorna
-      distancias (hoy se descartan). Ordenar candidatos por cercanía mejora
-      precisión y adelanta el `break` de NAME/RAZON.
-- [ ] **Cache de KBs preparadas en disco** (`data/silver/kb_cache/{period}.parquet`):
-      hoy cada referencia se recarga de DuckDB (JOIN + clean) O(T×R) veces.
-      Invalidar el cache cuando el periodo se re-resuelve o con `--force`.
+- [x] **Memoizar el gate de actividad SCIAN**: `passes_activity_gate()` en
+      `matching.py` con `functools.cache` (clave simétrica normalizada) +
+      fast-path de igualdad exacta. RAM acotada: universo ≤ ~635K pares del
+      catálogo, decenas de MB en la práctica.
+- [x] **Eliminar round-trip `to_dicts()` / `pl.DataFrame(dicts)`**: el loop
+      ahora opera sobre listas columnares (`TARGET_MATCH_COLUMNS`, 7 cols en
+      vez de ~20 como dicts); resultados se aplican por índice con
+      `with_columns(pl.Series)`. `calculate_match_score` pasó a firma escalar.
+      Mayor ahorro de RAM de la fase (GBs de dicts eliminados).
+- [x] **Ordenar vecinos por distancia**: `sort_results=True` en
+      `query_radius`; el primer COMBINED (más cercano) se conserva y un
+      match directo lo reemplaza.
+- [x] **Cache de KBs preparadas** (`data/silver/kb_cache/{period}.parquet`):
+      `_get_ref_kb()` con escritura atómica (tmp+rename); invalidación al
+      re-escribir un periodo y limpieza total con `--force`.
+- [x] Robustez datos-de-encuesta: columnas de matching ausentes en un
+      periodo se sustituyen por `""` (KB garantiza `KB_COLUMNS` completas).
 - [ ] (Opcional) Vectorizar el scoring con `rapidfuzz.process.cpdist` sobre
-      pares aplanados `(target_idx, ref_idx)` — probablemente vuelve innecesario
-      el `multiprocessing.Pool` y su pickling de chunks.
-- [ ] Benchmark antes/después sobre un periodo muestra (tiempo por pasada
-      target×ref, matches idénticos al baseline).
+      pares aplanados — probablemente vuelve innecesario el Pool.
+- [ ] (Opcional) Evaluar gate por prefijo de `codigo_act` (ya materializado
+      en el catálogo como sector/subsector/rama) en vez de fuzzy sobre
+      nombres — cambia calibración, requiere validación de paridad.
+- [x] Benchmark sintético (40K target × 200K KB, secuencial): **16.87s →
+      6.65s (2.5x)** con matches idénticos (24,001). Paralelo (80K, 6
+      workers): 4.02s, ~3.3x throughput vs secuencial. Falta benchmark
+      sobre un periodo real (correr con `make clee-resolution`).
 
 ## Fase 2 — Esquema H3 (migración Alembic + ORM)
 
@@ -48,10 +60,9 @@ código (migración Alembic + modelo ORM) y se aplican en un paso controlado.
       índice en `__table_args__` (necesario para el path DuckDB `create_all`).
 - [ ] Añadir dependencia: `uv add h3` (y evaluar `polars-h3` para cómputo
       vectorizado; alternativa: extensión comunitaria `h3` de DuckDB).
-- [ ] Aplicar esquema a los warehouses existentes (CON CONFIRMACIÓN):
-      - PostgreSQL: `make db-migrate`
-      - Silver/Gold DuckDB existentes: `ALTER TABLE establecimientos ADD COLUMN
-        h3_cell_9 BIGINT; ADD COLUMN h3_cell_5 BIGINT;`
+- [x] Aplicar esquema al Silver real: `make db-migrate` ejecutado por el
+      usuario (2026-07-16), columnas H3 + índice creados. Gold hereda el
+      esquema en el próximo `make load` (copia de archivo).
 
 ## Fase 3 — Cómputo y backfill de celdas H3
 
@@ -134,8 +145,9 @@ de los CSV de INEGI (no normalizar Silver).
 - [x] Verificado: cadena completa de 6 migraciones corre limpia contra un
       DuckDB scratch desde cero; ciclo downgrade→upgrade de las 2 nuevas OK;
       PK rechaza duplicados; 157 tests passed (baseline intacto).
-- [ ] Aplicar a los warehouses reales (CON CONFIRMACIÓN): `make db-migrate`
-      contra Silver (env.py apunta a Silver DuckDB).
+- [x] Aplicado al Silver real: `make db-migrate` ejecutado por el usuario
+      (2026-07-16) sin errores — catálogo SCIAN normalizado + estratos
+      sembrados. Gold hereda en el próximo `make load`.
 
 ## N3 — Dimensión de entidad económica (la clave para la tesis)
 
