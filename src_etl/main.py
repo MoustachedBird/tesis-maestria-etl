@@ -57,6 +57,11 @@ def transform(
         "--normalize-dates/--no-normalize-dates",
         help="Normalize fecha_alta dates in Silver",
     ),
+    h3_cells: bool = typer.Option(
+        True,
+        "--h3-cells/--no-h3-cells",
+        help="Backfill H3 cells (h3_cell_9/h3_cell_5) from coordinates",
+    ),
     clee_resolution: bool = typer.Option(
         True, "--clee-resolution/--no-clee-resolution", help="Run CLEE resolution sub-step"
     ),
@@ -66,8 +71,9 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps: ingest -> normalize-dates -> clee-resolution.
-    Control each with --ingest, --normalize-dates, and --clee-resolution flags.
+    Sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution.
+    Control each with --ingest, --normalize-dates, --h3-cells and
+    --clee-resolution flags.
     """
     if source != "denue":
         console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
@@ -91,6 +97,10 @@ def transform(
         if normalize_dates and success:
             console.print("[bold blue]   Running: normalize-dates[/bold blue]")
             success = transformer.run_normalize_dates_stage(force=force)
+
+        if h3_cells and success:
+            console.print("[bold blue]   Running: h3-cells[/bold blue]")
+            success = transformer.run_h3_cells_stage(force=force)
 
         if clee_resolution and success:
             console.print("[bold magenta]   Running: clee-resolution[/bold magenta]")

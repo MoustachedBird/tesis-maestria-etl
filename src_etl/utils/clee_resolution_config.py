@@ -14,6 +14,14 @@ import os
 # 500m cubre mudanzas dentro del mismo barrio/colonia.
 SPATIAL_RADIUS_M = 500
 
+# --- CELDAS H3 (blocking espacial) ---
+# Resolucion de la celda de blocking: res 9 ~ arista 174m. Junto con
+# grid_disk(k) sustituye al BallTree como generador de candidatos.
+H3_BLOCKING_RES = 9
+# Resolucion de particionado grueso: res 5 ~ arista 8.5km. Permite podar
+# particiones de KB sin solape espacial con el target.
+H3_PARTITION_RES = 5
+
 # --- GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ---
 # Umbral minimo de similitud fuzzy en nombre_act (actividad SCIAN).
 # Si no se supera, el candidato se descarta sin evaluar otros campos.

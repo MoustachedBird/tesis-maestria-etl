@@ -58,21 +58,34 @@ debe tolerarlo (`fill_null("")`, columnas ausentes → `""`).
       `ix_estab_h3_9`. Idempotente, mismo patrón que `ae36cad63494`.
 - [x] Modelo ORM `Establecimiento`: columnas `h3_cell_9` / `h3_cell_5` +
       índice en `__table_args__` (necesario para el path DuckDB `create_all`).
-- [ ] Añadir dependencia: `uv add h3` (y evaluar `polars-h3` para cómputo
-      vectorizado; alternativa: extensión comunitaria `h3` de DuckDB).
+- [x] Dependencia `h3` agregada (`uv add h3`, v4.5.0, API int:
+      `h3.api.basic_int`). Decisión: el cómputo masivo usa la extensión
+      comunitaria `h3` de DuckDB (out-of-core, cero RAM en Python);
+      `polars-h3` descartado por ahora — verificado que h3-py y la
+      extensión DuckDB producen celdas idénticas.
 - [x] Aplicar esquema al Silver real: `make db-migrate` ejecutado por el
       usuario (2026-07-16), columnas H3 + índice creados. Gold hereda el
       esquema en el próximo `make load` (copia de archivo).
 
 ## Fase 3 — Cómputo y backfill de celdas H3
 
-- [ ] Ingest (`processor.py`): calcular `h3_cell_9`/`h3_cell_5` desde
-      `latitud`/`longitud` al escribir a Silver (NULL si faltan coords).
-- [ ] Backfill de filas existentes (~100M) en Silver: por lotes con la
-      extensión `h3` de DuckDB (`h3_latlng_to_cell(latitud, longitud, 9)`)
-      o Polars + h3 vectorizado. Registrar avance en metadata.
-- [ ] Verificación: % de filas con celda no nula ≈ % con coords válidas;
-      spot-check de celdas contra coordenadas conocidas.
+- [x] Nuevo stage `h3-cells` (`transformers/h3_backfill.py`,
+      `H3CellBackfiller`): UPDATE por periodo vía extensión h3 de DuckDB,
+      100% out-of-core, respeta DUCKDB_MEMORY_LIMIT/THREADS. Incremental
+      por diseño (`h3_cell_9 IS NULL` + coords válidas), así que cubre
+      TAMBIÉN los periodos nuevos del ingest — no fue necesario tocar
+      `processor.py`. Tracking en metadata (job `denue_h3_backfill` +
+      process_task por periodo). Integrado al pipeline
+      (ingest → normalize-dates → h3-cells → clee-resolution), flag CLI
+      `--h3-cells/--no-h3-cells`, target `make h3-backfill`.
+- [x] Smoke test en DuckDB scratch: coords válidas pobladas, nulas/fuera
+      de rango saltadas, filas ya pobladas intactas, celdas idénticas a
+      h3-py, re-run idempotente (0 pendientes).
+- [ ] **Backfill del Silver real (~100M filas): BLOQUEADO — DBeaver
+      mantiene lock sobre `data/silver/denue.duckdb`.** Cerrar la conexión
+      de DBeaver y correr `make h3-backfill`.
+- [ ] Verificación post-backfill: % de filas con celda no nula ≈ % con
+      coords válidas; spot-check de celdas contra h3-py.
 
 ## Fase 4 — Reemplazar BallTree por blocking H3
 

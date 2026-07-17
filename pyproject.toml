@@ -26,6 +26,7 @@ dependencies = [
     "selenium>=4.39.0",
     "beautifulsoup4",
     "shellingham",
+    "h3>=4.5.0",
 ]
 
 [dependency-groups]

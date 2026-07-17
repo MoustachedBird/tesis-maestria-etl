@@ -16,6 +16,7 @@ from src_etl.core.config import settings
 from src_etl.loaders.loader import SilverToGoldLoader
 from src_etl.transformers.clee_resolver import CLEEResolver
 from src_etl.transformers.date_normalizer import DateNormalizer
+from src_etl.transformers.h3_backfill import H3CellBackfiller
 from src_etl.transformers.processor import BronzeToSilverProcessor
 from src_metadata.tracker import MetadataTracker
 
@@ -86,6 +87,11 @@ class DenuePipelineOrchestrator:
         )
 
         self.date_normalizer = DateNormalizer(
+            tracker=self.tracker,
+            silver_db_path=self.silver_db_path,
+        )
+
+        self.h3_backfiller = H3CellBackfiller(
             tracker=self.tracker,
             silver_db_path=self.silver_db_path,
         )
@@ -162,6 +168,38 @@ class DenuePipelineOrchestrator:
             logger.error(f"NORMALIZE-DATES stage failed: {e}")
             raise
 
+    def run_h3_cells_stage(self, force: bool = False) -> bool:
+        """
+        Run H3-cells stage: backfill h3_cell_9 / h3_cell_5 from coordinates.
+
+        Computes H3 cell indexes (blocking res 9, partition res 5) for rows
+        with valid coordinates, directly in Silver DuckDB via the h3
+        community extension. Incremental: only rows with NULL h3_cell_9.
+
+        Args:
+            force: If True, recompute cells for all rows with valid coords
+                   (only needed if the H3 resolution changes).
+
+        Returns:
+            True if successful, False otherwise
+        """
+        logger.info("Starting H3-CELLS stage (Silver DuckDB)")
+        logger.info(f"   Mode: {'FORCE (recompute all)' if force else 'INCREMENTAL'}")
+
+        try:
+            success = self.h3_backfiller.run(force=force)
+
+            if success:
+                logger.info("H3-CELLS stage completed successfully")
+            else:
+                logger.warning("H3-CELLS stage completed with errors")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"H3-CELLS stage failed: {e}")
+            raise
+
     def run_clee_resolution_stage(self, force: bool = False) -> bool:
         """
         Run CLEE resolution stage: Entity Resolution.
@@ -235,11 +273,11 @@ class DenuePipelineOrchestrator:
         Returns:
             True if all stages successful, False otherwise
         """
-        logger.info("Starting FULL PIPELINE (Transform -> Normalize-Dates -> Load)")
+        logger.info("Starting FULL PIPELINE (Transform -> Normalize-Dates -> H3-Cells -> Load)")
         logger.info("=" * 60)
 
         # Stage 1: Transform (Bronze -> Silver)
-        logger.info("STAGE 1/3: Transform")
+        logger.info("STAGE 1/4: Transform")
         transform_success = self.run_transform_stage(force=force)
 
         if not transform_success:
@@ -250,23 +288,33 @@ class DenuePipelineOrchestrator:
         logger.info("=" * 60)
 
         # Stage 2: Normalize Dates (Silver DuckDB)
-        logger.info("STAGE 2/3: Normalize-Dates")
+        logger.info("STAGE 2/4: Normalize-Dates")
         normalize_success = self.run_normalize_dates_stage(force=force)
 
         if not normalize_success:
-            logger.warning("Normalize-Dates stage had errors, continuing to Load...")
+            logger.warning("Normalize-Dates stage had errors, continuing...")
 
         logger.info("")
         logger.info("=" * 60)
 
-        # Stage 3: Load (Silver -> Gold)
-        logger.info("STAGE 3/3: Load")
+        # Stage 3: H3 Cells (Silver DuckDB)
+        logger.info("STAGE 3/4: H3-Cells")
+        h3_success = self.run_h3_cells_stage(force=force)
+
+        if not h3_success:
+            logger.warning("H3-Cells stage had errors, continuing to Load...")
+
+        logger.info("")
+        logger.info("=" * 60)
+
+        # Stage 4: Load (Silver -> Gold)
+        logger.info("STAGE 4/4: Load")
         load_success = self.run_load_stage(force=force)
 
         logger.info("")
         logger.info("=" * 60)
 
-        if transform_success and normalize_success and load_success:
+        if transform_success and normalize_success and h3_success and load_success:
             logger.info("FULL PIPELINE completed successfully!")
             logger.info(f"   Silver: {self.silver_db_path}")
             logger.info(f"   Gold: {self.gold_db_path}")
