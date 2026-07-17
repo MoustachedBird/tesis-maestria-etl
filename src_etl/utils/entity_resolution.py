@@ -4,7 +4,7 @@ Entity Resolution: Funciones de propagacion de CLEEs entre periodos.
 Este modulo contiene la logica aislada de propagacion de identidades.
 La funcion principal `propagate_clees()` es el punto de intercambio
 para futuros algoritmos de matching -- mientras respete la interfaz
-(recibe target + ref_kb, retorna target con clee_master parcialmente
+(recibe target + ref_kb, retorna target con clee_propagado_radio parcialmente
 poblado), el orquestador no necesita cambios.
 
 Paralelismo: El loop de matching es embarrassingly parallel (cada fila
@@ -42,7 +42,7 @@ from src_etl.utils.matching import (
 logger = logging.getLogger(__name__)
 
 KB_COLUMNS = [
-    "clee_master",
+    "clee_propagado_radio",
     "latitud",
     "longitud",
     "nom_estab",
@@ -58,7 +58,7 @@ KB_COLUMNS = [
 Contrato de `build_single_period_kb()`: la KB retornada tiene EXACTAMENTE
 estas 10 columnas (las de texto ausentes en el periodo fuente se crean
 como ""). Cualquier otra columna es innecesaria y consume RAM sin aportar.
-`clee_master`, `latitud` y `longitud` son obligatorias en el origen
+`clee_propagado_radio`, `latitud` y `longitud` son obligatorias en el origen
 (identidad a propagar + coordenadas para el BallTree).
 """
 
@@ -95,7 +95,7 @@ vez de `to_dicts()` para no materializar millones de dicts de ~20 campos
 # Los hijos las heredan sin copia (copy-on-write del OS).
 # NUNCA escribir en estas desde un worker -- rompe COW.
 # ---------------------------------------------------------------------------
-_shared_kb_clee_masters: list[str] = []
+_shared_kb_clee_propagado_radios: list[str] = []
 _shared_kb_names: list[str] = []
 _shared_kb_razones: list[str] = []
 _shared_kb_acts: list[str] = []
@@ -138,7 +138,7 @@ def _match_chunk(
     t_names, t_razones, t_acts, t_tels, t_emails, t_webs, t_cps = target_cols
 
     # Referencia local a las globales (micro-optimizacion: evita LOAD_GLOBAL repetido)
-    kb_clees = _shared_kb_clee_masters
+    kb_clees = _shared_kb_clee_propagado_radios
     kb_names = _shared_kb_names
     kb_razones = _shared_kb_razones
     kb_acts = _shared_kb_acts
@@ -244,14 +244,14 @@ def build_single_period_kb(df_ref: pl.DataFrame) -> pl.DataFrame:
     el algoritmo de matching, minimizando el uso de RAM.
 
     Args:
-        df_ref: DataFrame de un periodo ya resuelto (con clee_master poblado).
+        df_ref: DataFrame de un periodo ya resuelto (con clee_propagado_radio poblado).
 
     Returns:
-        DataFrame con columnas KB_COLUMNS, solo filas con clee_master valido.
+        DataFrame con columnas KB_COLUMNS, solo filas con clee_propagado_radio valido.
     """
     available_cols = [c for c in KB_COLUMNS if c in df_ref.columns]
     kb = df_ref.filter(
-        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+        (pl.col("clee_propagado_radio").is_not_null()) & (pl.col("clee_propagado_radio") != "")
     ).select(available_cols)
 
     # Rellenar nulos en campos de texto para evitar crashes en comparacion.
@@ -327,10 +327,10 @@ def _run_matching_sequential(
 
             if is_match:
                 if strategy in ("NAME_MATCH", "RAZON_MATCH"):
-                    best_clee = _shared_kb_clee_masters[n_idx]
+                    best_clee = _shared_kb_clee_propagado_radios[n_idx]
                     break
                 if best_clee is None:
-                    best_clee = _shared_kb_clee_masters[n_idx]
+                    best_clee = _shared_kb_clee_propagado_radios[n_idx]
 
         results.append(best_clee)
         if best_clee:
@@ -361,7 +361,7 @@ def _run_matching_parallel(
         n_workers: Numero de procesos hijo.
 
     Returns:
-        Lista de clee_master (None si no hubo match), misma longitud que el target.
+        Lista de clee_propagado_radio (None si no hubo match), misma longitud que el target.
     """
     n_total = len(target_cols[0])
     chunk_size = (n_total + n_workers - 1) // n_workers  # ceil division
@@ -431,22 +431,22 @@ def _propagate_single_kb(
     partition_label: str = "",
 ) -> pl.DataFrame:
     """
-    Propaga clee_master desde UNA particion de KB a registros pendientes.
+    Propaga clee_propagado_radio desde UNA particion de KB a registros pendientes.
 
     Funcion interna que ejecuta el matching completo (BallTree + cascada)
     para una unica particion de la KB de referencia. Llamada una o mas
     veces por propagate_clees() dependiendo de si la KB se particiono.
 
     Args:
-        df_pending: DataFrame de filas sin clee_master (pendientes).
+        df_pending: DataFrame de filas sin clee_propagado_radio (pendientes).
         kb_partition: Particion de KB (o KB completa si no se particiono).
         spatial_tol: Radio de busqueda espacial en metros.
         partition_label: Etiqueta para logging (ej. "particion 1/3").
 
     Returns:
-        df_pending con clee_master parcialmente poblado donde hubo match.
+        df_pending con clee_propagado_radio parcialmente poblado donde hubo match.
     """
-    global _shared_kb_clee_masters, _shared_kb_names, _shared_kb_razones
+    global _shared_kb_clee_propagado_radios, _shared_kb_names, _shared_kb_razones
     global _shared_kb_acts, _shared_kb_tels, _shared_kb_emails
     global _shared_kb_wwws, _shared_kb_cps
 
@@ -468,7 +468,7 @@ def _propagate_single_kb(
     # 2. Materializar KB a variables globales para acceso COW en workers
     logger.info(f"{prefix}Materializando KB ({kb_partition.height:,} filas x 8 columnas)...")
     t0 = time.perf_counter()
-    _shared_kb_clee_masters = kb_partition["clee_master"].to_list()
+    _shared_kb_clee_propagado_radios = kb_partition["clee_propagado_radio"].to_list()
     _shared_kb_names = kb_partition["nom_estab"].to_list()
     _shared_kb_razones = kb_partition["raz_social"].to_list()
     _shared_kb_acts = kb_partition["nombre_act"].to_list()
@@ -512,18 +512,18 @@ def _propagate_single_kb(
     del target_cols
 
     # 5. Aplicar resultados por indice: todas las filas de df_pending llegan
-    # con clee_master NULL/"", asi que reemplazar la columna completa con los
+    # con clee_propagado_radio NULL/"", asi que reemplazar la columna completa con los
     # resultados (None donde no hubo match) es equivalente y evita reconstruir
     # el DataFrame desde dicts.
     n_matched = sum(1 for clee in match_results if clee is not None)
     logger.info(f"{prefix}{n_matched:,} matches encontrados en esta particion")
 
     df_result = df_pending.with_columns(
-        pl.Series("clee_master", match_results, dtype=pl.Utf8)
+        pl.Series("clee_propagado_radio", match_results, dtype=pl.Utf8)
     )
 
     # 7. Limpiar referencias globales (liberar KB para GC)
-    _shared_kb_clee_masters = []
+    _shared_kb_clee_propagado_radios = []
     _shared_kb_names = []
     _shared_kb_razones = []
     _shared_kb_acts = []
@@ -541,10 +541,10 @@ def propagate_clees(
     spatial_tol: int,
 ) -> pl.DataFrame:
     """
-    Propaga clee_master desde una KB de referencia a registros sin resolver.
+    Propaga clee_propagado_radio desde una KB de referencia a registros sin resolver.
 
     Funcion aislada de propagacion: compara registros del periodo objetivo
-    que aun no tienen clee_master contra una KB de un solo periodo de
+    que aun no tienen clee_propagado_radio contra una KB de un solo periodo de
     referencia (valores escalares, no listas acumuladas).
 
     Si la KB excede KB_MAX_ROWS_PER_PARTITION filas, se divide en
@@ -556,11 +556,11 @@ def propagate_clees(
     la KB completa, solo cambia el pico de RAM.
 
     Algoritmo (por particion):
-    1. Separa registros ya resueltos de pendientes (clee_master IS NULL)
+    1. Separa registros ya resueltos de pendientes (clee_propagado_radio IS NULL)
     2. Construye BallTree sobre la particion de KB
     3. Para cada pendiente, evalua vecinos espaciales con calculate_match_score()
-    4. Si hay match -> asigna clee_master del vecino
-    5. Si no hay match -> deja clee_master como NULL (siguiente particion o ronda)
+    4. Si hay match -> asigna clee_propagado_radio del vecino
+    5. Si no hay match -> deja clee_propagado_radio como NULL (siguiente particion o ronda)
 
     Paralelismo: Si hay mas de MATCH_PARALLEL_THRESHOLD filas pendientes,
     se usa multiprocessing para distribuir el loop de matching entre
@@ -570,23 +570,23 @@ def propagate_clees(
 
     NOTA: Esta funcion es el punto de intercambio para futuros algoritmos
     de propagacion. Mientras respete la interfaz (recibe target + ref_kb,
-    retorna target con clee_master parcialmente poblado), el orquestador
+    retorna target con clee_propagado_radio parcialmente poblado), el orquestador
     no necesita cambios.
 
     Args:
         df_target: DataFrame del periodo a resolver. Debe incluir columna
-                   clee_master (puede ser NULL para registros pendientes).
+                   clee_propagado_radio (puede ser NULL para registros pendientes).
         ref_kb: KB escalar de un solo periodo de referencia.
         spatial_tol: Radio de busqueda espacial en metros.
 
     Returns:
-        df_target con clee_master parcialmente poblado donde hubo match.
+        df_target con clee_propagado_radio parcialmente poblado donde hubo match.
     """
     # Separar resueltos de pendientes
     df_resolved = df_target.filter(
-        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+        (pl.col("clee_propagado_radio").is_not_null()) & (pl.col("clee_propagado_radio") != "")
     )
-    df_pending = df_target.filter((pl.col("clee_master").is_null()) | (pl.col("clee_master") == ""))
+    df_pending = df_target.filter((pl.col("clee_propagado_radio").is_null()) | (pl.col("clee_propagado_radio") == ""))
 
     if df_pending.height == 0 or ref_kb.height == 0:
         return df_target
@@ -607,10 +607,10 @@ def propagate_clees(
         for p_idx in range(n_partitions):
             # Recalcular pendientes: filas ya matcheadas no se re-evaluan
             still_pending = df_pending.filter(
-                (pl.col("clee_master").is_null()) | (pl.col("clee_master") == "")
+                (pl.col("clee_propagado_radio").is_null()) | (pl.col("clee_propagado_radio") == "")
             )
             already_matched = df_pending.filter(
-                (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+                (pl.col("clee_propagado_radio").is_not_null()) & (pl.col("clee_propagado_radio") != "")
             )
 
             if still_pending.height == 0:
@@ -653,20 +653,20 @@ def assign_new_clees(
     region_prefix: str,
 ) -> pl.DataFrame:
     """
-    Asigna NEW_prefix-uuid a registros que quedaron sin clee_master
+    Asigna NEW_prefix-uuid a registros que quedaron sin clee_propagado_radio
     despues de todas las rondas de propagacion.
 
     Args:
-        df_target: DataFrame con clee_master parcialmente poblado.
+        df_target: DataFrame con clee_propagado_radio parcialmente poblado.
         region_prefix: Prefijo para generar CLEEs temporales.
 
     Returns:
-        df_target con todos los clee_master poblados (sin NULLs).
+        df_target con todos los clee_propagado_radio poblados (sin NULLs).
     """
     df_resolved = df_target.filter(
-        (pl.col("clee_master").is_not_null()) & (pl.col("clee_master") != "")
+        (pl.col("clee_propagado_radio").is_not_null()) & (pl.col("clee_propagado_radio") != "")
     )
-    df_missing = df_target.filter((pl.col("clee_master").is_null()) | (pl.col("clee_master") == ""))
+    df_missing = df_target.filter((pl.col("clee_propagado_radio").is_null()) | (pl.col("clee_propagado_radio") == ""))
 
     if df_missing.height == 0:
         return df_target
@@ -677,7 +677,7 @@ def assign_new_clees(
             lambda x: f"NEW_{region_prefix}-{generate_temp_clee()}",
             return_dtype=pl.Utf8,
         )
-        .alias("clee_master")
+        .alias("clee_propagado_radio")
     )
 
     return df_resolved.vstack(df_assigned.select(df_resolved.columns))

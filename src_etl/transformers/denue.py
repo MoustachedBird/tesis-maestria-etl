@@ -206,10 +206,10 @@ class DenuePipelineOrchestrator:
 
         Matches establishments across time periods and generates
         master identifiers (CLEEs) for entity tracking. Results are
-        written back to the Silver DuckDB `clee_master` column.
+        written back to the Silver DuckDB `clee_propagado_radio` column.
 
         Args:
-            force: If True, reset all clee_master values and re-run from scratch.
+            force: If True, reset all clee_propagado_radio values and re-run from scratch.
 
         Returns:
             True if successful, False otherwise

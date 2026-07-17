@@ -53,7 +53,7 @@ MASTER_COLUMNS = [
 DB_FACT_COLUMNS = [
     "id",  # <--- Cambiado de 'row_id' a 'id' para coincidir con el procesador
     "clee",
-    "clee_master",
+    "clee_propagado_radio",
     "nom_estab",
     "raz_social",
     "codigo_act",

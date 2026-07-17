@@ -94,7 +94,7 @@ KB_MAX_ROWS_PER_PARTITION: int = int(os.environ.get("KB_MAX_ROWS_PER_PARTITION",
 COLS_NEEDED_FOR_MATCHING = [
     "id",
     "clee",
-    "clee_master",
+    "clee_propagado_radio",
     "nom_estab",
     "raz_social",
     "codigo_act",
@@ -119,7 +119,7 @@ SILVER_READ_QUERY = """
     SELECT
         e.id,
         e.clee,
-        e.clee_master,
+        e.clee_propagado_radio,
         e.nom_estab,
         e.raz_social,
         e.codigo_act,

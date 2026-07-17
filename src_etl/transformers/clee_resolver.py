@@ -10,12 +10,12 @@ is compared against one reference period at a time (instead of a
 monolithic growing KB), keeping peak RAM to ~5-8 GB.
 
 For periods that already have CLEE assigned by INEGI (2021+), resolution
-is deterministic (clee_master = clee). For older periods without CLEE
+is deterministic (clee_propagado_radio = clee). For older periods without CLEE
 (2015-2020), a spatial tolerance radius (BallTree) pre-filter and a
 conditional matching cascade resolve identities probabilistically.
 
 Reads from and writes back to the Silver DuckDB warehouse directly,
-populating the `clee_master` column on the `establecimientos` table.
+populating the `clee_propagado_radio` column on the `establecimientos` table.
 """
 
 import gc
@@ -50,13 +50,13 @@ class CLEEResolver:
 
     Uses a sliding-window approach: for each target period without CLEE,
     iterates over all already-resolved periods one at a time as reference,
-    propagating clee_master where spatial + fuzzy matching finds a hit.
+    propagating clee_propagado_radio where spatial + fuzzy matching finds a hit.
 
     Peak memory: ~5-8 GB (1 reference period + 1 target period).
 
     Modes:
-        force=True:  Reset all clee_master, re-resolve from scratch.
-        force=False: Only process records where clee_master IS NULL
+        force=True:  Reset all clee_propagado_radio, re-resolve from scratch.
+        force=False: Only process records where clee_propagado_radio IS NULL
                      (incremental, preserves already-assigned values).
     """
 
@@ -88,11 +88,11 @@ class CLEEResolver:
         return connect_configured(self.silver_db_path)
 
     def _count_unresolved(self) -> int:
-        """Count rows where clee_master IS NULL."""
+        """Count rows where clee_propagado_radio IS NULL."""
         with self._get_connection() as conn:
             return conn.execute("""
                 SELECT COUNT(*) FROM establecimientos
-                WHERE clee_master IS NULL
+                WHERE clee_propagado_radio IS NULL
             """).fetchone()[0]
 
     def _get_sorted_periods(self) -> list[date]:
@@ -189,7 +189,7 @@ class CLEEResolver:
         return ref_kb
 
     def _invalidate_kb_cache(self, period: date) -> None:
-        """Borra la KB cacheada de un periodo (tras re-escribir sus clee_master)."""
+        """Borra la KB cacheada de un periodo (tras re-escribir sus clee_propagado_radio)."""
         cache_path = self._kb_cache_path(period)
         if cache_path.exists():
             cache_path.unlink()
@@ -214,12 +214,12 @@ class CLEEResolver:
 
     def _write_period_results(self, mapping: pl.DataFrame) -> int:
         """
-        Write clee_master assignments for a single period to Silver DuckDB.
+        Write clee_propagado_radio assignments for a single period to Silver DuckDB.
 
         Uses batched UPDATE statements via temp table for efficiency.
 
         Args:
-            mapping: DataFrame with columns [id, clee_master]
+            mapping: DataFrame with columns [id, clee_propagado_radio]
 
         Returns:
             Number of rows updated
@@ -236,12 +236,12 @@ class CLEEResolver:
                 batch = mapping.slice(offset, batch_size)
 
                 conn.execute(
-                    "CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, clee_master VARCHAR)"
+                    "CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, clee_propagado_radio VARCHAR)"
                 )
                 conn.execute("INSERT INTO _clee_updates SELECT * FROM batch")
                 result = conn.execute("""
                     UPDATE establecimientos e
-                    SET clee_master = u.clee_master
+                    SET clee_propagado_radio = u.clee_propagado_radio
                     FROM _clee_updates u
                     WHERE e.id = u.id
                 """)
@@ -264,13 +264,13 @@ class CLEEResolver:
         """
         Resolve periods that have 100% CLEE coverage deterministically.
 
-        For these periods, clee_master = clee (direct copy via SQL UPDATE).
+        For these periods, clee_propagado_radio = clee (direct copy via SQL UPDATE).
         No BallTree, no fuzzy matching needed.
 
         Args:
             periods: All periods sorted newest-first.
             clee_coverage: Dict mapping period -> has_full_clee.
-            force: If True, overwrite existing clee_master values.
+            force: If True, overwrite existing clee_propagado_radio values.
 
         Returns:
             List of periods that were resolved (available as references).
@@ -286,24 +286,24 @@ class CLEEResolver:
 
         with self._get_connection() as conn:
             if force:
-                # Reset all clee_master first
-                conn.execute("UPDATE establecimientos SET clee_master = NULL")
+                # Reset all clee_propagado_radio first
+                conn.execute("UPDATE establecimientos SET clee_propagado_radio = NULL")
 
-            # Copy clee -> clee_master for all rows with CLEE
+            # Copy clee -> clee_propagado_radio for all rows with CLEE
             conn.execute("""
                 UPDATE establecimientos
-                SET clee_master = clee
+                SET clee_propagado_radio = clee
                 WHERE clee IS NOT NULL AND clee != ''
             """)
 
             # Count seeded rows
             count = conn.execute("""
                 SELECT COUNT(*) FROM establecimientos
-                WHERE clee_master IS NOT NULL
+                WHERE clee_propagado_radio IS NOT NULL
             """).fetchone()[0]
 
         logger.info(
-            f"   clee_master = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
+            f"   clee_propagado_radio = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
         )
 
         return deterministic_periods
@@ -323,7 +323,7 @@ class CLEEResolver:
         Resolve periods without CLEE using sliding-window approach.
 
         For each target period P (no CLEE, newest-first):
-          1. Load P from DuckDB (~3M rows, all clee_master NULL)
+          1. Load P from DuckDB (~3M rows, all clee_propagado_radio NULL)
           2. For each already-resolved period R (newest-first):
              - Load R, build KB (scalar, ~6M rows max)
              - Run propagate_clees(P, KB_R) to assign matches
@@ -361,7 +361,7 @@ class CLEEResolver:
                 f"Resolviendo periodo {target_period}..."
             )
 
-            # Load target period (all rows, clee_master will be NULL)
+            # Load target period (all rows, clee_propagado_radio will be NULL)
             df_target = self._load_period(target_period)
             if df_target.is_empty():
                 logger.info(f"   {target_period}: vacio, saltando.")
@@ -370,21 +370,21 @@ class CLEEResolver:
 
             target_total = df_target.height
 
-            # Ensure clee_master column exists and is NULL for this period
-            if "clee_master" not in df_target.columns:
-                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias("clee_master"))
+            # Ensure clee_propagado_radio column exists and is NULL for this period
+            if "clee_propagado_radio" not in df_target.columns:
+                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias("clee_propagado_radio"))
             else:
                 df_target = df_target.with_columns(
-                    pl.when(pl.col("clee_master") == "")
+                    pl.when(pl.col("clee_propagado_radio") == "")
                     .then(pl.lit(None).cast(pl.Utf8))
-                    .otherwise(pl.col("clee_master"))
-                    .alias("clee_master")
+                    .otherwise(pl.col("clee_propagado_radio"))
+                    .alias("clee_propagado_radio")
                 )
 
             # Sliding window: compare against each resolved period
             for ref_period in resolved_periods:
                 # Count how many still need resolution
-                still_missing = df_target.filter(pl.col("clee_master").is_null()).height
+                still_missing = df_target.filter(pl.col("clee_propagado_radio").is_null()).height
                 if still_missing == 0:
                     break
 
@@ -400,17 +400,17 @@ class CLEEResolver:
                 gc.collect()
 
             # Assign NEW CLEEs to remaining unresolved rows
-            still_missing = df_target.filter(pl.col("clee_master").is_null()).height
+            still_missing = df_target.filter(pl.col("clee_propagado_radio").is_null()).height
             if still_missing > 0:
                 logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
                 df_target = assign_new_clees(df_target, region_prefix)
 
             # Write results to DuckDB immediately (no accumulation in RAM)
-            mapping = df_target.select(["id", "clee_master"])
+            mapping = df_target.select(["id", "clee_propagado_radio"])
             rows_written = self._write_period_results(mapping)
             total_resolved += rows_written
 
-            # Sus clee_master cambiaron: invalidar KB cacheada (si existia)
+            # Sus clee_propagado_radio cambiaron: invalidar KB cacheada (si existia)
             self._invalidate_kb_cache(target_period)
 
             logger.info(
@@ -436,12 +436,12 @@ class CLEEResolver:
         """
         Process all periods using sliding-window entity resolution.
 
-        Phase 1 (deterministic): Periods with CLEE get clee_master = clee
+        Phase 1 (deterministic): Periods with CLEE get clee_propagado_radio = clee
         Phase 2 (probabilistic): Periods without CLEE are resolved via
         sliding-window comparison against all already-resolved periods.
 
         Args:
-            force: If True, reset all clee_master and re-resolve from scratch.
+            force: If True, reset all clee_propagado_radio and re-resolve from scratch.
 
         Returns:
             Dict with resolution statistics.
@@ -485,18 +485,18 @@ class CLEEResolver:
         Run CLEE resolution pipeline.
 
         Reads from Silver DuckDB period by period, resolves entity
-        identities, and writes `clee_master` back to the same table.
+        identities, and writes `clee_propagado_radio` back to the same table.
 
         Args:
-            force: If True, reset all clee_master values and re-run from scratch.
-                   If False, only process rows where clee_master IS NULL (incremental).
+            force: If True, reset all clee_propagado_radio values and re-run from scratch.
+                   If False, only process rows where clee_propagado_radio IS NULL (incremental).
 
         Returns:
             True if successful, False otherwise
         """
         if force:
             logger.warning(
-                "MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los clee_master."
+                "MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los clee_propagado_radio."
             )
             self._clear_kb_cache()
 

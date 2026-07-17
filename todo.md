@@ -104,24 +104,65 @@ columnas ausentes → `""`).
       el parser de 6 formatos a Polars duplicaría la lógica en dos
       motores (va contra la centralización).
 
-## Fase 4 — Reemplazar BallTree por blocking H3
+## Fase 4 — Resolución H3 en paralelo al baseline (diseño de 2 columnas)
 
+Decisión 2026-07-17: en vez de REEMPLAZAR el BallTree, ambos métodos
+coexisten en columnas separadas para comparación lado a lado (material
+del capítulo metodológico de la tesis + rollout seguro):
+
+Nombres autodescriptivos (feedback usuario 2026-07-17: "clee_master no
+me dice nada"):
+
+| Columna | Método | Estado |
+|---------|--------|--------|
+| `clee` | Original INEGI (fuente, intacta) | existe |
+| `clee_propagado_radio` | Radio de tolerancia / BallTree (baseline) | rename de `clee_master`, migración lista |
+| `clee_propagado_h3` | Blocking por celdas H3 | migración lista |
+
+- [x] Migración `7427c9bfdb0d`: RENAME `clee_master` → `clee_propagado_radio`
+      (metadata-only, preserva los 77M valores) + columna `clee_propagado_h3`
+      (VARCHAR, idempotente). **Sin índice en la nueva a propósito**: el ART
+      sobre 77M filas hace las escrituras masivas ~1000x más lentas (medido);
+      indexar DESPUÉS de resolver si el análisis lo pide. Rename aplicado en
+      TODO el código (resolver, entity_resolution, config, modelos, writer,
+      AGENTS.md). Limitación DuckDB manejada: ALTER exige soltar/recrear los
+      13 índices de la tabla (definiciones impresas antes como respaldo;
+      fallback manual documentado en la migración).
+- [ ] Aplicar al Silver real: `make db-migrate` (CON CONFIRMACIÓN).
+      **OJO: recrear los 13 índices ART sobre 77M filas tomará decenas de
+      minutos** — costo único del rename. El código ya habla
+      `clee_propagado_radio`, así que resolver/normalizar FALLARÁ contra el
+      Silver hasta correr esta migración.
+- [ ] Resolver H3: parametrizar `CLEEResolver`/`entity_resolution` con la
+      columna destino (`target_column="clee_propagado_h3"`) y el generador de
+      candidatos. Fase 1 determinística: `clee_propagado_h3 = clee` (igual
+      que el baseline, mismas referencias iniciales).
 - [ ] Generación de candidatos = join por celda: target expandido con
-      `grid_disk(h3_cell_9, k=3)` (k=3 en res 9 garantiza cubrir ≥500m en el
-      peor caso) contra `h3_cell_9` de la KB.
-- [ ] Post-filtro haversine exacto ≤ `SPATIAL_RADIUS_M` (vectorizado en
-      Polars/numpy) para recuperar el radio exacto de 500m.
-- [ ] Sustituir `find_spatial_neighbors` manteniendo la interfaz
-      (indices, distances) para no tocar la cascada de matching.
+      `grid_disk(h3_cell_9, k=3)` (k=3 en res 9 garantiza cubrir ≥500m en
+      el peor caso) contra `h3_cell_9` de la KB.
+- [ ] Post-filtro haversine exacto ≤ `SPATIAL_RADIUS_M` (vectorizado) para
+      recuperar el radio exacto de 500m — misma semántica espacial que el
+      baseline; la cascada de matching (gate + paths) se REUTILIZA tal
+      cual, solo cambia el pre-filtro.
 - [ ] Particionado espacial por `h3_cell_5` en vez de slices arbitrarios de
       KB (`KB_MAX_ROWS_PER_PARTITION`): las filas pendientes solo consultan
-      particiones con solape espacial real.
-- [ ] Config: nuevas constantes en `clee_resolution_config.py`
-      (`H3_BLOCKING_RES = 9`, `H3_GRID_DISK_K = 3`, `H3_PARTITION_RES = 5`).
+      particiones con solape espacial real (h3_cell_5 = parent(h3_cell_9)
+      garantiza co-partición).
+- [ ] Config: `H3_GRID_DISK_K = 3` en `clee_resolution_config.py`
+      (H3_BLOCKING_RES y H3_PARTITION_RES ya existen).
+- [ ] KB cache: los parquets de `kb_cache/` deben incluir `h3_cell_9` (y la
+      columna resuelta correspondiente al método) — invalidar cache al
+      arrancar la resolución H3 por primera vez.
+- [ ] **Métrica de paridad** (primera clase, no opcional): % de filas donde
+      ambos métodos asignan el mismo CLEE propagado. Los sintéticos NEW_*
+      difieren por construcción (UUIDs aleatorios) — compararlos como
+      "ambos sin match", no por valor exacto.
+- [ ] Benchmark tiempo/RAM de la pasada H3 vs baseline BallTree (el serial
+      del BallTree era ~15% — validar la ganancia real).
 
 ## Fase 5 — (Opcional, habilitado por H3) KB consolidada
 
-- [ ] Evaluar KB nacional deduplicada por `clee_master` (atributos del periodo
+- [ ] Evaluar KB nacional deduplicada por `clee_propagado_radio` (atributos del periodo
       más reciente): con candidatos generados vía join en DuckDB (out-of-core),
       la RAM deja de ser la restricción y el loop T×R colapsa a una pasada por
       target.
@@ -129,7 +170,7 @@ columnas ausentes → `""`).
 ## Fase 6 — Validación y documentación
 
 - [ ] Paridad de matches: correr un periodo muestra con BallTree vs H3 y
-      comparar asignaciones de `clee_master` (deben ser ≈ idénticas; diferencias
+      comparar asignaciones de `clee_propagado_radio` (deben ser ≈ idénticas; diferencias
       solo por el post-filtro exacto vs radio BallTree).
 - [ ] `uv run pytest` en verde + tests nuevos para cómputo de celdas y
       generación de candidatos.
@@ -376,18 +417,18 @@ de los CSV de INEGI (no normalizar Silver).
 Depende de que la resolución CLEE esté estable. Es la misma tabla que la
 "KB consolidada" de la Fase 5 del plan CLEE — un solo artefacto, dos usos.
 
-- [ ] Nueva tabla `entidades_economicas` (una fila por `clee_master`):
-      `clee_master` PK, `es_sintetica` (prefijo NEW_*), atributos del periodo
+- [ ] Nueva tabla `entidades_economicas` (una fila por `clee_propagado_radio`):
+      `clee_propagado_radio` PK, `es_sintetica` (prefijo NEW_*), atributos del periodo
       más reciente (`nom_estab`, `raz_social`, `codigo_act`, `cve_ent`,
       `cve_mun`, `cod_postal`, `latitud`, `longitud`, `h3_cell_9`),
       `primer_periodo`, `ultimo_periodo`, `n_periodos`, `fecha_alta_date`.
 - [ ] Paso de construcción en el pipeline (post CLEE-resolution, en Load):
-      agregación por `clee_master` sobre Silver → tabla en Gold.
+      agregación por `clee_propagado_radio` sobre Silver → tabla en Gold.
 - [ ] Migración Alembic + modelo ORM.
 - [ ] `establecimientos` pasa a leerse como tabla de observaciones
       (hechos por periodo); documentar el patrón de consulta de
       supervivencia/mortalidad sobre la dimensión.
-- [ ] OJO: los `clee_master` sintéticos (NEW_*) no son estables entre corridas
+- [ ] OJO: los `clee_propagado_radio` sintéticos (NEW_*) no son estables entre corridas
       con `--force` — reconstruir la dimensión tras cada re-resolución.
 
 ## N4 — (Opcional) 1NF de calles cruzadas
@@ -404,7 +445,7 @@ Depende de que la resolución CLEE esté estable. Es la misma tabla que la
   ya deduplica esos strings).
 - Contacto (telefono/correoelec/www) en tabla aparte.
 - Duplicados derivados aceptados como lineage/performance: `fecha_alta_str`
-  + `fecha_alta_date`, `clee` + `clee_master`, `h3_cell_5` (derivable de
+  + `fecha_alta_date`, `clee` + `clee_propagado_radio`, `h3_cell_5` (derivable de
   `h3_cell_9`).
 
 ---
