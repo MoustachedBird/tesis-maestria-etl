@@ -10,6 +10,15 @@ el pre-filtro espacial a blocking con celdas H3.
 `data/` sin confirmación explícita.** Los cambios de esquema se preparan en
 código (migración Alembic + modelo ORM) y se aplican en un paso controlado.
 
+**REGLA DE CONFIGURACIÓN (permanente, no repetir el error): toda variable
+importante de configuración o calibración se lee del entorno (`.env`) con
+default en código, y se documenta en `.env.example` Y en la documentación
+(AGENTS.md). Las constantes que NO deben ser configurables (físicas como el
+radio de la Tierra, o estructurales acopladas al esquema/datos materializados
+como las resoluciones H3) se quedan en su archivo con un docstring que
+explique su significado y POR QUÉ no son `.env`. Además: toda variable global
+y toda función deben tener docstring.**
+
 **PREMISA DE OPTIMIZACIÓN: toda mejora debe optimizar tiempo de ejecución Y
 uso de RAM a la vez, aprovechando correctamente la CPU con paralelización** —
 el pipeline corre en una Mac M4 Pro/Max (límite DuckDB 8GB en .env), no en
@@ -160,6 +169,14 @@ me dice nada"):
 - [ ] Correr H3 sobre el Silver real: `make clee-resolution-h3` (radio ya
       está poblado). Luego medir paridad real y benchmark tiempo/RAM H3 vs
       BallTree.
+- [ ] **Hallazgo del review (2026-07-17): RAM de `disk_pairs` en
+      `find_h3_neighbors`** — los pares (celda_target, celda_vecina) se
+      acumulan como lista Python de tuplas ANTES de volverse DataFrame; con
+      ~1M de celdas distintas × 37 celdas de grid_disk(3) son ~37M tuplas
+      (varios GB) — va contra la premisa de RAM. Fix: procesar
+      `distinct_cells` en chunks (p. ej. 200K celdas → DataFrame parcial →
+      concat/join) o acumular en 2 arrays numpy preasignados. Medirlo en la
+      corrida real antes de optimizar.
 - [ ] (Opcional) Particionado de KB por `h3_cell_5` en vez de slices para
       podar particiones sin solape — optimización, no correctitud (el slice
       actual ya es correcto para ambos métodos).

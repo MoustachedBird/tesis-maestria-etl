@@ -32,6 +32,16 @@ from src_etl.utils.clee_resolution_config import (
     TEXT_COLS_TO_SANITIZE,
 )
 
+_EARTH_RADIUS_M = 6_371_000.0
+"""Radio medio de la Tierra en metros (constante fisica, NO configuracion).
+
+Convierte entre metros y radianes en las dos haversines de este modulo:
+el radio de query del BallTree (find_spatial_neighbors) y el post-filtro
+exacto del blocking H3 (find_h3_neighbors). Debe ser LA MISMA en ambas
+para que los dos generadores de candidatos compartan la semantica de
+SPATIAL_RADIUS_M.
+"""
+
 
 def generate_temp_clee() -> str:
     """
@@ -88,8 +98,7 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
     ref_coords = np.radians(ref_df.select(["latitud", "longitud"]).to_numpy())
     target_coords = np.radians(target_df.select(["latitud", "longitud"]).to_numpy())
 
-    # Radio Tierra ~ 6371000m
-    radius_rad = radius_meters / 6371000
+    radius_rad = radius_meters / _EARTH_RADIUS_M
 
     tree = BallTree(ref_coords, metric="haversine")
     return tree.query_radius(
@@ -97,13 +106,15 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
     )
 
 
-_EARTH_RADIUS_M = 6_371_000.0
-
-
 def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
     """
-    Genera candidatos espaciales por blocking de celdas H3 (sustituto del
-    BallTree). Misma interfaz de retorno: (indices, distances).
+    Genera candidatos espaciales por blocking de celdas H3.
+
+    NO sustituye al BallTree: es el generador del metodo COMPLEMENTARIO de
+    propagacion (columna `clee_propagado_h3`), que corre en paralelo al
+    baseline por radio (`clee_propagado_radio`) para comparar ambos metodos
+    lado a lado. Misma interfaz de retorno que find_spatial_neighbors:
+    (indices, distances).
 
     Algoritmo (todo vectorizado en Polars = multihilo, sin loop por fila):
       1. grid_disk(cell, H3_GRID_DISK_K) SOLO sobre las celdas distintas del

@@ -369,11 +369,13 @@ def _run_matching_parallel(
 
     Args:
         target_cols: Tuple de listas columnares (TARGET_MATCH_COLUMNS).
-        indices: Array de arrays de vecinos (del BallTree).
+        indices: Array de arrays de vecinos (del generador de candidatos
+            activo: BallTree o blocking H3).
         n_workers: Numero de procesos hijo.
 
     Returns:
-        Lista de clee_propagado_radio (None si no hubo match), misma longitud que el target.
+        Lista de clee_id propagados (None si no hubo match), misma longitud
+        que el target.
     """
     n_total = len(target_cols[0])
     chunk_size = (n_total + n_workers - 1) // n_workers  # ceil division

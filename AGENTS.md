@@ -173,19 +173,43 @@ Parallelization: datasets > 50K rows use `multiprocessing.Pool` with fork() + co
 
 ### Configuration Thresholds
 
-Defined in `clee_resolution_config.py`:
+Defined in `clee_resolution_config.py`. **All calibration/resource knobs are
+env-configurable** (same name in `.env`, defaults in code, each documented
+with a docstring and in `.env.example`):
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `SPATIAL_RADIUS_M` | 500 | BallTree pre-filter radius (meters) |
+| Variable (env) | Default | Purpose |
+|----------|---------|---------|
+| `SPATIAL_RADIUS_M` | 500 | Candidate radius in meters (BOTH methods: BallTree and H3 blocking) |
 | `ACTIVITY_GATE_THRESH` | 60 | Mandatory SCIAN activity fuzzy threshold |
 | `BUSINESS_NAME_MATCH_THRESH` | 75 | Direct match: business name fuzzy |
 | `LEGAL_NAME_MATCH_THRESH` | 80 | Direct match: legal name (razon social) |
 | `MIN_COMBINED_SIGNALS` | 2 | Combined match: minimum weak signals |
 | `PARTIAL_NAME_THRESH` | 60 | Partial name signal threshold |
-| `MATCH_WORKERS` | 8 (env) | Multiprocessing worker count. Env: `MATCH_WORKERS` |
+| `MATCH_WORKERS` | 8 | Multiprocessing worker count |
 | `MATCH_PARALLEL_THRESHOLD` | 50,000 | Minimum rows to activate multiprocessing |
-| `KB_MAX_ROWS_PER_PARTITION` | 1,500,000 (env) | Max KB rows before partitioning. Env: `KB_MAX_ROWS_PER_PARTITION` |
+| `KB_MAX_ROWS_PER_PARTITION` | 1,500,000 | Max KB rows before partitioning (main RAM knob) |
+
+Structural constants that are deliberately **NOT** env vars (changing them
+requires migration + recompute; see their docstrings):
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `H3_BLOCKING_RES` | 9 | Resolution materialized in `h3_cell_9` (~174m edge) |
+| `H3_PARTITION_RES` | 5 | Resolution materialized in `h3_cell_5` (~8.5km edge); reserved for KB partition pruning, not yet consumed |
+| `H3_GRID_DISK_K` | 3 | grid_disk rings for H3 candidates; coupled to `SPATIAL_RADIUS_M` (coverage guard at import) |
+| `_EARTH_RADIUS_M` (`matching.py`) | 6,371,000 | Physical constant shared by both haversines |
+
+### Two propagation methods (side-by-side columns)
+
+H3 blocking does NOT replace the radius/BallTree method — it is a
+complementary method filling its own column for thesis comparison:
+`CLEEResolver(method="radio")` writes `clee_propagado_radio`
+(`find_spatial_neighbors`, BallTree) and `CLEEResolver(method="h3")` writes
+`clee_propagado_h3` (`find_h3_neighbors`, grid_disk + exact haversine
+post-filter). Both share the sliding-window engine and matching cascade
+(`_propagate_clees` core + `propagate_clees_radio`/`propagate_clees_h3`
+wrappers). `h3_cell_9` feeds H3 blocking; `h3_cell_5` = parent(h3_cell_9),
+stored for future KB partition pruning (currently unused, near-zero cost).
 
 ### Key Functions Reference
 

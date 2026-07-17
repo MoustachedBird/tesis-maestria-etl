@@ -40,7 +40,7 @@ clee-resolution-h3: ## Run CLEE Resolution (H3 blocking -> clee_propagado_h3)
 	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-h3-cells --no-clee-resolution --clee-resolution-h3 $(ARGS)
 
 h3-backfill: ## Backfill H3 cells (h3_cell_9/h3_cell_5) in Silver
-	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --no-h3-cells --h3-cells $(ARGS)
+	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells $(ARGS)
 
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry

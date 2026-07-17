@@ -1,101 +1,173 @@
-# =============================================================================
-# UMBRALES DE ENTITY RESOLUTION (Facil de calibrar)
-#
-# Estos parametros controlan la logica de matching entre registros de
-# diferentes periodos. Ajustar con cuidado: valores mas bajos = mas matches
-# (mas falsos positivos), valores mas altos = menos matches (mas falsos negativos).
-# =============================================================================
+"""
+Configuracion y umbrales de la resolucion CLEE (entity resolution).
+
+Reglas de este archivo (ver todo.md, "Reglas de trabajo"):
+  - Variables de CALIBRACION y recursos se leen del entorno (.env) con
+    default aqui: se ajustan sin tocar codigo. Cada una esta documentada
+    tambien en .env.example.
+  - CONSTANTES estructurales (acopladas al esquema o a datos ya
+    materializados en Silver) NO son variables de entorno: cambiarlas
+    exige migracion/recomputo; su docstring explica por que.
+
+Sobre los umbrales de matching: valores mas bajos = mas matches (mas
+falsos positivos); mas altos = menos matches (mas falsos negativos).
+"""
 
 import os
 
-# --- RADIO ESPACIAL (pre-filtro BallTree) ---
-# Define el radio maximo (metros) para buscar candidatos en la Knowledge Base.
-# Solo negocios dentro de este radio son evaluados por la cascada de matching.
-# 500m cubre mudanzas dentro del mismo barrio/colonia.
-SPATIAL_RADIUS_M = 500
+# =============================================================================
+# RADIO ESPACIAL (calibracion, .env)
+# =============================================================================
 
-# --- CELDAS H3 (blocking espacial) ---
-# Resolucion de la celda de blocking: res 9 ~ arista 174m. Junto con
-# grid_disk(k) sustituye al BallTree como generador de candidatos.
-H3_BLOCKING_RES = 9
-# Resolucion de particionado grueso: res 5 ~ arista 8.5km. Permite podar
-# particiones de KB sin solape espacial con el target.
-H3_PARTITION_RES = 5
-# Anillos de grid_disk para generar candidatos alrededor de la celda del
-# target. k=3 en res 9 (arista ~174m) cubre >=500m en el peor caso (borde
-# de celda), garantizando que ningun candidato dentro de SPATIAL_RADIUS_M
-# se pierda antes del post-filtro haversine exacto.
-H3_GRID_DISK_K = 3
+SPATIAL_RADIUS_M: int = int(os.environ.get("SPATIAL_RADIUS_M", "500"))
+"""Radio maximo (metros) para buscar candidatos en la Knowledge Base.
 
-# --- GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ---
-# Umbral minimo de similitud fuzzy en nombre_act (actividad SCIAN).
-# Si no se supera, el candidato se descarta sin evaluar otros campos.
-# Valor recomendado: 60 (permisivo con variaciones de redaccion).
-ACTIVITY_GATE_THRESH = 60
+Aplica a AMBOS generadores de candidatos (BallTree del metodo radio y
+blocking H3): solo negocios dentro de este radio se evaluan en la cascada
+de matching. 500m cubre mudanzas dentro del mismo barrio/colonia.
 
-# --- MATCH DIRECTO POR NOMBRE COMERCIAL ---
-# Umbral de fuzzy (token_sort_ratio) en nom_estab para match directo.
-# Si se supera, se declara match sin necesidad de otros campos.
-BUSINESS_NAME_MATCH_THRESH = 75
+OJO: acoplado a H3_GRID_DISK_K -- si se sube por encima de la cobertura
+del blocking H3, el guard al final del archivo lo detiene (habria que
+subir H3_GRID_DISK_K a la par y re-verificar paridad).
+"""
 
-# --- MATCH DIRECTO POR RAZON SOCIAL ---
-# Umbral de fuzzy (token_sort_ratio) en raz_social para match directo.
-# Mas estricto que nombre comercial porque razones sociales pueden repetirse
-# entre negocios distintos de un mismo dueno.
-LEGAL_NAME_MATCH_THRESH = 80
-
-# --- MATCH COMBINADO (senales debiles acumuladas) ---
-# Si ningun campo individual supera su umbral de match directo, se cuentan
-# "senales" coincidentes. Si se alcanzan MIN_COMBINED_SIGNALS senales,
-# se declara match.
+# =============================================================================
+# CELDAS H3 (constantes estructurales -- NO .env)
 #
-# Senales que se cuentan:
-#   - Nombre comercial parcial (fuzzy > PARTIAL_NAME_THRESH)
-#   - Telefono exacto (7+ digitos)
-#   - Email exacto (5+ chars)
-#   - Web exacto (5+ chars)
-#   - Codigo postal igual
-MIN_COMBINED_SIGNALS = 2
+# El metodo H3 NO sustituye al de radio: es un metodo COMPLEMENTARIO que
+# llena su propia columna (clee_propagado_h3) para compararse lado a lado
+# con el baseline BallTree (clee_propagado_radio). Ver todo.md Fase 4.
+# =============================================================================
 
-# Umbral de fuzzy en nom_estab para contar como "senal parcial" en match combinado.
-# Mas bajo que BUSINESS_NAME_MATCH_THRESH porque aqui no basta solo.
-PARTIAL_NAME_THRESH = 60
+H3_BLOCKING_RES = 9
+"""Resolucion H3 de blocking (res 9 ~ arista 174m): celda de `h3_cell_9`.
 
-# --- LONGITUDES MINIMAS PARA CONTACTO VALIDO ---
-# Largo minimo de telefono limpio para considerar como senal valida
+Es la celda con la que el metodo H3 genera candidatos (grid_disk).
+Constante estructural, NO variable de entorno: esta materializada en la
+columna `h3_cell_9` de Silver (~77M filas). Cambiarla exige migracion +
+re-backfill con --force.
+"""
+
+H3_PARTITION_RES = 5
+"""Resolucion H3 de particionado grueso (res 5 ~ arista 8.5km): celda de
+`h3_cell_5`, derivada como parent(h3_cell_9).
+
+HOY NINGUN codigo la consume: esta reservada para el particionado de KB
+por celda gruesa (Fase 4 opcional, todo.md) que podaria particiones de KB
+sin solape espacial con el target. Se precomputa porque su costo marginal
+es ~0 (misma pasada del UPDATE de backfill, sin indice, columna derivada).
+Constante estructural, NO .env.
+"""
+
+H3_GRID_DISK_K = 3
+"""Anillos de grid_disk alrededor de la celda del target (candidatos H3).
+
+k=3 en res 9 (arista ~174m) cubre >=500m en el peor caso (target en el
+borde de su celda), garantizando que ningun candidato dentro de
+SPATIAL_RADIUS_M se pierda antes del post-filtro haversine exacto
+(paridad verificada contra BallTree: 0 diferencias en el test sintetico).
+
+Acoplada a SPATIAL_RADIUS_M y H3_BLOCKING_RES -- por eso NO es .env: si
+cambia el radio hay que recalcular k y re-verificar paridad. El guard al
+final del archivo protege la cobertura.
+"""
+
+# =============================================================================
+# UMBRALES DE LA CASCADA DE MATCHING (calibracion, .env)
+# =============================================================================
+
+ACTIVITY_GATE_THRESH: int = int(os.environ.get("ACTIVITY_GATE_THRESH", "60"))
+"""GATE OBLIGATORIO: umbral minimo de similitud fuzzy en nombre_act
+(actividad SCIAN). Si no se supera, el candidato se descarta sin evaluar
+otros campos. 60 = permisivo con variaciones de redaccion.
+"""
+
+BUSINESS_NAME_MATCH_THRESH: int = int(os.environ.get("BUSINESS_NAME_MATCH_THRESH", "75"))
+"""Umbral de fuzzy (token_sort_ratio) en nom_estab para MATCH DIRECTO por
+nombre comercial: si se supera, se declara match sin otros campos.
+"""
+
+LEGAL_NAME_MATCH_THRESH: int = int(os.environ.get("LEGAL_NAME_MATCH_THRESH", "80"))
+"""Umbral de fuzzy (token_sort_ratio) en raz_social para MATCH DIRECTO por
+razon social. Mas estricto que el nombre comercial porque razones sociales
+pueden repetirse entre negocios distintos de un mismo dueno.
+"""
+
+MIN_COMBINED_SIGNALS: int = int(os.environ.get("MIN_COMBINED_SIGNALS", "2"))
+"""MATCH COMBINADO: numero de senales debiles coincidentes para declarar
+match cuando ningun campo individual supera su umbral directo.
+
+Senales que se cuentan: nombre comercial parcial (> PARTIAL_NAME_THRESH),
+telefono exacto (7+ digitos), email exacto (5+ chars), web exacta
+(5+ chars), codigo postal igual.
+"""
+
+PARTIAL_NAME_THRESH: int = int(os.environ.get("PARTIAL_NAME_THRESH", "60"))
+"""Umbral de fuzzy en nom_estab para contar como "senal parcial" en el
+match combinado. Mas bajo que BUSINESS_NAME_MATCH_THRESH porque aqui no
+basta por si sola.
+"""
+
+# =============================================================================
+# LONGITUDES MINIMAS PARA CONTACTO VALIDO (constantes de validez de dato)
+#
+# No son calibracion de matching sino la definicion de cuando un campo de
+# contacto es utilizable como senal; por eso viven aqui y no en .env.
+# =============================================================================
+
 MIN_TEL_LENGTH = 7
-# Largo minimo de email para considerar como senal valida
+"""Largo minimo del telefono limpio (solo digitos) para contar como senal:
+menos de 7 digitos no identifica una linea telefonica real en MX."""
+
 MIN_EMAIL_LENGTH = 5
-# Largo minimo de web para considerar como senal valida
+"""Largo minimo del email normalizado para contar como senal (descarta
+valores basura tipo "-", "N/A")."""
+
 MIN_WEB_LENGTH = 5
+"""Largo minimo de la web normalizada para contar como senal (descarta
+valores basura)."""
 
-# --- PARALELISMO (multiprocessing) ---
-# Numero de workers para el loop de matching en propagate_clees().
-# None = auto (cpu_count - 3, minimo 1).
-# Poner 1 para desactivar paralelismo (modo debug/secuencial).
+# =============================================================================
+# PARALELISMO Y RAM (recursos, .env)
+# =============================================================================
+
 MATCH_WORKERS: int | None = int(os.environ.get("MATCH_WORKERS", "8"))
+"""Numero de workers de multiprocessing para el loop de matching en la
+propagacion. 1 desactiva el paralelismo (modo debug secuencial).
+Regla practica: cores fisicos - 3 (ver .env.example)."""
 
-# Tamano minimo de filas pendientes para activar multiprocessing.
-# Si hay menos filas que esto, el overhead de fork no vale la pena.
-MATCH_PARALLEL_THRESHOLD = 50_000
+MATCH_PARALLEL_THRESHOLD: int = int(os.environ.get("MATCH_PARALLEL_THRESHOLD", "50000"))
+"""Minimo de filas pendientes para activar multiprocessing: por debajo,
+el overhead de fork no compensa y se usa el loop secuencial."""
 
-# --- PARTICIONAMIENTO DE KB (control de RAM) ---
-# Numero maximo de filas por particion de la KB de referencia.
-# Si la KB excede este umbral, se divide en particiones que se procesan
-# secuencialmente contra el target, evitando OOM en maquinas con RAM limitada.
-# Cada particion construye su propio BallTree y materializa su propia copia
-# de las listas _shared_kb_*. No se pierde ningun match potencial.
-# Default: 1,500,000 filas (~0.5-0.8 GB de KB materializada por particion).
-# Configurable via variable de entorno KB_MAX_ROWS_PER_PARTITION.
 KB_MAX_ROWS_PER_PARTITION: int = int(os.environ.get("KB_MAX_ROWS_PER_PARTITION", "1500000"))
+"""Maximo de filas por particion de la KB de referencia (knob principal de
+RAM del matching). Si la KB excede este umbral, se divide en particiones
+procesadas secuencialmente (sin perder matches). Cada worker puede
+terminar copiando (COW) las paginas de la particion compartida: menor =
+menos RAM pico, mayor = menos particiones (mas rapido)."""
 
+# =============================================================================
+# GUARD: cobertura del blocking H3 vs radio espacial
+# =============================================================================
+
+_H3_RING_COVERAGE_M = 174
+"""Cobertura aproximada (metros) que aporta cada anillo de grid_disk en
+res 9 (arista promedio de la celda). Solo se usa en el guard de abajo."""
+
+if SPATIAL_RADIUS_M > H3_GRID_DISK_K * _H3_RING_COVERAGE_M:
+    raise ValueError(
+        f"SPATIAL_RADIUS_M={SPATIAL_RADIUS_M}m excede la cobertura garantizada "
+        f"del blocking H3 (H3_GRID_DISK_K={H3_GRID_DISK_K} anillos x "
+        f"~{_H3_RING_COVERAGE_M}m = {H3_GRID_DISK_K * _H3_RING_COVERAGE_M}m). "
+        "Sube H3_GRID_DISK_K en clee_resolution_config.py y re-verifica la "
+        "paridad H3 vs BallTree antes de correr."
+    )
 
 # =============================================================================
 # COLUMNAS PARA RESOLUCION (leidas desde Silver DuckDB)
 # =============================================================================
 
-# Columnas que se leen del Silver DuckDB para la resolucion.
-# nombre_act se obtiene via JOIN con denue_actividades_economicas.
 COLS_NEEDED_FOR_MATCHING = [
     "id",
     "clee",
@@ -120,9 +192,9 @@ COLS_NEEDED_FOR_MATCHING = [
     "nom_cencom",
     "cod_postal",
 ]
+"""Columnas que se leen del Silver DuckDB para la resolucion.
+`nombre_act` se obtiene via JOIN con denue_actividades_economicas."""
 
-# SQL query para leer datos del Silver DuckDB con JOINs a catalogos.
-# Obtiene nombre_act via JOIN; cast de enums a VARCHAR para Polars.
 SILVER_READ_QUERY = """
     SELECT
         e.id,
@@ -150,12 +222,9 @@ SILVER_READ_QUERY = """
     FROM establecimientos e
     LEFT JOIN denue_actividades_economicas a ON e.codigo_act = a.codigo_act
 """
+"""SQL para leer datos del Silver DuckDB con JOINs a catalogos.
+Obtiene nombre_act via JOIN; cast de enums a VARCHAR para Polars."""
 
-# Columnas de texto para sanitizar (None -> "")
-# IMPORTANTE: telefono, correoelec y www DEBEN estar aqui para que
-# clean_contact_columns() genere tel_clean/email_clean/www_clean con ""
-# en vez de None. Si faltan, columnas dispersas (especialmente www) causan
-# errores de inferencia de esquema al reconstruir DataFrames desde dicts.
 TEXT_COLS_TO_SANITIZE = [
     "nom_estab",
     "raz_social",
@@ -170,3 +239,9 @@ TEXT_COLS_TO_SANITIZE = [
     "nom_cencom",
     "cod_postal",
 ]
+"""Columnas de texto a sanitizar (None -> "") antes del matching.
+
+IMPORTANTE: telefono, correoelec y www DEBEN estar aqui para que
+clean_contact_columns() genere tel_clean/email_clean/www_clean con ""
+en vez de None. Si faltan, columnas dispersas (especialmente www) causan
+errores de inferencia de esquema al reconstruir DataFrames desde dicts."""
