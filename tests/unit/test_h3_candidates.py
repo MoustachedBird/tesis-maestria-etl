@@ -1,0 +1,124 @@
+"""Tests de paridad del generador de candidatos H3 vs BallTree.
+
+`find_h3_neighbors` (blocking H3, columna clee_propagado_h3) debe producir
+EXACTAMENTE los mismos conjuntos de vecinos dentro de SPATIAL_RADIUS_M que
+`find_spatial_neighbors` (BallTree, columna clee_propagado_radio): mismo
+radio, misma semantica; solo cambia el algoritmo de generacion.
+
+Nota de unidades: el BallTree retorna distancias en RADIANES (metrica
+haversine de sklearn) y find_h3_neighbors en METROS; ningun consumidor usa
+las distancias mas alla del ORDEN (ascendente), asi que la paridad se
+verifica convirtiendo radianes -> metros con _EARTH_RADIUS_M.
+"""
+
+import numpy as np
+import polars as pl
+import pytest
+from h3.api import basic_int as h3i
+
+from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, SPATIAL_RADIUS_M
+from src_etl.utils.matching import (
+    _EARTH_RADIUS_M,
+    find_h3_neighbors,
+    find_spatial_neighbors,
+)
+
+
+def _make_points_df(n: int, seed: int, center=(19.4326, -99.1332), spread=0.02) -> pl.DataFrame:
+    """DataFrame sintetico de puntos alrededor de un centro (CDMX) con su
+    celda h3_cell_9, imitando el esquema que consume el matching."""
+    rng = np.random.default_rng(seed)
+    lats = center[0] + rng.uniform(-spread, spread, n)
+    lons = center[1] + rng.uniform(-spread, spread, n)
+    cells = [h3i.latlng_to_cell(lat, lon, H3_BLOCKING_RES) for lat, lon in zip(lats, lons)]
+    return pl.DataFrame(
+        {
+            "latitud": lats,
+            "longitud": lons,
+            "h3_cell_9": pl.Series(cells, dtype=pl.Int64),
+        }
+    )
+
+
+@pytest.mark.unit
+class TestH3NeighborParity:
+    """find_h3_neighbors == find_spatial_neighbors (mismos vecinos)."""
+
+    def test_same_neighbor_sets_and_distances(self):
+        ref_df = _make_points_df(400, seed=42)
+        target_df = _make_points_df(150, seed=7)
+
+        bt_idx, bt_dist = find_spatial_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        h3_idx, h3_dist = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+
+        assert len(h3_idx) == target_df.height == len(bt_idx)
+        n_with_neighbors = 0
+        for i in range(target_df.height):
+            assert set(h3_idx[i]) == set(bt_idx[i]), f"vecinos distintos en target {i}"
+            # Mismas distancias (radianes BallTree -> metros) tras ordenar
+            # (el orden puede diferir solo en empates exactos).
+            np.testing.assert_allclose(
+                np.sort(h3_dist[i]),
+                np.sort(bt_dist[i] * _EARTH_RADIUS_M),
+                rtol=1e-6,
+            )
+            n_with_neighbors += 1 if len(h3_idx[i]) else 0
+        # El escenario debe ejercitar de verdad el matching espacial.
+        assert n_with_neighbors > 0
+
+    def test_h3_distances_sorted_ascending(self):
+        ref_df = _make_points_df(400, seed=42)
+        target_df = _make_points_df(150, seed=7)
+
+        _, h3_dist = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        for dist in h3_dist:
+            assert np.all(np.diff(dist) >= 0)
+
+    def test_all_h3_distances_within_radius(self):
+        ref_df = _make_points_df(400, seed=1)
+        target_df = _make_points_df(150, seed=2)
+
+        _, h3_dist = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        for dist in h3_dist:
+            assert np.all(dist <= SPATIAL_RADIUS_M)
+
+
+@pytest.mark.unit
+class TestH3NeighborEdgeCases:
+    """Casos borde: entradas vacias y celdas nulas (datos de encuesta)."""
+
+    def test_empty_ref_returns_empty_per_target(self):
+        ref_df = _make_points_df(0, seed=3)
+        target_df = _make_points_df(10, seed=4)
+
+        idx, dist = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert len(idx) == 10
+        assert all(len(a) == 0 for a in idx)
+        assert all(len(a) == 0 for a in dist)
+
+    def test_empty_target_returns_empty(self):
+        ref_df = _make_points_df(10, seed=5)
+        target_df = _make_points_df(0, seed=6)
+
+        idx, dist = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert len(idx) == 0
+        assert len(dist) == 0
+
+    def test_null_target_cell_gets_no_candidates(self):
+        ref_df = _make_points_df(50, seed=8)
+        target_df = _make_points_df(5, seed=9).with_columns(
+            pl.Series("h3_cell_9", [None] * 5, dtype=pl.Int64)
+        )
+
+        idx, _ = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert len(idx) == 5
+        assert all(len(a) == 0 for a in idx)
+
+    def test_null_ref_cell_excluded_from_candidates(self):
+        ref_df = _make_points_df(50, seed=8).with_columns(
+            pl.Series("h3_cell_9", [None] * 50, dtype=pl.Int64)
+        )
+        target_df = _make_points_df(5, seed=9)
+
+        idx, _ = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert all(len(a) == 0 for a in idx)

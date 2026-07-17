@@ -169,14 +169,16 @@ me dice nada"):
 - [ ] Correr H3 sobre el Silver real: `make clee-resolution-h3` (radio ya
       está poblado). Luego medir paridad real y benchmark tiempo/RAM H3 vs
       BallTree.
-- [ ] **Hallazgo del review (2026-07-17): RAM de `disk_pairs` en
+- [x] **Hallazgo del review (2026-07-17): RAM de `disk_pairs` en
       `find_h3_neighbors`** — los pares (celda_target, celda_vecina) se
-      acumulan como lista Python de tuplas ANTES de volverse DataFrame; con
-      ~1M de celdas distintas × 37 celdas de grid_disk(3) son ~37M tuplas
-      (varios GB) — va contra la premisa de RAM. Fix: procesar
-      `distinct_cells` en chunks (p. ej. 200K celdas → DataFrame parcial →
-      concat/join) o acumular en 2 arrays numpy preasignados. Medirlo en la
-      corrida real antes de optimizar.
+      acumulaban como lista Python de tuplas (~37M tuplas ≈ varios GB con
+      ~1M de celdas distintas). Corregido: 2 arrays numpy preasignados
+      (16 bytes/par). Medido con 990K celdas distintas (peor caso de un
+      periodo): 36.6M pares en 4.1s, 0.59GB — dentro del presupuesto.
+      Tests de paridad H3 vs BallTree añadidos
+      (`tests/unit/test_h3_candidates.py`, cubre el pendiente de Fase 6);
+      de paso `collect(streaming=True)` → `collect(engine="streaming")`
+      (deprecado en Polars 1.25).
 - [ ] (Opcional) Particionado de KB por `h3_cell_5` en vez de slices para
       podar particiones sin solape — optimización, no correctitud (el slice
       actual ya es correcto para ambos métodos).

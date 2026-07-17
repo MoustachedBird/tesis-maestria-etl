@@ -119,7 +119,8 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
     Algoritmo (todo vectorizado en Polars = multihilo, sin loop por fila):
       1. grid_disk(cell, H3_GRID_DISK_K) SOLO sobre las celdas distintas del
          target (muchas filas comparten celda) -> pares (celda_target,
-         celda_vecina). k=3 en res 9 cubre >=500m en el peor caso.
+         celda_vecina) acumulados en arrays numpy preasignados (RAM acotada:
+         16 bytes/par). k=3 en res 9 cubre >=500m en el peor caso.
       2. Join target -> celdas vecinas -> join con KB por celda: produce los
          pares candidatos (tgt_idx, kb_idx) como hash joins de Polars.
       3. Post-filtro haversine EXACTO <= radius_meters (en el motor de
@@ -167,18 +168,31 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
         pl.col("longitud").alias("tgt_lon"),
     )
 
-    # 1. grid_disk solo por celda distinta del target (loop C corto)
+    # 1. grid_disk solo por celda distinta del target (loop C corto).
+    # RAM: los pares (celda_target, celda_vecina) se acumulan en arrays
+    # numpy preasignados, NUNCA en una lista de tuplas Python -- con ~1M de
+    # celdas distintas x 37 vecinos (k=3) la lista costaria varios GB de
+    # objetos; los arrays cuestan 16 bytes/par (~0.6GB por millon de
+    # celdas), dentro del presupuesto de la maquina (36GB).
     distinct_cells = tg.get_column("tgt_cell").drop_nulls().unique().to_list()
     if not distinct_cells:
         return _empty_result()
 
-    disk_pairs: list[tuple[int, int]] = []
+    # grid_disk(k) retorna a lo mas 3k(k+1)+1 celdas (37 con k=3; menos si
+    # el disco toca uno de los 12 pentagonos del grid, por eso se rastrea
+    # `pos` en vez de asumir el maximo).
+    max_disk = 3 * H3_GRID_DISK_K * (H3_GRID_DISK_K + 1) + 1
+    tgt_cells_arr = np.empty(len(distinct_cells) * max_disk, dtype=np.int64)
+    nb_cells_arr = np.empty(len(distinct_cells) * max_disk, dtype=np.int64)
+    pos = 0
     for cell in distinct_cells:
-        for nb in h3i.grid_disk(cell, H3_GRID_DISK_K):
-            disk_pairs.append((cell, nb))
-    disk = pl.DataFrame(
-        disk_pairs, schema={"tgt_cell": pl.Int64, "nb_cell": pl.Int64}, orient="row"
-    )
+        nbs = h3i.grid_disk(cell, H3_GRID_DISK_K)
+        n = len(nbs)
+        tgt_cells_arr[pos : pos + n] = cell
+        nb_cells_arr[pos : pos + n] = nbs
+        pos += n
+    disk = pl.DataFrame({"tgt_cell": tgt_cells_arr[:pos], "nb_cell": nb_cells_arr[:pos]})
+    del tgt_cells_arr, nb_cells_arr
 
     # 2-3. Joins + haversine exacto (lazy/streaming para acotar RAM)
     rad = np.pi / 180.0
@@ -207,7 +221,7 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
         .sort(["tgt_idx", "dist_m"])
         .group_by("tgt_idx", maintain_order=True)
         .agg(pl.col("kb_idx"), pl.col("dist_m"))
-        .collect(streaming=True)
+        .collect(engine="streaming")
     )
 
     # 4. Dispersar a arrays por fila alineados a 0..n_target-1
