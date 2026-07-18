@@ -168,7 +168,20 @@ me dice nada"):
       (800/800 propagados coinciden radio==h3). 157 tests en verde.
 - [ ] Correr H3 sobre el Silver real: `make clee-resolution-h3` (radio ya
       está poblado). Luego medir paridad real y benchmark tiempo/RAM H3 vs
-      BallTree.
+      BallTree. **En curso 2026-07-18 13:50** (Fase 1 completada, Fase 2
+      matcheando; OJO: esa corrida arrancó con el bug de logging de abajo,
+      corre muda — monitorear vía `ls -lt data/silver/kb_cache/h3/`).
+- [x] **BUG de logging corregido (2026-07-18)**: `clee_resolver.py` y
+      `entity_resolution.py` usaban `logging.getLogger(__name__)` sin
+      handler (nunca migraron a `get_stage_logger` en la centralización
+      del 2026-07-17) — TODO el progreso del stage se perdía en silencio.
+      Ahora hay **un log POR MÉTODO** (petición usuario 2026-07-18):
+      `data/etl_clee_resolution_{radio|h3}.log` + stdout, derivado del
+      registro `METHODS` (métodos nuevos obtienen su archivo solos); el
+      motor compartido (`entity_resolution`) logea vía el logger del
+      método activo inyectado con `set_matching_logger()`. Corridas
+      futuras son observables; la corrida en curso (código viejo ya
+      importado) no.
 - [x] **Hallazgo del review (2026-07-17): RAM de `disk_pairs` en
       `find_h3_neighbors`** — los pares (celda_target, celda_vecina) se
       acumulaban como lista Python de tuplas (~37M tuplas ≈ varios GB con

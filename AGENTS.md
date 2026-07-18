@@ -351,9 +351,25 @@ method (`kb_cache/radio/` vs `kb_cache/h3/`); NEW_* synthetic IDs from the
 H3 method carry a distinct prefix suffix so they never collide with radio's.
 
 ```bash
-make clee-resolution        # radio/BallTree -> clee_propagado_radio
-make clee-resolution-h3     # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
+make clee-resolution                      # radio/BallTree -> clee_propagado_radio
+make clee-resolution-h3                   # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
+make clee-resolution-h3 ARGS="--force"    # reset ONLY clee_propagado_h3 (+ its KB cache) and re-resolve
 ```
+
+`--force` is per-method: it NULLs only the active method's column and clears
+only that method's KB cache (`kb_cache/h3/` or `kb_cache/radio/`) — the
+other method's column is never touched.
+
+**Progress logging — one file per method**: each propagation method logs
+to its own file (and stdout): `data/etl_clee_resolution_radio.log` and
+`data/etl_clee_resolution_h3.log`. The file name derives from the
+`CLEEResolver.METHODS` registry key (`etl_clee_resolution_{method}.log`),
+so registering a new method automatically gets it a log file — no logging
+code to touch. The shared matching engine (`entity_resolution.py`) logs
+through the active method's logger (injected via `set_matching_logger()`),
+so per-period progress, KB cache hits, worker chunk completions and the
+heartbeat every `PROGRESS_LOG_INTERVAL` rows all land in the right file.
+`tail -f data/etl_clee_resolution_h3.log` to watch a run.
 
 ### Key Functions Reference
 

@@ -19,13 +19,13 @@ populating the `clee_propagado_radio` column on the `establecimientos` table.
 """
 
 import gc
-import logging
 from datetime import date
 from pathlib import Path
 
 import duckdb
 import polars as pl
 
+from src_etl.core.logging import get_stage_logger
 from src_etl.utils.clee_resolution_config import (
     SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,
@@ -36,13 +36,20 @@ from src_etl.utils.entity_resolution import (
     get_region_prefix,
     propagate_clees_h3,
     propagate_clees_radio,
+    set_matching_logger,
 )
 from src_etl.utils.matching import clean_contact_columns
 from src_etl.utils.warehouse import connect_configured, get_distinct_periods
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 
-logger = logging.getLogger(__name__)
+_LOG_FILE_TEMPLATE = "./data/etl_clee_resolution_{method}.log"
+"""Plantilla del archivo de log POR METODO de propagacion (radio ->
+etl_clee_resolution_radio.log, h3 -> etl_clee_resolution_h3.log). Cada
+metodo registrado en CLEEResolver.METHODS obtiene su archivo
+automaticamente al instanciarse el resolver -- agregar un metodo nuevo al
+registro NO requiere tocar el logging. Mismo patron de stage-log que
+data/etl_h3_backfill.log y data/etl_normalize.log."""
 
 
 class CLEEResolver:
@@ -105,6 +112,16 @@ class CLEEResolver:
         self.master_column: str = cfg["column"]
         self._propagate = cfg["propagate"]
         self._prefix_suffix: str = cfg["prefix_suffix"]
+
+        # Log dedicado por metodo (archivo + stdout). El motor de matching
+        # compartido (entity_resolution) recibe el MISMO logger inyectado,
+        # asi todo el progreso de una corrida (periodos, particiones de KB,
+        # chunks de workers, heartbeat) cae en el archivo del metodo activo.
+        self.logger = get_stage_logger(
+            f"src_etl.clee_resolution.{method}",
+            Path(_LOG_FILE_TEMPLATE.format(method=method)),
+        )
+        set_matching_logger(self.logger)
 
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
@@ -202,7 +219,7 @@ class CLEEResolver:
         """
         cache_path = self._kb_cache_path(period)
         if cache_path.exists():
-            logger.info(f"   KB de {period} desde cache ({cache_path.name})")
+            self.logger.info(f"   KB de {period} desde cache ({cache_path.name})")
             return pl.read_parquet(cache_path)
 
         df_ref = self._load_period(period)
@@ -214,7 +231,7 @@ class CLEEResolver:
         tmp_path = cache_path.with_suffix(".parquet.tmp")
         ref_kb.write_parquet(tmp_path)
         tmp_path.rename(cache_path)
-        logger.info(f"   KB de {period} cacheada ({ref_kb.height:,} filas)")
+        self.logger.info(f"   KB de {period} cacheada ({ref_kb.height:,} filas)")
 
         return ref_kb
 
@@ -235,7 +252,7 @@ class CLEEResolver:
         for f in self.kb_cache_dir.glob("*.parquet.tmp"):
             f.unlink()
         if removed:
-            logger.info(f"   KB cache limpiado ({removed} archivos)")
+            self.logger.info(f"   KB cache limpiado ({removed} archivos)")
 
     def _get_total_rows(self) -> int:
         """Get total row count in establecimientos."""
@@ -311,7 +328,7 @@ class CLEEResolver:
         if not deterministic_periods:
             return []
 
-        logger.info(
+        self.logger.info(
             f"[FASE 1] Resolucion deterministica: {len(deterministic_periods)} periodos con CLEE"
         )
 
@@ -334,7 +351,7 @@ class CLEEResolver:
                 WHERE {col} IS NOT NULL
             """).fetchone()[0]
 
-        logger.info(
+        self.logger.info(
             f"   {col} = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
         )
 
@@ -376,10 +393,10 @@ class CLEEResolver:
         probabilistic_periods = [p for p in periods if not clee_coverage.get(p, False)]
 
         if not probabilistic_periods:
-            logger.info("[FASE 2] No hay periodos sin CLEE. Nada por resolver.")
+            self.logger.info("[FASE 2] No hay periodos sin CLEE. Nada por resolver.")
             return 0
 
-        logger.info(
+        self.logger.info(
             f"[FASE 2] Resolucion probabilistica: "
             f"{len(probabilistic_periods)} periodos sin CLEE "
             f"(ventana deslizante, radio={self.spatial_tol}m)"
@@ -388,7 +405,7 @@ class CLEEResolver:
         total_resolved = 0
 
         for p_idx, target_period in enumerate(probabilistic_periods):
-            logger.info(
+            self.logger.info(
                 f"🔗 [{p_idx + 1}/{len(probabilistic_periods)}] "
                 f"Resolviendo periodo {target_period}..."
             )
@@ -396,7 +413,7 @@ class CLEEResolver:
             # Load target period (all rows, clee_propagado_radio will be NULL)
             df_target = self._load_period(target_period)
             if df_target.is_empty():
-                logger.info(f"   {target_period}: vacio, saltando.")
+                self.logger.info(f"   {target_period}: vacio, saltando.")
                 resolved_periods.append(target_period)
                 continue
 
@@ -421,7 +438,7 @@ class CLEEResolver:
                 if still_missing == 0:
                     break
 
-                logger.info(f"   vs {ref_period} ({still_missing:,} pendientes)...")
+                self.logger.info(f"   vs {ref_period} ({still_missing:,} pendientes)...")
 
                 # Load reference KB (from parquet cache after first build)
                 ref_kb = self._get_ref_kb(ref_period)
@@ -435,7 +452,7 @@ class CLEEResolver:
             # Assign NEW CLEEs to remaining unresolved rows
             still_missing = df_target.filter(pl.col(col).is_null()).height
             if still_missing > 0:
-                logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
+                self.logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
                 df_target = assign_new_clees(df_target, region_prefix, col)
 
             # Write results to DuckDB immediately (no accumulation in RAM)
@@ -446,7 +463,7 @@ class CLEEResolver:
             # Su identidad cambio: invalidar KB cacheada (si existia)
             self._invalidate_kb_cache(target_period)
 
-            logger.info(
+            self.logger.info(
                 f"   ✅ {target_period} resuelto: {rows_written:,} filas escritas "
                 f"({target_total - still_missing:,} propagados, "
                 f"{still_missing:,} nuevos)"
@@ -483,7 +500,7 @@ class CLEEResolver:
         if not periods:
             return {"total_resolved": 0, "periods_processed": 0}
 
-        logger.info(f"   Periodos detectados ({len(periods)}): {periods}")
+        self.logger.info(f"   Periodos detectados ({len(periods)}): {periods}")
 
         # Classify periods by CLEE coverage
         clee_coverage = self._get_periods_with_clee_coverage()
@@ -495,7 +512,7 @@ class CLEEResolver:
             ).fetchall()
         state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
         prefix = get_region_prefix(state_list) + self._prefix_suffix
-        logger.info(f"   Prefijo de region (namespace): {prefix}")
+        self.logger.info(f"   Prefijo de region (namespace): {prefix}")
 
         # --- Phase 1: Deterministic resolution ---
         resolved_periods = self._resolve_deterministic_periods(periods, clee_coverage, force)
@@ -528,7 +545,7 @@ class CLEEResolver:
             True if successful, False otherwise
         """
         if force:
-            logger.warning(
+            self.logger.warning(
                 f"MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los {self.master_column}."
             )
             self._clear_kb_cache()
@@ -555,13 +572,14 @@ class CLEEResolver:
             total_rows = self._get_total_rows()
             unresolved_before = self._count_unresolved() if not force else total_rows
 
-            logger.info(
-                f"Iniciando resolucion CLEE: {total_rows:,} filas totales, "
+            self.logger.info(
+                f"Iniciando resolucion CLEE [metodo={self.method} -> {self.master_column}]: "
+                f"{total_rows:,} filas totales, "
                 f"{unresolved_before:,} sin resolver, radio={self.spatial_tol}m"
             )
 
             if unresolved_before == 0 and not force:
-                logger.info("Todas las entidades ya resueltas. Nada por procesar.")
+                self.logger.info("Todas las entidades ya resueltas. Nada por procesar.")
                 self.tracker.complete_clee_resolution_task(
                     task_id=task_id,
                     status=TaskStatus.SKIPPED,
@@ -587,12 +605,12 @@ class CLEEResolver:
                 output_path=str(self.silver_db_path),
             )
 
-            logger.info(
+            self.logger.info(
                 f"Resolucion CLEE terminada. "
                 f"{stats['total_resolved']:,} filas actualizadas (prob.), "
                 f"{remaining:,} pendientes."
             )
-            logger.info(
+            self.logger.info(
                 f"   Resumen: {stats['deterministic_periods']} periodos deterministicos, "
                 f"{stats['probabilistic_periods']} periodos probabilisticos"
             )
@@ -604,7 +622,7 @@ class CLEEResolver:
             return True
 
         except Exception as e:
-            logger.error(f"   Error en resolucion CLEE: {e}")
+            self.logger.error(f"   Error en resolucion CLEE: {e}")
             self.tracker.complete_clee_resolution_task(
                 task_id=task_id,
                 status=TaskStatus.FAILED,

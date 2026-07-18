@@ -42,6 +42,33 @@ from src_etl.utils.matching import (
 )
 
 logger = logging.getLogger(__name__)
+"""Logger del motor de matching, INYECTABLE por metodo de propagacion.
+
+Por defecto no tiene handlers (silencioso -- suficiente para tests y uso
+standalone de las funciones). CLEEResolver lo reemplaza en su __init__ via
+set_matching_logger() con el stage logger del metodo activo, de modo que
+todo el progreso interno (particiones de KB, chunks de workers, heartbeat
+cada PROGRESS_LOG_INTERVAL filas) cae en el archivo POR METODO
+(data/etl_clee_resolution_{radio|h3|...}.log). Los workers de
+multiprocessing lo heredan por fork, asi que no requiere configuracion
+adicional en los hijos."""
+
+
+def set_matching_logger(stage_logger: logging.Logger) -> None:
+    """Inyecta el logger del stage activo en el motor de matching.
+
+    Llamada por CLEEResolver.__init__ con su logger por metodo
+    (get_stage_logger). Las funciones de este modulo resuelven `logger`
+    como global al momento de cada llamada, asi que el rebind aplica a
+    todo el motor de inmediato. Los metodos nunca corren en paralelo
+    (DuckDB es single-writer), por lo que un solo logger activo basta.
+
+    Args:
+        stage_logger: Logger configurado (archivo + stdout) del metodo
+            de propagacion que va a correr.
+    """
+    global logger
+    logger = stage_logger
 
 KB_COLUMNS = [
     "clee_id",
