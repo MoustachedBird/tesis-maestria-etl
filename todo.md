@@ -183,6 +183,77 @@ me dice nada"):
       podar particiones sin solape — optimización, no correctitud (el slice
       actual ya es correcto para ambos métodos).
 
+## Fase 7 — (Propuesta 2026-07-18) Tercer método de propagación + evaluación de precisión
+
+Objetivo: una tercera columna `clee_propagado_*` con SEMÁNTICA de matching
+distinta, para comparar precisión de verdad. Contexto clave: **radio y H3
+producen asignaciones idénticas por construcción** (mismo radio de 500m,
+misma cascada; solo difiere el generador de candidatos) — entre ellas se
+compara rendimiento, no precisión. La comparación de precisión exige (a)
+un método con otra regla de decisión y (b) ground truth.
+
+### Protocolo de evaluación (aplica a los 3 métodos, hacer PRIMERO)
+
+- [ ] **Evaluación con CLEE enmascarado**: tomar los periodos que SÍ traen
+      CLEE oficial de INEGI, ocultarlo, correr cada método y comparar la
+      asignación contra la verdad → precision/recall/F1 por método. Sin
+      esto "cuál es más precisa" no tiene respuesta empírica. Es una
+      corrida de evaluación aparte (scratch/sample), no una columna nueva.
+      OJO sesgo: las filas con CLEE oficial pueden ser una submuestra no
+      aleatoria — reportarlo como limitación.
+
+### Opción A (recomendada): probabilístico Fellegi-Sunter — `clee_propagado_prob`
+
+ML **no supervisado** (probabilístico clásico): probabilidades m/u por
+campo estimadas con EM (sin etiquetas), match si la suma de pesos de
+evidencia supera el umbral. Es EL marco canónico de record linkage
+(Fellegi & Sunter 1969) → contraste metodológico limpio para la tesis:
+reglas determinísticas (cascada) vs modelo probabilístico.
+
+- Reutilizar el blocking H3 como generador de candidatos: candidatos
+  fijos + regla de decisión variable = experimento que aísla el efecto
+  del modelo. Encaja en el registro `METHODS` (columna + scorer nuevos,
+  mismo core de ventana deslizante).
+- Herramienta: `splink` (MoJ UK) con **backend DuckDB nativo** — EM y
+  scoring out-of-core, alineado con la premisa de RAM.
+
+### Opción B: ML supervisado — `clee_propagado_ml`
+
+Ground truth GRATIS para entrenar: pares de filas que comparten el mismo
+`clee` oficial entre periodos = positivos etiquetados; negativos
+muestreados del mismo bloque H3 con clee distinto. Entrenar un
+clasificador (LightGBM/logística) sobre los mismos features de la cascada
+(fuzzy nombre/razón/actividad, distancia haversine, flags exactos de
+tel/email/web/CP, sector SCIAN, estrato) → probabilidad calibrada por par.
+
+- Pro: aprende los pesos que hoy son umbrales a mano; da probabilidad
+  interpretable; el entrenamiento cabe holgado en RAM (pares muestreados).
+- Contra: requiere split por PERIODO (no por par) para evitar leakage, y
+  hereda el sesgo de la submuestra con CLEE oficial.
+- Nota: A y B son el mismo experimento con distinta fuente de pesos —
+  FS/EM = no supervisado, GBM = supervisado. Si solo cabe uno en la
+  tesis, A es más citable; B es más "moderno". Ambos reutilizan blocking
+  H3 y la infraestructura de columnas por método.
+
+### Opción C (variante de recall): blocking por NOMBRE — `clee_propagado_nombre`
+
+Punto ciego estructural de radio Y h3: un negocio que se mudó a >500m
+NUNCA matchea. Generar candidatos por similitud de nombre (MinHash/LSH
+sobre n-gramas de `nom_estab`, acotado a municipio/estado) + la misma
+cascada captura relocalizaciones largas. Perfil de recall más distinto;
+responde además una pregunta económica (¿cuántos se relocalizan lejos?).
+ML no supervisado en la representación (TF-IDF/MinHash), sin modelo de
+decisión nuevo.
+
+### Descartadas / notas
+
+- Clustering global (HDBSCAN/componentes conexos sobre el grafo de pares):
+  cambia la semántica de asignación (entidad = clúster multi-periodo, no
+  ventana deslizante) — interesante pero rompe la comparabilidad columna a
+  columna; considerarlo solo para la KB consolidada (Fase 5/N3).
+- Embeddings neuronales de nombres: costo/beneficio pobre vs TF-IDF/
+  MinHash en nombres cortos y ruidosos de encuesta; descartado por ahora.
+
 ## Índices pendientes de recrear en el Silver real (2026-07-17)
 
 La migración de rename recreó índices en scratch pero en el Silver real solo
