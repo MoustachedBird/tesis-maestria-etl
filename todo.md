@@ -481,9 +481,9 @@ con nada. Normalizado:
       ciclo downgrade→upgrade, y simulación del Silver real (columnas ENUM
       + índice + datos → convertido con datos intactos y JOINs funcionando).
       Tests nuevos `test_dominio_catalogs.py` (11); suite 168 en verde.
-- [ ] **Aplicar al Silver real: `make db-migrate` (lo corre el usuario)**.
-      Nota: recrea `ix_estab_h3_9` (77M filas, varios minutos). Después,
-      `make load` propaga el esquema a Gold.
+- [x] **Aplicado al Silver real por el usuario (2026-07-18)** vía
+      `make db-migrate` (junto con N2.6). `make load` pendiente para
+      propagar a Gold.
 
 ## N2.6 — Esquema relacional por surrogate ids con PK/FK reales (2026-07-17/18)
 
@@ -527,14 +527,24 @@ Decisión del usuario: relaciones FÍSICAS por id, no joins por string
       real (ENUM + datos → migraciones → script → paridad 5,000/5,000,
       FK rechaza ids inválidos, SILVER_READ_QUERY OK, idempotencia),
       smoke del writer (label→id + guard de codigo_act). 172 tests verdes.
-- [ ] **Aplicar al Silver real (lo corre el usuario, EN ORDEN):**
-      1. `make db-migrate` (enum→varchar + catálogos con ids)
-      2. `make reorganize-domain-ids` (rebuild 77M filas: PK+8 FKs se
-         construyen durante la copia — estimar 30-90 min; log en
-         `data/etl_reorganize_ids.log`)
-      Después `make load` propaga a Gold. El archivo .duckdb no encoge
-      tras el rebuild (bloques se reutilizan); compactar con COPY FROM
-      DATABASE si se desea.
+- [x] **Aplicado al Silver real por el usuario (2026-07-18)**:
+      `make db-migrate` + `make reorganize-domain-ids`. Verificado
+      post-aplicación (2026-07-18): revisión `c3a26327aec3`; 76,758,727
+      filas (conteo exacto preservado); 4 columnas `*_id` / 0 labels
+      viejos; 8 FKs activos; 0 NULLs en los 4 ids (paridad total con los
+      labels originales); 0 tipos ENUM huérfanos; `ix_estab_h3_9`
+      recreado; `clee_propagado_radio` y `h3_cell_9/5` intactos (76.7M);
+      catálogos 39/45/3/8 con descripción; `SILVER_READ_QUERY` resuelve
+      labels OK.
+- [ ] (Opcional, limpieza) **Eliminar `scripts/reorganize_domain_ids.py`
+      + target `reorganize-domain-ids` del Makefile**: era ONE-TIME y ya
+      se aplicó al Silver real — nunca volverá a usarse (bases nuevas
+      nacen relacionales vía writer/migraciones; el script queda en el
+      historial de git si se necesitara consultar). Borrar también
+      `data/etl_reorganize_ids.log` cuando estorbe.
+- [ ] `make load` para propagar el esquema nuevo a Gold. Nota: el archivo
+      .duckdb del Silver no encoge tras el rebuild (bloques se
+      reutilizan); compactar con COPY FROM DATABASE si se desea.
 
 ## N3 — Dimensión de entidad económica (la clave para la tesis)
 
