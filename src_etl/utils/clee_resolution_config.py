@@ -52,10 +52,21 @@ H3_PARTITION_RES = 5
 """Resolucion H3 de particionado grueso (res 5 ~ arista 8.5km): celda de
 `h3_cell_5`, derivada como parent(h3_cell_9).
 
-HOY NINGUN codigo la consume: esta reservada para el particionado de KB
-por celda gruesa (Fase 4 opcional, todo.md) que podaria particiones de KB
-sin solape espacial con el target. Se precomputa porque su costo marginal
-es ~0 (misma pasada del UPDATE de backfill, sin indice, columna derivada).
+HOY NINGUN codigo la consume: es el habilitador precomputado del
+particionado de KB por celda gruesa (Fase 4 opcional, todo.md; Fase 5 lo
+reutilizaria como llave de particion en joins DuckDB). Como funcionara la
+poda: en vez de partir la KB en slices arbitrarios (que obligan a evaluar
+TODOS los targets contra TODAS las particiones), la KB se particionaria
+por h3_cell_5; dado que SPATIAL_RADIUS_M (500m) << arista res-5 (~8.5km),
+todo candidato de un target vive en su celda res-5 o en sus vecinas
+inmediatas (grid_disk k=1), asi que las particiones fuera de ese disco se
+saltan sin perder matches (menos filas escaneadas Y menos RAM pico). La
+derivacion parent(h3_cell_9) es la que garantiza que ninguna celda de
+blocking res-9 quede repartida entre dos particiones res-5 (la celda
+res-5 directa del punto filtraria ~6.5% de filas a otra particion,
+medido). Se precomputa porque su costo marginal es ~0 (misma pasada del
+UPDATE de backfill, sin indice, columna derivada de h3_cell_9 — si la
+optimizacion se descarta, la columna se puede borrar sin perder nada).
 Constante estructural, NO .env.
 """
 

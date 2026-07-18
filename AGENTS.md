@@ -47,7 +47,7 @@ Follow this procedure:
 
 ## Normalize-Dates Step
 
-The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> clee-resolution**.
+The transform pipeline has 4 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution**.
 
 The `normalize-dates` step parses `fecha_alta_str` (raw string from INEGI) into `fecha_alta_date` (DATE type, format `YYYY-MM-01`) directly in the Silver DuckDB via SQL UPDATE, one period at a time.
 
@@ -92,9 +92,144 @@ uv run python -m src_etl.main transform
 
 ---
 
+## H3 Cells: `h3_cell_9` and `h3_cell_5`
+
+Two BIGINT columns on `establecimientos` (Silver; Gold inherits on `make load`)
+hold precomputed H3 cell indexes derived from `latitud`/`longitud`. Valid H3
+indexes always fit in a signed BIGINT (high bit is 0).
+
+| Column | Resolution | Derivation | Consumed by | Indexed |
+|--------|-----------|------------|-------------|---------|
+| `h3_cell_9` | 9 (~174m edge) | `h3_latlng_to_cell(latitud, longitud, 9)` | H3 candidate blocking in `find_h3_neighbors()` (`matching.py`) — the ONLY consumer today | `ix_estab_h3_9` |
+| `h3_cell_5` | 5 (~8.5km edge) | `h3_cell_to_parent(h3_cell_9, 5)` — NEVER directly from the point | Nothing yet — precomputed enabler for KB partition pruning (see subsection below) | No (deliberate) |
+
+### Why `h3_cell_5 = parent(h3_cell_9)` instead of the point's own res-5 cell
+
+The H3 hierarchy does not nest perfectly: ~6.5% of points near cell edges
+fall in a res-5 cell that is NOT the parent of their res-9 cell (measured on
+the real Silver, 2026-07-17). The future KB partition pruning needs every row
+of one res-9 blocking cell to live in the same res-5 partition — only
+`h3_cell_to_parent` guarantees that co-partitioning. Never compute it as
+`h3_latlng_to_cell(lat, lon, 5)`.
+
+### Intended use of `h3_cell_5`: KB partition pruning (not yet implemented)
+
+`h3_cell_5` has zero consumers today. It exists as the precomputed enabler
+for ONE specific optimization, tracked as the optional Fase 4 item in
+`todo.md` (and reused by Fase 5 if that lands):
+
+- **The problem it will solve.** When a reference KB exceeds
+  `KB_MAX_ROWS_PER_PARTITION` (1.5M rows), `propagate_clees()` splits it
+  into contiguous row slices and matches EVERY pending target row against
+  EVERY slice. Correct but wasteful: a slice can consist entirely of rows
+  thousands of km away from a target, yet it is still built, shared with
+  the workers (fork/COW pages) and scanned.
+- **How pruning will work.** Partition the KB by `h3_cell_5` instead of by
+  arbitrary slices. Since `SPATIAL_RADIUS_M` (500m) is far smaller than a
+  res-5 cell (~8.5km edge), every possible candidate for a target lies in
+  the target's own res-5 cell or one of its immediate neighbors
+  (`grid_disk(h3_cell_5, k=1)`). Any KB partition whose res-5 cells do not
+  intersect that disk can be skipped entirely: fewer rows scanned per pass
+  AND a lower RAM peak (partitions become geographically bounded), with
+  zero correctness impact — pruned partitions cannot contain candidates by
+  construction.
+- **Why this requires the parent derivation.** Pruning decides at res 5,
+  but blocking happens at res 9. `h3_cell_5 = parent(h3_cell_9)`
+  guarantees every row of one res-9 blocking cell lives in exactly one
+  res-5 partition, so a skipped partition can never hide a candidate the
+  res-9 `grid_disk` would have found. Deriving res 5 from the point
+  directly would leak ~6.5% of rows across partition boundaries (measured;
+  see previous subsection).
+- **Secondary planned consumer.** The Fase 5 consolidated-KB experiment
+  (candidate generation as out-of-core DuckDB joins) would use `h3_cell_5`
+  as its partition/pruning key for the same reason.
+- **Cost and exit criteria.** Keeping the column costs ~0: derived in the
+  same INSERT/UPDATE pass, no index, and DuckDB columnar compression
+  handles the low-cardinality BIGINT well (Mexico spans on the order of
+  thousands of distinct res-5 cells). It is derivable from `h3_cell_9` at
+  any time, so if
+  the pruning optimization is eventually rejected, the column can simply
+  be dropped; until then it stays materialized so the optimization can be
+  tested without another 77M-row pass.
+
+### How the columns get populated (two paths, same expressions)
+
+1. **At ingest (primary path)**: `EstablecimientoWriter.upsert()`
+   (`loaders/denue.py`) computes both cells inside the INSERT SELECT using
+   the DuckDB `h3` community extension (vectorized, out-of-core). Guard:
+   coords outside [-90,90]/[-180,180] (or missing lat/lon columns) → NULL
+   cells. New periods are born with cells populated.
+2. **h3-cells stage (incremental safety net)**: `H3CellBackfiller`
+   (`transformers/h3_backfill.py`) runs a per-period SQL UPDATE for rows
+   where `h3_cell_9 IS NULL` and coords are valid. This did the original
+   76.7M-row backfill and catches any row that reached Silver without
+   cells. Tracked in metadata (job `denue_h3_backfill`, one process_task
+   per period).
+
+Both paths load the extension via `load_h3_extension()`
+(`utils/warehouse.py`). Where Python-side cells are needed, the h3-py
+`h3.api.basic_int` API is used — verified to produce cells identical to the
+DuckDB extension.
+
+### How `h3_cell_9` drives matching
+
+`find_h3_neighbors(ref_df, target_df, radius)` (`matching.py`) is the
+candidate generator of the H3 propagation method (fills `clee_propagado_h3`):
+
+1. `grid_disk(h3_cell_9, k=H3_GRID_DISK_K)` over the DISTINCT target cells
+   only (pairs accumulated in preallocated numpy arrays, 16 bytes/pair —
+   never Python tuples).
+2. Polars hash joins: target → neighbor cells → KB rows by `h3_cell_9`
+   (multithreaded, streaming engine).
+3. Exact haversine post-filter `<= SPATIAL_RADIUS_M` restores the exact
+   radius semantics of the BallTree; results sorted by distance.
+
+Parity with the BallTree generator is verified: identical neighbors, 0
+differences (`tests/unit/test_h3_candidates.py`). Rows with NULL
+`h3_cell_9` (no coords) get 0 candidates, same as the baseline. `KB_COLUMNS`
+includes `h3_cell_9`, so the KB cache (`data/silver/kb_cache/{radio|h3}/`)
+carries it; the BallTree generator simply ignores the column.
+
+### Structural constants (deliberately NOT .env)
+
+Defined in `clee_resolution_config.py` with full docstrings:
+
+- `H3_BLOCKING_RES = 9` / `H3_PARTITION_RES = 5`: materialized in ~77M rows
+  of Silver — changing either requires an Alembic migration + full
+  re-backfill with `--force`, so they must not drift via environment.
+- `H3_GRID_DISK_K = 3`: k=3 rings at res 9 cover >= 500m worst case. Coupled
+  to `SPATIAL_RADIUS_M`: an import-time guard raises if
+  `SPATIAL_RADIUS_M > k × 174m`. Raising the radius means raising k AND
+  re-verifying H3-vs-BallTree parity.
+
+### Index / write-performance rules
+
+- `ix_estab_h3_9` is the only index the H3 method needs. There is
+  deliberately NO index on `h3_cell_5` (unused column) nor on
+  `clee_propagado_h3`: each ART index on the 77M-row table makes bulk
+  writes ~1000x slower (measured).
+- Full recompute with `--force`: `DROP INDEX ix_estab_h3_9` → backfill →
+  `CREATE INDEX` is an order of magnitude faster (the UPDATE cost is row
+  rewrite + per-row ART maintenance, not the h3 computation). Not needed
+  for the normal incremental flow (new periods are ~1-4M rows).
+
+### CLI Usage
+
+```bash
+# h3-cells stage only (incremental: rows with NULL h3_cell_9)
+make h3-backfill
+# equivalent:
+uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells
+
+# Recompute ALL rows with valid coords (drop ix_estab_h3_9 first, see above)
+make h3-backfill ARGS="--force"
+```
+
+---
+
 ## CLEE Resolution Step (Entity Resolution)
 
-The transform pipeline has 3 ordered sub-steps: **ingest -> normalize-dates -> clee-resolution**. This section documents the CLEE resolution stage in detail.
+The transform pipeline has 4 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution**. This section documents the CLEE resolution stage in detail.
 
 ### Purpose
 
@@ -195,7 +330,7 @@ requires migration + recompute; see their docstrings):
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `H3_BLOCKING_RES` | 9 | Resolution materialized in `h3_cell_9` (~174m edge) |
-| `H3_PARTITION_RES` | 5 | Resolution materialized in `h3_cell_5` (~8.5km edge); reserved for KB partition pruning, not yet consumed |
+| `H3_PARTITION_RES` | 5 | Resolution of `h3_cell_5` (~8.5km edge), derived as `parent(h3_cell_9)`; reserved for KB partition pruning, not yet consumed |
 | `H3_GRID_DISK_K` | 3 | grid_disk rings for H3 candidates; coupled to `SPATIAL_RADIUS_M` (coverage guard at import) |
 | `_EARTH_RADIUS_M` (`matching.py`) | 6,371,000 | Physical constant shared by both haversines |
 
@@ -209,7 +344,16 @@ complementary method filling its own column for thesis comparison:
 post-filter). Both share the sliding-window engine and matching cascade
 (`_propagate_clees` core + `propagate_clees_radio`/`propagate_clees_h3`
 wrappers). `h3_cell_9` feeds H3 blocking; `h3_cell_5` = parent(h3_cell_9),
-stored for future KB partition pruning (currently unused, near-zero cost).
+stored for future KB partition pruning (currently unused, near-zero cost) —
+full details in the **H3 Cells** section above. Same run-order semantics per
+method: force resets ONLY that method's column; the KB cache is split per
+method (`kb_cache/radio/` vs `kb_cache/h3/`); NEW_* synthetic IDs from the
+H3 method carry a distinct prefix suffix so they never collide with radio's.
+
+```bash
+make clee-resolution        # radio/BallTree -> clee_propagado_radio
+make clee-resolution-h3     # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
+```
 
 ### Key Functions Reference
 
@@ -291,13 +435,16 @@ etl-core/
 │   ├── transformers/              # Transformation layer
 │   │   ├── denue.py               # Unified orchestrator (DenueTransformer)
 │   │   ├── processor.py           # TransformStage: ZIP -> Silver DuckDB
-│   │   ├── clee_resolver.py        # CLEEResolver: Entity resolution across time
-│   │   └── _legacy/               # Archived old processor/clee_resolver
+│   │   ├── date_normalizer.py     # normalize-dates stage (fecha_alta_str -> DATE)
+│   │   ├── h3_backfill.py         # h3-cells stage (h3_cell_9/h3_cell_5 backfill)
+│   │   └── clee_resolver.py       # CLEEResolver: Entity resolution across time
 │   ├── loaders/                   # Data loading layer
 │   │   ├── loader.py              # LoaderStage: Silver -> Gold (file copy)
-│   │   ├── denue.py               # DataStoreManager (DuckDB upsert)
+│   │   ├── denue.py               # EstablecimientoWriter (DuckDB upsert, H3 in INSERT)
 │   │   ├── geography.py           # Geography seeds (entidades, municipios, localidades)
-│   │   └── scian.py               # SCIAN economic activity seeds
+│   │   ├── scian.py               # SCIAN economic activity seeds
+│   │   ├── estratos.py            # denue_estratos_personal seed
+│   │   └── dominios.py            # Domain catalogs seeds (vialidad/asentamiento/unidad)
 │   └── utils/                     # Shared utilities
 │       ├── browser.py             # Selenium Chrome driver setup
 │       ├── denue_schema.py        # DENUE column mappings, enums, aliases
@@ -379,7 +526,9 @@ make extract ARGS="--force"      # Force re-download all files
 make transform                   # Transform raw data (Bronze -> Silver)
 make transform-force             # Force reprocess all
 make load                        # Load Silver -> Gold
-make clee-resolution             # CLEE Resolution (Entity Resolution)
+make h3-backfill                 # Backfill h3_cell_9/h3_cell_5 in Silver (incremental)
+make clee-resolution             # CLEE Resolution radio/BallTree -> clee_propagado_radio
+make clee-resolution-h3          # CLEE Resolution H3 blocking -> clee_propagado_h3
 make pipeline                    # Full: Extract -> Transform -> Load
 make pipeline-force              # Full pipeline with force mode
 
@@ -419,6 +568,7 @@ make lint / lint-fix / format    # Ruff linting and formatting
 Data Flow:
   EXTRACT   -> download_tasks  (lineage: WEB -> FILE)
   TRANSFORM -> process_tasks   (lineage: FILE -> TABLE in Silver)
+  H3_CELLS  -> process_tasks   (job denue_h3_backfill, Silver in-place UPDATE)
   LOAD      -> process_tasks   (lineage: Silver -> Gold file copy)
   CLEE_RESOLUTION -> clee_resolution_tasks (lineage: Silver DuckDB in-place)
 ```
@@ -443,7 +593,8 @@ Data Flow:
 
 ```
 data/bronze/denue/{period}/*.zip      # Raw downloads
-data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio)
+data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5)
+data/silver/kb_cache/{radio|h3}/      # Per-method KB cache (parquet, regenerable)
 data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
 ```
 
@@ -516,18 +667,19 @@ Key implications:
   recreation). Run order on the real Silver: `make db-migrate` → 
   `make reorganize-domain-ids`.
 
-### Establecimiento (40 columns)
+### Establecimiento (43 columns)
 
 | Category | Columns |
 |----------|---------|
 | PK | `id` |
-| Identification | `clee`, `clee_propagado_radio`, `nom_estab`, `raz_social` |
-| Economic | `codigo_act`, `tipounieco`, `per_ocu` |
-| Address | `tipo_vial`, `nom_vial`, `numero_ext`, `letra_ext`, `numero_int`, `letra_int`, `edificio`, `edificio_e` |
+| Identification | `clee`, `clee_propagado_radio`, `clee_propagado_h3`, `nom_estab`, `raz_social` |
+| Economic (FKs) | `codigo_act`, `tipounieco_id`, `per_ocu_id` |
+| Address | `tipo_vial_id` (FK), `nom_vial`, `numero_ext`, `letra_ext`, `numero_int`, `letra_int`, `edificio`, `edificio_e` |
 | Cross Streets | `tipo_v_e_1/2/3`, `nom_v_e_1/2/3` |
-| Settlement | `tipo_asent`, `nomb_asent`, `nom_cencom`, `num_local`, `cod_postal` |
+| Settlement | `tipo_asent_id` (FK), `nomb_asent`, `nom_cencom`, `num_local`, `cod_postal` |
 | Geographic | `cve_ent`, `cve_mun`, `cve_loc`, `ageb`, `manzana` |
 | Coordinates | `latitud`, `longitud` |
+| H3 cells | `h3_cell_9` (res 9, blocking key), `h3_cell_5` (res 5 = parent of `h3_cell_9`, reserved) — see **H3 Cells** section |
 | Contact | `telefono`, `correoelec`, `www` |
 | Temporal | `fecha_alta_str`, `fecha_alta_date`, `period` |
 
@@ -547,12 +699,20 @@ The `clee_propagado_radio` column stores the resolved entity identifier assigned
 
 | Index | Columns | Speed Gain |
 |-------|---------|-----------|
+| `ix_estab_h3_9` | `h3_cell_9` | H3 blocking (the one index the CLEE H3 method needs) |
 | `ix_estab_geo` | `cve_ent, cve_mun, cve_loc` | 100-600x |
 | `ix_estab_activity_period` | `codigo_act, period` | 90-180x |
-| `ix_estab_composite` | `cve_ent, codigo_act, per_ocu` | 300-600x |
+| `ix_estab_composite` | `cve_ent, codigo_act, per_ocu_id` | 300-600x |
 | `ix_estab_postal` | `cod_postal` | 50-100x |
 | `ix_estab_coords` | `latitud, longitud` | 80-200x |
 | `ix_estab_clee` | `clee` | 200-500x |
+
+**State on the real Silver (2026-07-18):** only `ix_estab_h3_9` currently
+exists — the analytical indexes were lost during the rename migration and
+are pending recreation (tens of minutes each on 77M rows; recreate them only
+when analysis queries need them — see todo.md). Deliberately unindexed:
+`h3_cell_5`, `clee_propagado_radio`, `clee_propagado_h3` (each ART index
+makes bulk writes ~1000x slower, measured).
 
 ### Backend Configuration
 

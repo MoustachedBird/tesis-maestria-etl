@@ -280,8 +280,13 @@ Costo: decenas de min (ART sobre 77M). Hacerlo cuando el análisis los pida.
       generación de candidatos.
 - [ ] Benchmark final del pipeline completo de resolución (tiempo total,
       pico de RAM) vs baseline.
-- [ ] Actualizar `AGENTS.md` (sección CLEE Resolution: blocking H3, nuevas
-      constantes, columnas nuevas) y este `todo.md`.
+- [x] Actualizar `AGENTS.md` (2026-07-18): sección dedicada **H3 Cells**
+      (uso específico de `h3_cell_9`/`h3_cell_5`: derivación
+      parent(h3_cell_9), dos paths de poblado, blocking en
+      `find_h3_neighbors`, constantes estructurales, reglas de índices),
+      pipeline de 4 sub-steps, targets `h3-backfill`/`clee-resolution-h3`,
+      tabla de columnas (43, con `*_id` y H3), estado real de índices,
+      layout sin `_legacy/`.
 
 ---
 
@@ -452,8 +457,8 @@ vivir en UN lugar. Hallazgos ordenados por valor.
 - [x] `db/database.py`: alias muerto `DuckDBWarehouse = get_db` eliminado
       (2026-07-17) — 0 usos y colisionaba de nombre con
       `utils.warehouse.DuckDBWarehouse`.
-- [ ] `AGENTS.md` referencia `src_etl/transformers/_legacy/` que YA NO
-      existe. Actualizar layout (junto con lo demás pendiente de Fase 6).
+- [x] `AGENTS.md` referencia a `src_etl/transformers/_legacy/` eliminada y
+      layout actualizado (2026-07-18, junto con la sección H3 de Fase 6).
 - [ ] (Opcional) Helpers de `Establecimiento` en `models.py`: 10 métodos
       con 0 usos fuera de models/tests. Varios ahora duplican al esquema:
       `get_scian_sector/subsector` ≈ columnas `sector`/`subsector`;
