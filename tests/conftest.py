@@ -21,6 +21,7 @@ from src_etl.db.enums import (
     TipoAsentamiento,
     TipoUnidadEconomica,
     TipoVial,
+    domain_id,
 )
 from src_etl.db.models import (
     ActividadEconomica,
@@ -28,6 +29,12 @@ from src_etl.db.models import (
     Establecimiento,
     Localidad,
     Municipio,
+)
+from src_etl.db.models import (
+    TipoAsentamiento as TipoAsentamientoCat,
+)
+from src_etl.db.models import (
+    TipoVialidad as TipoVialidadCat,
 )
 
 # ============================================================================
@@ -171,17 +178,17 @@ def sample_establecimiento() -> Establecimiento:
     Returns:
         Establecimiento instance with manually set fields
     """
-    return Establecimiento(
+    estab = Establecimiento(
         id="test_123456789",
         clee="0512345678901",
         nom_estab="Test Restaurant & Bar",
         raz_social="TEST BUSINESS SA DE CV",
         codigo_act="722515",
-        # Business type
-        tipounieco=TipoUnidadEconomica.FIJO.value,
-        per_ocu=PersonalOcupado.PERSONAS_11_30.value,
+        # Business type (FKs por id; el label vive en el catalogo)
+        tipounieco_id=domain_id(TipoUnidadEconomica.FIJO),
+        per_ocu_id=domain_id(PersonalOcupado.PERSONAS_11_30),
         # Address components
-        tipo_vial=TipoVial.CALLE.value,
+        tipo_vial_id=domain_id(TipoVial.CALLE),
         nom_vial="INSURGENTES SUR",
         numero_ext="1234",
         letra_ext="A",
@@ -196,7 +203,7 @@ def sample_establecimiento() -> Establecimiento:
         tipo_v_e_3=TipoVial.BOULEVARD.value,
         nom_v_e_3="CONSTITUYENTES",
         # Settlement
-        tipo_asent=TipoAsentamiento.COLONIA.value,
+        tipo_asent_id=domain_id(TipoAsentamiento.COLONIA),
         nomb_asent="DEL VALLE",
         # Shopping center
         nom_cencom="PLAZA INSURGENTES",
@@ -220,6 +227,18 @@ def sample_establecimiento() -> Establecimiento:
         fecha_alta_date=date(2020, 6, 1),
         period=date(2023, 11, 1),
     )
+    # Objeto transient (sin sesion): las relationships no cargan solas, se
+    # asignan los objetos de catalogo para que los helpers de direccion
+    # resuelvan los labels igual que con una fila persistida + JOIN.
+    estab.tipo_vialidad = TipoVialidadCat(
+        id=domain_id(TipoVial.CALLE), tipo_vial=TipoVial.CALLE.value, descripcion="test"
+    )
+    estab.tipo_asentamiento = TipoAsentamientoCat(
+        id=domain_id(TipoAsentamiento.COLONIA),
+        tipo_asent=TipoAsentamiento.COLONIA.value,
+        descripcion="test",
+    )
+    return estab
 
 
 @pytest.fixture
@@ -236,7 +255,7 @@ def sample_establecimiento_minimal() -> Establecimiento:
         id="test_minimal_001",
         nom_estab="Minimal Business",
         codigo_act="722515",
-        per_ocu=PersonalOcupado.PERSONAS_0_5.value,
+        per_ocu_id=domain_id(PersonalOcupado.PERSONAS_0_5),
         cve_ent="09",
     )
 

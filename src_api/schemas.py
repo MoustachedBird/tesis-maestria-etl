@@ -20,11 +20,11 @@ class EstablecimientoBase(BaseModel):
 
     nom_estab: str | None = Field(None, max_length=500, description="Establishment name")
     codigo_act: str | None = Field(None, max_length=10, description="SCIAN economic activity code")
-    per_ocu: str | None = Field(
-        None, max_length=50, description="Personnel occupied (employee count range)"
+    per_ocu_id: int | None = Field(
+        None, description="FK to denue_estratos_personal (employee range catalog)"
     )
-    tipounieco: str | None = Field(
-        None, max_length=20, description="Economic unit type: FIJO, SEMIFIJO, NINGUNO"
+    tipounieco_id: int | None = Field(
+        None, description="FK to denue_tipos_unidad_economica (unit type catalog)"
     )
     cve_ent: str | None = Field(None, max_length=2, description="State code")
     cve_mun: str | None = Field(None, max_length=3, description="Municipality code")
@@ -46,8 +46,8 @@ class EstablecimientoUpdate(BaseModel):
 
     nom_estab: str | None = Field(None, max_length=500)
     codigo_act: str | None = Field(None, max_length=10)
-    per_ocu: str | None = Field(None, max_length=50)
-    tipounieco: str | None = Field(None, max_length=20)
+    per_ocu_id: int | None = Field(None)
+    tipounieco_id: int | None = Field(None)
     cve_ent: str | None = Field(None, max_length=2)
     cve_mun: str | None = Field(None, max_length=3)
     cve_loc: str | None = Field(None, max_length=4)
@@ -63,10 +63,10 @@ class EstablecimientoResponse(EstablecimientoBase):
     id: str
     clee: str | None = None
     raz_social: str | None = None
-    tipo_vial: str | None = None
+    tipo_vial_id: int | None = None
     nom_vial: str | None = None
     numero_ext: str | None = None
-    tipo_asent: str | None = None
+    tipo_asent_id: int | None = None
     nomb_asent: str | None = None
     telefono: str | None = None
     correoelec: str | None = None
@@ -187,4 +187,4 @@ class EstablecimientoFilter(BaseModel):
     codigo_act: str | None = Field(None, max_length=10, description="Filter by activity code")
     period: date | None = Field(None, description="Filter by data period")
     cve_mun: str | None = Field(None, max_length=3, description="Filter by municipality code")
-    per_ocu: str | None = Field(None, max_length=50, description="Filter by employee range")
+    per_ocu_id: int | None = Field(None, description="Filter by employee-range catalog id")

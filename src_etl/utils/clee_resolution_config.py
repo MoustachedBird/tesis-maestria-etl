@@ -214,16 +214,22 @@ SILVER_READ_QUERY = """
         e.correoelec,
         e.www,
         e.fecha_alta_str,
-        CAST(e.per_ocu AS VARCHAR) AS per_ocu,
-        CAST(e.tipo_asent AS VARCHAR) AS tipo_asent,
+        ep.per_ocu AS per_ocu,
+        ta.tipo_asent AS tipo_asent,
         e.nomb_asent,
         e.nom_cencom,
         e.cod_postal
     FROM establecimientos e
     LEFT JOIN denue_actividades_economicas a ON e.codigo_act = a.codigo_act
+    LEFT JOIN denue_estratos_personal ep ON e.per_ocu_id = ep.id
+    LEFT JOIN denue_tipos_asentamiento ta ON e.tipo_asent_id = ta.id
 """
 """SQL para leer datos del Silver DuckDB con JOINs a catalogos.
-Obtiene nombre_act via JOIN; cast de enums a VARCHAR para Polars."""
+
+Los dominios viven como FKs enteros (per_ocu_id/tipo_asent_id); aqui se
+resuelven a sus labels con el MISMO nombre de columna de siempre, asi que
+el pipeline de matching (COLS_NEEDED_FOR_MATCHING, sanitizacion, KB) no
+cambia. Catalogos de decenas de filas: el costo del JOIN es ~0."""
 
 TEXT_COLS_TO_SANITIZE = [
     "nom_estab",

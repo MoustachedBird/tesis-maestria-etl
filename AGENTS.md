@@ -467,36 +467,54 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 |-------|-------|------------|------|
 | `Establecimiento` | `establecimientos` | `id` (hash) | 100M+ |
 | `ActividadEconomica` | `denue_actividades_economicas` | `codigo_act` | 1,127 |
-| `EstratoPersonal` | `denue_estratos_personal` | `per_ocu` | 8 |
-| `TipoVialidad` | `denue_tipos_vialidad` | `tipo_vial` | 39 |
-| `TipoAsentamiento` | `denue_tipos_asentamiento` | `tipo_asent` | 45 |
-| `TipoUnidadEconomica` | `denue_tipos_unidad_economica` | `tipounieco` | 3 |
+| `EstratoPersonal` | `denue_estratos_personal` | `id` (surrogate) | 8 |
+| `TipoVialidad` | `denue_tipos_vialidad` | `id` (surrogate) | 39 |
+| `TipoAsentamiento` | `denue_tipos_asentamiento` | `id` (surrogate) | 45 |
+| `TipoUnidadEconomica` | `denue_tipos_unidad_economica` | `id` (surrogate) | 3 |
 | `Entidad` | `denue_entidades` | `cve_ent` | 32 |
 | `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,478 |
 | `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 39,140 |
 
-### Domain normalization (no DuckDB ENUMs, no domain FKs on the fact table)
+### Relational schema: real PK/FK links by surrogate ids
 
-The old DuckDB ENUM column types (`tipo_vial_type`, `tipo_asent_type`,
-`tipounieco_type`, `per_ocu_type`) were normalized away (migration
-`ae66f32a9bed`): those columns are plain VARCHAR and their domain lives in
-the `denue_tipos_*` / `denue_estratos_personal` catalog tables, seeded from
-the enums in `src_etl/db/enums.py` (single source of truth, loaders
-`dominios.py`/`estratos.py`).
+The old DuckDB ENUM column types (`tipo_vial_type`, etc.) were fully
+normalized (migrations `ae66f32a9bed` + `c3a26327aec3`, user decision
+2026-07-17): the domain catalogs carry `id INTEGER PRIMARY KEY` (the value's
+1-based position in its enum — see `enums.domain_id()`; enums are
+**append-only** because millions of rows reference these ids), the label as
+UNIQUE, and a `descripcion` column with the meaning of each value.
+Seeds are materialized as parquet files in `data/seeds/`
+(`seed_tipos_*.parquet`, `seed_estratos_personal.parquet`, same pattern as
+geography/SCIAN, tracked in git); the enums + descriptions in
+`loaders/dominios.py` GENERATE those files and regenerate them on drift —
+loaders always load the DB from the parquet.
 
-Linking strategy:
-- **Physical FKs**: only the 3 geography FKs (created with the table).
-  Deliberately NO FK from `establecimientos` to the domain/SCIAN catalogs:
-  every FK in DuckDB creates an implicit ART index on the referencing
-  columns (~77M rows -> massive writes measured ~1000x slower), and DuckDB
-  cannot `ALTER TABLE ... ADD CONSTRAINT` anyway.
-- **Integrity**: `EstablecimientoWriter.validate_integrity()` fail-fast
-  checks every ingested batch against `DOMAIN_CATALOGS` (derived from the
-  same enums that seed the catalogs).
-- **Navigation**: viewonly ORM relationships on `Establecimiento`
-  (`actividad`, `estrato`, `tipo_vialidad`, `tipo_asentamiento`,
-  `tipo_unidad`, `entidad`, `municipio`, `localidad`) declare the joins
-  without emitting FK DDL. In SQL, JOIN by the label columns directly.
+`establecimientos` links with **real FOREIGN KEYs (8 total)**:
+`tipo_vial_id`, `tipo_asent_id`, `tipounieco_id`, `per_ocu_id` →
+`denue_tipos_*`/`denue_estratos_personal(id)`; `codigo_act` → SCIAN
+catalog; plus the 3 composite geography FKs. Canonical DDL:
+`loaders.denue.ESTABLECIMIENTOS_DDL` (same schema as the ORM model).
+
+Key implications:
+- **Ingest**: CSVs bring labels; `EstablecimientoWriter.upsert()` converts
+  label → id via LEFT JOIN with the catalogs (`DOMAIN_ID_COLUMNS`).
+  `validate_integrity()` fail-fasts out-of-domain labels BEFORE insert, and
+  `_validate_codigo_act()` catches new SCIAN codes with an actionable error
+  (update the catalog seed) instead of a cryptic FK violation.
+- **Reads**: labels come via JOIN (e.g. `SILVER_READ_QUERY` resolves
+  `per_ocu`/`tipo_asent` under their old column names, so the CLEE matching
+  pipeline is unchanged). ORM relationships (`actividad`, `estrato`,
+  `tipo_vialidad`, `tipo_asentamiento`, `tipo_unidad`, `entidad`,
+  `municipio`, `localidad`) are FK-driven.
+- **Cost accepted**: FKs imply per-row lookups/index maintenance on massive
+  DuckDB writes; the user chose physical referential integrity.
+- **DuckDB cannot `ALTER TABLE ... ADD CONSTRAINT`**: FKs only exist on
+  tables created with them. New DBs are born with the final DDL; converting
+  a populated Silver is the ONE-TIME script
+  `scripts/reorganize_domain_ids.py` (`make reorganize-domain-ids`), which
+  rebuilds the fact table (label→id joins, parity checks, swap, index
+  recreation). Run order on the real Silver: `make db-migrate` → 
+  `make reorganize-domain-ids`.
 
 ### Establecimiento (40 columns)
 

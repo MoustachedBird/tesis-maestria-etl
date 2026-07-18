@@ -485,6 +485,57 @@ con nada. Normalizado:
       Nota: recrea `ix_estab_h3_9` (77M filas, varios minutos). Después,
       `make load` propaga el esquema a Gold.
 
+## N2.6 — Esquema relacional por surrogate ids con PK/FK reales (2026-07-17/18)
+
+Decisión del usuario: relaciones FÍSICAS por id, no joins por string
+(supersede el "sin FK físico" de N2.5). Implementado:
+
+- [x] Catálogos con `id INTEGER PRIMARY KEY` (posición 1-based en su enum,
+      `enums.domain_id()` — **los enums quedan append-only**), label
+      UNIQUE y columna `descripcion` con el significado de cada valor
+      (39 vialidades + 45 asentamientos + 3 unidades; estratos ya
+      materializa min/max/categoría).
+- [x] **Seeds en parquet** (petición usuario 2026-07-18): los 4 catálogos
+      nuevos se materializan como `data/seeds/seed_tipos_*.parquet` y
+      `seed_estratos_personal.parquet` (mismo patrón que geografía/SCIAN,
+      trackeados en git). Los enums + descripciones en código son la
+      fuente que GENERA los archivos: si un parquet falta o difiere, el
+      loader lo regenera (`ensure_seed_parquets`/`ensure_seed_parquet`);
+      la carga a DB siempre lee del parquet.
+- [x] `establecimientos` con **8 FKs reales**: `tipo_vial_id`,
+      `tipo_asent_id`, `tipounieco_id`, `per_ocu_id`, `codigo_act` (SCIAN,
+      verificado 0 huérfanos en el Silver real) + los 3 de geografía
+      (ahora también declarados en el ORM). DDL canónico único:
+      `loaders.denue.ESTABLECIMIENTOS_DDL` = modelo ORM.
+- [x] Ingest: writer convierte label→id vía LEFT JOIN con catálogos;
+      `validate_integrity()` (labels) + `_validate_codigo_act()` dan
+      fail-fast claro ANTES del FK. `SILVER_READ_QUERY` resuelve labels
+      por JOIN con los mismos nombres de columna → pipeline CLEE intacto.
+- [x] Migración `c3a26327aec3`: catálogos al esquema nuevo + rebuild de la
+      tabla de hechos si está vacía; con datos imprime la instrucción del
+      script. Loaders reseedean solo si el contenido difiere (seguro con
+      FKs entrantes; DELETE bloqueado por DuckDB si hay referencias).
+- [x] **Script ONE-TIME `scripts/reorganize_domain_ids.py`**
+      (`make reorganize-domain-ids`): reconstruye la tabla (DuckDB no
+      tiene ADD CONSTRAINT y DROP COLUMN está bloqueado por los índices
+      implícitos de FKs) — copia por periodo con progreso/ETA, verifica
+      paridad por dominio antes del swap, recrea índices traducidos a
+      `*_id`, CHECKPOINT. Idempotente; una corrida fallida no toca el
+      original. Requiere ~1.3x el tamaño de la base en disco libre.
+- [x] Verificado end-to-end en scratch: cadena de 9 migraciones desde
+      cero (8 FKs), ciclo downgrade→re-upgrade, simulación del Silver
+      real (ENUM + datos → migraciones → script → paridad 5,000/5,000,
+      FK rechaza ids inválidos, SILVER_READ_QUERY OK, idempotencia),
+      smoke del writer (label→id + guard de codigo_act). 172 tests verdes.
+- [ ] **Aplicar al Silver real (lo corre el usuario, EN ORDEN):**
+      1. `make db-migrate` (enum→varchar + catálogos con ids)
+      2. `make reorganize-domain-ids` (rebuild 77M filas: PK+8 FKs se
+         construyen durante la copia — estimar 30-90 min; log en
+         `data/etl_reorganize_ids.log`)
+      Después `make load` propaga a Gold. El archivo .duckdb no encoge
+      tras el rebuild (bloques se reutilizan); compactar con COPY FROM
+      DATABASE si se desea.
+
 ## N3 — Dimensión de entidad económica (la clave para la tesis)
 
 Depende de que la resolución CLEE esté estable. Es la misma tabla que la

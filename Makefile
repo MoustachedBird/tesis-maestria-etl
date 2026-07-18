@@ -1,4 +1,4 @@
-.PHONY: help setup extract transform load clee-resolution clee-resolution-h3 h3-backfill pipeline clean db-migrate db-downgrade db-seed db-reset test
+.PHONY: help setup extract transform load clee-resolution clee-resolution-h3 h3-backfill reorganize-domain-ids pipeline clean db-migrate db-downgrade db-seed db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
@@ -41,6 +41,9 @@ clee-resolution-h3: ## Run CLEE Resolution (H3 blocking -> clee_propagado_h3)
 
 h3-backfill: ## Backfill H3 cells (h3_cell_9/h3_cell_5) in Silver
 	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells $(ARGS)
+
+reorganize-domain-ids: ## ONE-TIME: rebuild establecimientos con FKs por id (correr tras db-migrate)
+	$(PYTHON) scripts/reorganize_domain_ids.py
 
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry

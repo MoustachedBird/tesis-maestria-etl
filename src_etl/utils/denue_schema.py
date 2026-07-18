@@ -199,11 +199,24 @@ DOMAIN_CATALOGS = {
     "tipounieco": [t.value for t in TipoUnidadEconomica],
     "per_ocu": [t.value for t in PersonalOcupado],
 }
-"""Dominios validos por columna de establecimientos (columna -> valores).
+"""Dominios validos por columna-label del CSV (columna -> valores).
 
 DERIVADO de los enums de `src_etl/db/enums.py` (fuente unica de verdad;
 los mismos enums siembran las tablas de catalogo `denue_tipos_*` y
 `denue_estratos_personal`). Usado por `EstablecimientoWriter.
-validate_integrity()` como validacion fail-fast en el ingest: sustituye a
-los antiguos tipos ENUM de DuckDB (migracion que normaliza las columnas a
-VARCHAR + catalogo relacionado)."""
+validate_integrity()` como validacion fail-fast del ingest ANTES de mapear
+los labels a ids de catalogo (da mensaje claro en vez de violacion de FK)."""
+
+DOMAIN_ID_COLUMNS = {
+    "tipo_vial": ("tipo_vial_id", "denue_tipos_vialidad", "tipo_vial"),
+    "tipo_asent": ("tipo_asent_id", "denue_tipos_asentamiento", "tipo_asent"),
+    "tipounieco": ("tipounieco_id", "denue_tipos_unidad_economica", "tipounieco"),
+    "per_ocu": ("per_ocu_id", "denue_estratos_personal", "per_ocu"),
+}
+"""Mapeo de columna-label del CSV -> (columna id en establecimientos,
+tabla de catalogo, columna label en el catalogo).
+
+Los CSV de INEGI traen labels; la tabla de hechos guarda FKs enteros
+REALES a los catalogos. El writer usa este mapeo para el JOIN de
+conversion label -> id en el INSERT, y el script de reorganizacion lo usa
+para reconstruir la tabla historica."""

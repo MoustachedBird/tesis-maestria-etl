@@ -15,6 +15,8 @@ from sqlalchemy import (
     BigInteger,
     Date,
     Float,
+    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -24,6 +26,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src_etl.db.base import Base
 from src_etl.db.enums import (
     TipoUnidadEconomica as TipoUnidadEconomicaEnum,
+)
+from src_etl.db.enums import (
+    domain_id,
 )
 
 
@@ -72,21 +77,30 @@ class Establecimiento(Base):
 
     # ===== ECONOMIC ACTIVITY =====
     codigo_act: Mapped[str | None] = mapped_column(
-        String(10), index=True, comment="SCIAN economic activity code"
+        String(10),
+        ForeignKey("denue_actividades_economicas.codigo_act"),
+        index=True,
+        comment="SCIAN economic activity code (FK real al catalogo)",
     )
 
-    # ===== ESTABLISHMENT TYPE & SIZE =====
-    tipounieco: Mapped[str | None] = mapped_column(
-        String(20), comment="Economic unit type (domain: denue_tipos_unidad_economica)"
+    # ===== ESTABLISHMENT TYPE & SIZE (FKs reales a catalogos de dominio) =====
+    tipounieco_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("denue_tipos_unidad_economica.id"),
+        comment="FK a denue_tipos_unidad_economica (antes label tipounieco)",
     )
-    per_ocu: Mapped[str | None] = mapped_column(
-        String(50), comment="Personnel occupied range (domain: denue_estratos_personal)"
+    per_ocu_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("denue_estratos_personal.id"),
+        comment="FK a denue_estratos_personal (antes label per_ocu)",
     )
 
     # ===== ADDRESS COMPONENTS =====
     # Main street/road
-    tipo_vial: Mapped[str | None] = mapped_column(
-        String(50), comment="Road type (domain: denue_tipos_vialidad)"
+    tipo_vial_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("denue_tipos_vialidad.id"),
+        comment="FK a denue_tipos_vialidad (antes label tipo_vial)",
     )
     nom_vial: Mapped[str | None] = mapped_column(String(200), comment="Road/street name")
 
@@ -123,8 +137,10 @@ class Establecimiento(Base):
     )
 
     # Settlement/neighborhood
-    tipo_asent: Mapped[str | None] = mapped_column(
-        String(50), comment="Settlement type (domain: denue_tipos_asentamiento)"
+    tipo_asent_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("denue_tipos_asentamiento.id"),
+        comment="FK a denue_tipos_asentamiento (antes label tipo_asent)",
     )
     nomb_asent: Mapped[str | None] = mapped_column(
         String(200), comment="Settlement/neighborhood name"
@@ -178,75 +194,58 @@ class Establecimiento(Base):
     )
     period: Mapped[date] = mapped_column(Date, index=True, comment="Data period/snapshot date")
 
-    # ===== INDEXES FOR PERFORMANCE =====
+    # ===== CONSTRAINTS & INDEXES =====
+    # FKs de geografia como constraints REALES tambien en el ORM (mismo
+    # esquema que el DDL del writer); los FKs de dominio van inline en sus
+    # mapped_column de arriba. Decision del usuario (2026-07-17): relaciones
+    # fisicas por id. Costo asumido y documentado en AGENTS.md: los FKs en
+    # DuckDB implican mantenimiento de indice en escrituras masivas.
     __table_args__ = (
+        ForeignKeyConstraint(["cve_ent"], ["denue_entidades.cve_ent"]),
+        ForeignKeyConstraint(
+            ["cve_ent", "cve_mun"],
+            ["denue_municipios.cve_ent", "denue_municipios.cve_mun"],
+        ),
+        ForeignKeyConstraint(
+            ["cve_ent", "cve_mun", "cve_loc"],
+            [
+                "denue_localidades.cve_ent",
+                "denue_localidades.cve_mun",
+                "denue_localidades.cve_loc",
+            ],
+        ),
         # Geographic queries (most common)
         Index("ix_estab_geo", "cve_ent", "cve_mun", "cve_loc"),
         Index("ix_estab_geo_simple", "cve_ent", "cve_mun"),
         # Economic activity + time analysis
         Index("ix_estab_activity_period", "codigo_act", "period"),
         # Composite searches (state + activity + size)
-        Index("ix_estab_composite", "cve_ent", "codigo_act", "per_ocu"),
+        Index("ix_estab_composite", "cve_ent", "codigo_act", "per_ocu_id"),
         # Postal code lookups
         Index("ix_estab_postal", "cod_postal"),
         # Coordinates for spatial queries
         Index("ix_estab_coords", "latitud", "longitud"),
         # Business type filtering
-        Index("ix_estab_type_size", "tipounieco", "per_ocu"),
+        Index("ix_estab_type_size", "tipounieco_id", "per_ocu_id"),
         # CLEE lookups
         Index("ix_estab_clee", "clee"),
         # H3 blocking key (CLEE resolution)
         Index("ix_estab_h3_9", "h3_cell_9"),
     )
 
-    # ===== RELATIONSHIPS (vinculos logicos a los catalogos) =====
-    # Declaradas con primaryjoin explicito + foreign() y viewonly=True, SIN
-    # ForeignKey fisico en la tabla de hechos: cada FK en DuckDB crea un
-    # indice ART implicito sobre las columnas referenciantes (77M filas), lo
-    # que hace las escrituras masivas ~1000x mas lentas (medido en este
-    # repo). La integridad la garantiza validate_integrity() en el ingest;
-    # estos relationships dan el JOIN navegable desde el ORM.
-    # (Los FKs de geografia si son fisicos: existen desde el DDL original.)
+    # ===== RELATIONSHIPS (derivadas de los FKs reales) =====
+    # Las de dominio/actividad se infieren de su ForeignKey. Las de
+    # geografia son viewonly porque comparten columnas (cve_ent aparece en
+    # los 3 FKs compuestos) y solo se navegan, no se asignan.
 
-    actividad: Mapped["ActividadEconomica | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.codigo_act) == ActividadEconomica.codigo_act",
-        viewonly=True,
-    )
-    estrato: Mapped["EstratoPersonal | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.per_ocu) == EstratoPersonal.per_ocu",
-        viewonly=True,
-    )
-    tipo_vialidad: Mapped["TipoVialidad | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.tipo_vial) == TipoVialidad.tipo_vial",
-        viewonly=True,
-    )
-    tipo_asentamiento: Mapped["TipoAsentamiento | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.tipo_asent) == TipoAsentamiento.tipo_asent",
-        viewonly=True,
-    )
-    tipo_unidad: Mapped["TipoUnidadEconomica | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.tipounieco) == TipoUnidadEconomica.tipounieco",
-        viewonly=True,
-    )
-    entidad: Mapped["Entidad | None"] = relationship(
-        primaryjoin="foreign(Establecimiento.cve_ent) == Entidad.cve_ent",
-        viewonly=True,
-    )
-    municipio: Mapped["Municipio | None"] = relationship(
-        primaryjoin=(
-            "and_(foreign(Establecimiento.cve_ent) == Municipio.cve_ent, "
-            "foreign(Establecimiento.cve_mun) == Municipio.cve_mun)"
-        ),
-        viewonly=True,
-    )
-    localidad: Mapped["Localidad | None"] = relationship(
-        primaryjoin=(
-            "and_(foreign(Establecimiento.cve_ent) == Localidad.cve_ent, "
-            "foreign(Establecimiento.cve_mun) == Localidad.cve_mun, "
-            "foreign(Establecimiento.cve_loc) == Localidad.cve_loc)"
-        ),
-        viewonly=True,
-    )
+    actividad: Mapped["ActividadEconomica | None"] = relationship()
+    estrato: Mapped["EstratoPersonal | None"] = relationship()
+    tipo_vialidad: Mapped["TipoVialidad | None"] = relationship()
+    tipo_asentamiento: Mapped["TipoAsentamiento | None"] = relationship()
+    tipo_unidad: Mapped["TipoUnidadEconomica | None"] = relationship()
+    entidad: Mapped["Entidad | None"] = relationship(viewonly=True)
+    municipio: Mapped["Municipio | None"] = relationship(viewonly=True)
+    localidad: Mapped["Localidad | None"] = relationship(viewonly=True)
 
     # ===== HELPER METHODS =====
 
@@ -266,9 +265,11 @@ class Establecimiento(Base):
         """
         parts = []
 
-        # Main street
-        if self.tipo_vial and self.nom_vial:
-            street = f"{self.tipo_vial} {self.nom_vial}"
+        # Main street (el label del tipo viene del catalogo via relationship;
+        # None si el objeto no esta ligado a una sesion o no tiene tipo)
+        tipo_vial = self.tipo_vialidad.tipo_vial if self.tipo_vialidad else None
+        if self.nom_vial:
+            street = f"{tipo_vial} {self.nom_vial}" if tipo_vial else self.nom_vial
             if self.numero_ext:
                 street += f" #{self.numero_ext}"
                 if self.letra_ext:
@@ -288,8 +289,9 @@ class Establecimiento(Base):
             parts.append(", ".join(building_parts))
 
         # Settlement
-        if self.tipo_asent and self.nomb_asent:
-            parts.append(f"{self.tipo_asent} {self.nomb_asent}")
+        tipo_asent = self.tipo_asentamiento.tipo_asent if self.tipo_asentamiento else None
+        if self.nomb_asent:
+            parts.append(f"{tipo_asent} {self.nomb_asent}" if tipo_asent else self.nomb_asent)
 
         # Shopping center
         if self.nom_cencom:
@@ -354,10 +356,13 @@ class Establecimiento(Base):
         """
         Check if establishment is fixed (permanent) vs semi-fixed (temporary).
 
+        Compara el FK contra el id determinista del enum (domain_id), sin
+        necesitar sesion ni JOIN.
+
         Returns:
             True if fixed establishment, False otherwise
         """
-        return self.tipounieco == TipoUnidadEconomicaEnum.FIJO.value
+        return self.tipounieco_id == domain_id(TipoUnidadEconomicaEnum.FIJO)
 
     def has_contact_info(self) -> bool:
         """
@@ -454,8 +459,14 @@ class EstratoPersonal(Base):
 
     __tablename__ = "denue_estratos_personal"
 
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
+        comment="Surrogate id (posicion 1-based en PersonalOcupado; ver enums.domain_id)",
+    )
     per_ocu: Mapped[str] = mapped_column(
-        String(50), primary_key=True, comment="Employee count range label (INEGI)"
+        String(50), nullable=False, unique=True, comment="Employee count range label (INEGI)"
     )
     empleados_min: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="Minimum employees in range"
@@ -476,61 +487,88 @@ class TipoVialidad(Base):
     Road/Street Type Domain Catalog.
 
     Normalizes the old `tipo_vial_type` DuckDB ENUM into a catalog table:
-    the valid domain of `establecimientos.tipo_vial` lives as data, not as
-    a column type. Seeded from the `TipoVial` enum (single source of truth,
-    `src_etl/loaders/dominios.py`).
+    `establecimientos.tipo_vial_id` references `id` with a real FK. Seeded
+    from the `TipoVial` enum + generated descriptions (single source of
+    truth, `src_etl/loaders/dominios.py`).
     """
 
     __tablename__ = "denue_tipos_vialidad"
 
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
+        comment="Surrogate id (posicion 1-based en TipoVial; ver enums.domain_id)",
+    )
     tipo_vial: Mapped[str] = mapped_column(
-        String(50), primary_key=True, comment="Road type label (INEGI)"
+        String(50), nullable=False, unique=True, comment="Road type label (INEGI)"
+    )
+    descripcion: Mapped[str] = mapped_column(
+        String(200), nullable=False, comment="Human-readable meaning of the road type"
     )
 
     def __repr__(self) -> str:
-        return f"<TipoVialidad({self.tipo_vial})>"
+        return f"<TipoVialidad({self.id}: {self.tipo_vial})>"
 
 
 class TipoAsentamiento(Base):
     """
     Settlement Type Domain Catalog.
 
-    Normalizes the old `tipo_asent_type` DuckDB ENUM into a catalog table.
-    Seeded from the `TipoAsentamiento` enum in `src_etl/db/enums.py`
-    (imported under another name to avoid clashing with this model).
+    Normalizes the old `tipo_asent_type` DuckDB ENUM into a catalog table:
+    `establecimientos.tipo_asent_id` references `id` with a real FK. Seeded
+    from the `TipoAsentamiento` enum in `src_etl/db/enums.py` (imported
+    under another name to avoid clashing with this model) + generated
+    descriptions.
     """
 
     __tablename__ = "denue_tipos_asentamiento"
 
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
+        comment="Surrogate id (posicion 1-based en TipoAsentamiento enum)",
+    )
     tipo_asent: Mapped[str] = mapped_column(
-        String(50), primary_key=True, comment="Settlement type label (INEGI)"
+        String(50), nullable=False, unique=True, comment="Settlement type label (INEGI)"
+    )
+    descripcion: Mapped[str] = mapped_column(
+        String(200), nullable=False, comment="Human-readable meaning of the settlement type"
     )
 
     def __repr__(self) -> str:
-        return f"<TipoAsentamiento({self.tipo_asent})>"
+        return f"<TipoAsentamiento({self.id}: {self.tipo_asent})>"
 
 
 class TipoUnidadEconomica(Base):
     """
     Economic Unit Type Domain Catalog.
 
-    Normalizes the old `tipounieco_type` DuckDB ENUM into a catalog table,
-    materializing the permanence semantics (FIJO/SEMIFIJO) as a queryable
-    `descripcion` column instead of Python-only comments. Seeded from the
+    Normalizes the old `tipounieco_type` DuckDB ENUM into a catalog table:
+    `establecimientos.tipounieco_id` references `id` with a real FK. The
+    permanence semantics (FIJO/SEMIFIJO) live in the queryable `descripcion`
+    column instead of Python-only comments. Seeded from the
     `TipoUnidadEconomica` enum (aliased as TipoUnidadEconomicaEnum here).
     """
 
     __tablename__ = "denue_tipos_unidad_economica"
 
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
+        comment="Surrogate id (posicion 1-based en TipoUnidadEconomica enum)",
+    )
     tipounieco: Mapped[str] = mapped_column(
-        String(20), primary_key=True, comment="Economic unit type label (INEGI)"
+        String(20), nullable=False, unique=True, comment="Economic unit type label (INEGI)"
     )
     descripcion: Mapped[str] = mapped_column(
-        String(100), nullable=False, comment="Human-readable permanence semantics"
+        String(200), nullable=False, comment="Human-readable permanence semantics"
     )
 
     def __repr__(self) -> str:
-        return f"<TipoUnidadEconomica({self.tipounieco})>"
+        return f"<TipoUnidadEconomica({self.id}: {self.tipounieco})>"
 
 
 class Entidad(Base):

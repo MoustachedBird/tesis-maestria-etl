@@ -392,8 +392,8 @@ class TestQueries:
             assert isinstance(is_valid, bool)
 
         # Test domain values (semantics now live in the catalog tables)
-        if real_sample_establecimiento.per_ocu:
-            assert isinstance(real_sample_establecimiento.per_ocu, str)
+        if real_sample_establecimiento.per_ocu_id is not None:
+            assert isinstance(real_sample_establecimiento.per_ocu_id, int)
 
         if real_sample_establecimiento.codigo_act:
             assert len(real_sample_establecimiento.codigo_act) >= 2

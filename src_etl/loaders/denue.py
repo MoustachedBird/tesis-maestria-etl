@@ -1,8 +1,62 @@
+"""
+Writer de establecimientos hacia el warehouse DuckDB (Silver).
+
+Esquema RELACIONAL con FKs reales (decision del usuario 2026-07-17): los
+dominios de tipo se guardan como columnas `*_id` INTEGER referenciando los
+catalogos `denue_tipos_*` / `denue_estratos_personal`, y `codigo_act` /
+geografia llevan FK a sus catalogos. Los CSV de INEGI traen labels: el
+INSERT los convierte a ids via JOIN con los catalogos (DOMAIN_ID_COLUMNS).
+
+Costo asumido: cada FK implica lookups/mantenimiento de indice en DuckDB
+durante escrituras masivas (documentado en AGENTS.md); a cambio la
+integridad referencial la garantiza el motor, no solo la validacion.
+"""
+
 import polars as pl
 
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
-from src_etl.utils.denue_schema import DB_FACT_COLUMNS, DOMAIN_CATALOGS
+from src_etl.utils.denue_schema import (
+    DB_FACT_COLUMNS,
+    DOMAIN_CATALOGS,
+    DOMAIN_ID_COLUMNS,
+)
 from src_etl.utils.warehouse import DuckDBWarehouse, load_h3_extension
+
+ESTABLECIMIENTOS_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+    id VARCHAR PRIMARY KEY,
+    clee VARCHAR, clee_propagado_radio VARCHAR, clee_propagado_h3 VARCHAR,
+    nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
+    tipo_vial_id INTEGER,
+    tipo_asent_id INTEGER,
+    tipounieco_id INTEGER,
+    per_ocu_id INTEGER,
+    nom_vial VARCHAR, tipo_v_e_1 VARCHAR, nom_v_e_1 VARCHAR,
+    tipo_v_e_2 VARCHAR, nom_v_e_2 VARCHAR, tipo_v_e_3 VARCHAR,
+    nom_v_e_3 VARCHAR, numero_ext VARCHAR, letra_ext VARCHAR,
+    edificio VARCHAR, edificio_e VARCHAR, numero_int VARCHAR,
+    letra_int VARCHAR, nomb_asent VARCHAR, nom_cencom VARCHAR,
+    num_local VARCHAR, cod_postal VARCHAR,
+    cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR,
+    ageb VARCHAR, manzana VARCHAR, telefono VARCHAR,
+    correoelec VARCHAR, www VARCHAR,
+    latitud DOUBLE, longitud DOUBLE,
+    fecha_alta_str VARCHAR, fecha_alta_date DATE, period DATE NOT NULL,
+    h3_cell_9 BIGINT, h3_cell_5 BIGINT,
+    FOREIGN KEY (codigo_act) REFERENCES denue_actividades_economicas(codigo_act),
+    FOREIGN KEY (tipo_vial_id) REFERENCES denue_tipos_vialidad(id),
+    FOREIGN KEY (tipo_asent_id) REFERENCES denue_tipos_asentamiento(id),
+    FOREIGN KEY (tipounieco_id) REFERENCES denue_tipos_unidad_economica(id),
+    FOREIGN KEY (per_ocu_id) REFERENCES denue_estratos_personal(id),
+    FOREIGN KEY (cve_ent) REFERENCES denue_entidades(cve_ent),
+    FOREIGN KEY (cve_ent, cve_mun) REFERENCES denue_municipios(cve_ent, cve_mun),
+    FOREIGN KEY (cve_ent, cve_mun, cve_loc) REFERENCES denue_localidades(cve_ent, cve_mun, cve_loc)
+)
+"""
+"""DDL canonico de la tabla de hechos (PK + FKs reales). Fuente unica:
+lo usan el writer (tablas nuevas), la migracion (rebuild de tablas vacias)
+y el script de reorganizacion del Silver historico. Requiere los catalogos
+ya creados/sembrados (bootstrap de seeds corre antes)."""
 
 
 class EstablecimientoWriter(DuckDBWarehouse):
@@ -13,11 +67,9 @@ class EstablecimientoWriter(DuckDBWarehouse):
     def validate_integrity(self, df: pl.DataFrame):
         """Validador fail-fast en Polars contra los dominios de catalogo.
 
-        Es la garantia de integridad referencial de las columnas de dominio
-        (tipo_vial/tipo_asent/tipounieco/per_ocu): se valida ANTES de
-        insertar en vez de con FKs fisicos sobre la tabla de hechos (cada FK
-        en DuckDB crea un indice ART implicito sobre 77M filas -- costo de
-        escritura medido ~1000x en este repo; ver AGENTS.md).
+        Corre ANTES del INSERT para que un valor fuera de dominio de un CSV
+        nuevo de INEGI produzca un error claro (columna + valores) en vez
+        de una violacion de FK criptica a media carga.
         """
         for col, allowed in DOMAIN_CATALOGS.items():
             if col not in df.columns:
@@ -35,42 +87,34 @@ class EstablecimientoWriter(DuckDBWarehouse):
                     f"❌ Error de integridad en '{col}': valores {invalid} no permitidos."
                 )
 
+    def _validate_codigo_act(self, conn, df: pl.DataFrame):
+        """Fail-fast de codigo_act contra el catalogo SCIAN (tiene FK real).
+
+        Un codigo nuevo en un CSV (SCIAN evoluciona entre periodos) debe
+        detenerse aqui con mensaje accionable: actualizar el seed del
+        catalogo de actividades y re-correr.
+        """
+        if "codigo_act" not in df.columns:
+            return
+        # "usada" via replacement scan de DuckDB (FROM codigos), no por Python
+        codigos = df.select("codigo_act").unique().drop_nulls()  # noqa: F841
+        missing = conn.execute(
+            "SELECT c.codigo_act FROM codigos c "
+            "LEFT JOIN denue_actividades_economicas a USING (codigo_act) "
+            "WHERE a.codigo_act IS NULL LIMIT 10"
+        ).fetchall()
+        if missing:
+            raise ValueError(
+                f"❌ codigo_act fuera del catalogo SCIAN: {[m[0] for m in missing]} "
+                "(actualizar seed de denue_actividades_economicas y re-correr)."
+            )
+
     def upsert(self, df: pl.DataFrame):
         self.validate_integrity(df)
 
         with self._get_connection() as conn:
-            # Columnas de dominio como VARCHAR: su dominio vive en los
-            # catalogos denue_tipos_* / denue_estratos_personal (sembrados
-            # de los mismos enums que valida validate_integrity), no en
-            # tipos ENUM de DuckDB. Sin FK fisico hacia esos catalogos a
-            # proposito (indice ART implicito por FK = escrituras masivas
-            # lentas); la integridad la da validate_integrity() pre-insert.
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.table_id} (
-                    id VARCHAR PRIMARY KEY,
-                    clee VARCHAR, clee_propagado_radio VARCHAR, clee_propagado_h3 VARCHAR,
-                    nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
-                    tipo_vial VARCHAR,
-                    tipo_asent VARCHAR,
-                    tipounieco VARCHAR,
-                    per_ocu VARCHAR,
-                    nom_vial VARCHAR, tipo_v_e_1 VARCHAR, nom_v_e_1 VARCHAR,
-                    tipo_v_e_2 VARCHAR, nom_v_e_2 VARCHAR, tipo_v_e_3 VARCHAR,
-                    nom_v_e_3 VARCHAR, numero_ext VARCHAR, letra_ext VARCHAR,
-                    edificio VARCHAR, edificio_e VARCHAR, numero_int VARCHAR,
-                    letra_int VARCHAR, nomb_asent VARCHAR, nom_cencom VARCHAR,
-                    num_local VARCHAR, cod_postal VARCHAR,
-                    cve_ent VARCHAR, cve_mun VARCHAR, cve_loc VARCHAR,
-                    ageb VARCHAR, manzana VARCHAR, telefono VARCHAR,
-                    correoelec VARCHAR, www VARCHAR,
-                    latitud DOUBLE, longitud DOUBLE,
-                    fecha_alta_str VARCHAR, fecha_alta_date DATE, period DATE NOT NULL,
-                    h3_cell_9 BIGINT, h3_cell_5 BIGINT,
-                    FOREIGN KEY (cve_ent) REFERENCES denue_entidades(cve_ent),
-                    FOREIGN KEY (cve_ent, cve_mun) REFERENCES denue_municipios(cve_ent, cve_mun),
-                    FOREIGN KEY (cve_ent, cve_mun, cve_loc) REFERENCES denue_localidades(cve_ent, cve_mun, cve_loc)
-                )
-            """)
+            conn.execute(ESTABLECIMIENTOS_DDL.format(table=self.table_id))
+            self._validate_codigo_act(conn, df)
 
             # Build column list and SELECT expressions, using NULL for missing columns
             select_exprs = [
@@ -97,8 +141,26 @@ class EstablecimientoWriter(DuckDBWarehouse):
             else:
                 h3_exprs = ["NULL AS h3_cell_9", "NULL AS h3_cell_5"]
 
-            cols_sql = ", ".join(DB_FACT_COLUMNS + ["h3_cell_9", "h3_cell_5"])
-            select_sql = ", ".join(select_exprs + h3_exprs)
+            # Conversion label -> id: el df trae labels de dominio (CSV);
+            # la tabla guarda FKs enteros. LEFT JOIN con cada catalogo
+            # (labels NULL -> id NULL; los invalidos ya fallaron en
+            # validate_integrity, nunca llegan como id NULL silencioso).
+            inner_sql = f"SELECT {', '.join(select_exprs + h3_exprs)} FROM df"
+            target_cols, outer_select, joins = [], [], []
+            for col in DB_FACT_COLUMNS:
+                if col in DOMAIN_ID_COLUMNS:
+                    id_col, cat_table, cat_label = DOMAIN_ID_COLUMNS[col]
+                    alias = f"cat_{col}"
+                    joins.append(f"LEFT JOIN {cat_table} {alias} ON s.{col} = {alias}.{cat_label}")
+                    target_cols.append(id_col)
+                    outer_select.append(f"{alias}.id AS {id_col}")
+                else:
+                    target_cols.append(col)
+                    outer_select.append(f"s.{col}")
+            target_cols += ["h3_cell_9", "h3_cell_5"]
+            outer_select += ["s.h3_cell_9", "s.h3_cell_5"]
+
             conn.execute(
-                f"INSERT OR IGNORE INTO {self.table_id} ({cols_sql}) SELECT {select_sql} FROM df"
+                f"INSERT OR IGNORE INTO {self.table_id} ({', '.join(target_cols)}) "
+                f"SELECT {', '.join(outer_select)} FROM ({inner_sql}) s {' '.join(joins)}"
             )

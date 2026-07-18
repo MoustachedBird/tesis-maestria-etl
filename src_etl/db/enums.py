@@ -8,6 +8,19 @@ These correspond to the official INEGI catalog values and are stored as ENUMs in
 from enum import Enum
 
 
+def domain_id(enum_member: Enum) -> int:
+    """
+    Surrogate id determinista de un valor de dominio: su posicion (1-based)
+    en el enum. Es EXACTAMENTE el id sembrado en el catalogo correspondiente
+    (denue_tipos_* / denue_estratos_personal), asi que puede usarse en
+    codigo sin consultar la base, p. ej. `domain_id(TipoUnidadEconomica.FIJO)`.
+
+    Por esta correspondencia los enums de dominio son APPEND-ONLY: reordenar
+    o borrar valores cambiaria ids ya referenciados por millones de filas.
+    """
+    return list(type(enum_member)).index(enum_member) + 1
+
+
 class TipoVial(str, Enum):
     """
     Road/Street Type Classifications (39 values).

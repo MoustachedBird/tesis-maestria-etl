@@ -18,6 +18,7 @@ from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
 from src_etl.loaders.denue import EstablecimientoWriter
 from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
+from src_etl.loaders.estratos import load_seeds as load_estratos_seeds
 from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_etl.utils.denue_schema import (
@@ -158,10 +159,12 @@ class BronzeToSilverProcessor:
                 logger.warning("Dropping fact table for integrity constraint reset...")
                 conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
 
-            # Load seed catalogs via loaders
+            # Load seed catalogs via loaders (todos ANTES del DDL del
+            # writer: la tabla de hechos les apunta con FKs reales)
             load_geography_seeds(conn, seeds_dir, force=force)
             load_scian_seeds(conn, seeds_dir, force=force)
-            load_dominios_seeds(conn, force=force)
+            load_dominios_seeds(conn, seeds_dir, force=force)
+            load_estratos_seeds(conn, seeds_dir, force=force)
 
     def _clean_raw_data(self, zip_path: Path, period: str) -> tuple[pl.DataFrame, dict[str, Any]]:
         """
