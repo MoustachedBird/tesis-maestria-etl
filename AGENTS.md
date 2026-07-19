@@ -235,6 +235,114 @@ The transform pipeline has 4 ordered sub-steps: **ingest -> normalize-dates -> h
 
 CLEE resolution links establishments across temporal snapshots of DENUE. INEGI assigns CLEE codes starting in 2021, but older periods (2015-2020) lack them. This stage propagates CLEEs from recent periods backward through time using spatial + fuzzy matching, enabling longitudinal tracking of SME survival and mortality.
 
+### Cómo funciona, explicado desde cero (for dummies)
+
+**El problema.** El DENUE es una "foto" periódica de todos los negocios de
+México. A partir de 2021 INEGI asigna a cada negocio un identificador
+estable (CLEE), pero en las fotos viejas (2015-2020) el mismo negocio
+aparece SIN ningún ID que lo conecte entre fotos. Para estudiar
+supervivencia/mortalidad necesitamos saber que la "TAQUERÍA EL GÜERO" de
+la foto 2019 es EL MISMO negocio que la de la foto 2022 (que sí tiene
+CLEE). La propagación busca cada negocio "huérfano" en las fotos que sí
+tienen identidad y le hereda (propaga) el CLEE hacia atrás en el tiempo.
+
+**La intuición.** Un negocio casi nunca se mueve. Si en 2022 hay una
+taquería con CLEE en cierta esquina, y en 2019 había una taquería con
+nombre casi idéntico a metros de esa esquina, es razonable concluir que
+son el mismo negocio. La regla completa es: (1) busca candidatos CERCA
+(≤500m), (2) exige que el giro coincida, (3) compara nombres y señales de
+contacto, (4) si pasa, copia el CLEE. Los dos métodos (radio y H3) solo
+difieren en el paso 1 — los pasos 2-4 (la "cascada") son idénticos.
+
+**Paso 1A — candidatos por RADIO (método baseline, `clee_propagado_radio`).**
+Literalmente: dibujar un círculo de 500m alrededor del negocio target y
+preguntar qué negocios del periodo de referencia caen adentro. Para no
+comparar contra los ~4M de negocios de la referencia uno por uno, las
+coordenadas de referencia se indexan en un **BallTree** (un árbol de
+búsqueda espacial) con distancia **haversine** (la distancia real en
+metros sobre la esfera terrestre). Es exacto, pero cada consulta recorre
+el árbol de forma secuencial (un solo core).
+
+**Paso 1B — candidatos por H3 (método nuevo, `clee_propagado_h3`).**
+H3 (sistema de Uber) divide TODA la superficie de la Tierra en una malla
+de hexágonos, disponible en 16 tamaños ("resoluciones"). Cada hexágono
+tiene un ID numérico único. Lo que representa cada celda en este proyecto:
+
+- **`h3_cell_9`** (resolución 9, lado ~174m): "la manzana". El hexágono de
+  ~2-3 cuadras donde cae el negocio. Es la unidad de **blocking**: dos
+  negocios solo se comparan si sus hexágonos están cerca.
+- **`h3_cell_5`** (resolución 5, lado ~8.5km): "la zona de la ciudad".
+  Hoy no se usa; está reservada para partir la KB en pedazos geográficos
+  (ver sección H3 Cells arriba).
+
+Como cada negocio ya trae precomputado su `h3_cell_9`, encontrar vecinos
+deja de ser geometría y se vuelve un **join de tablas**: se toma el
+hexágono del target más 3 anillos de hexágonos alrededor (`grid_disk k=3`
+= 37 hexágonos, que garantizan cubrir ≥500m incluso si el negocio está en
+la orilla de su hexágono), y se juntan por ID de hexágono todos los
+negocios de referencia que caen en esos 37. Después un post-filtro calcula
+la distancia haversine EXACTA y descarta los que quedaron a >500m (los
+hexágonos sobran en las esquinas del disco). El resultado son EXACTAMENTE
+los mismos vecinos que el círculo del BallTree — pero obtenido con joins
+columnares de Polars que usan todos los cores.
+
+```
+      grid_disk(celda_del_target, k=3) = 37 hexágonos ≈ 700m a la redonda
+                 3 3 3 3
+                3 2 2 2 3          X = hexágono del target (h3_cell_9)
+               3 2 1 1 2 3         1 = anillo 1 (pegados, ~174m)
+              3 2 1 X 1 2 3        2 = anillo 2 (~350m)
+               3 2 1 1 2 3         3 = anillo 3 (~520-700m)
+                3 2 2 2 3
+                 3 3 3 3           post-filtro: solo lo que esté ≤500m
+```
+
+**Ejemplo completo, paso a paso (números ilustrativos).**
+
+Target: "TACOS EL GUERO", lat 20.6597, lon -103.3496 (centro de
+Guadalajara), periodo 2019-11, sin CLEE. Referencia: periodo 2022-11 (ya
+resuelto, todos con CLEE).
+
+1. El target vive en el hexágono `h3_cell_9 = 617700169958293503`.
+2. `grid_disk(617700169958293503, 3)` → 37 IDs de hexágonos.
+3. Join contra la KB de 2022-11 por `h3_cell_9`: 84 negocios de referencia
+   caen en esos 37 hexágonos → 84 candidatos crudos.
+4. Distancia haversine exacta: 61 de los 84 están a ≤500m → candidatos
+   finales, ordenados del más cercano al más lejano.
+   (El método radio habría producido estos MISMOS 61, con el círculo.)
+5. Cascada sobre cada candidato, empezando por el más cercano:
+   - Candidato a 22m: "TACOS EL GUERO SA DE CV", actividad "Restaurantes
+     de tacos y tortas" vs "Restaurantes de tacos y tortas" → gate de
+     actividad = 100 ✓ (obligatorio, umbral 60). Nombre comercial fuzzy
+     = 95 > 75 → **MATCH DIRECTO** (Path B). Se detiene la búsqueda.
+   - (Si el fuzzy de nombre hubiera dado 68, se habrían contado señales
+     débiles: ¿mismo teléfono? ¿mismo CP? 2+ señales → match combinado,
+     que solo gana si ningún candidato más lejano logra match directo.)
+6. El target 2019 hereda el CLEE del candidato:
+   `clee_propagado_h3 = '14TAC12345'` (el mismo valor que ya tenía la fila
+   de 2022). Ahora ambas filas comparten identidad → el negocio "existía
+   al menos desde 2019".
+7. Un negocio de 2019 que tras comparar contra TODAS las referencias no
+   matchea con nadie recibe un ID sintético `NEW_REG_1234H3-a1b2c3d4e5f6`
+   (nuevo/desaparecido; el sufijo H3 evita colisionar con los sintéticos
+   del método radio).
+
+**La ventana deslizante (contexto temporal).** Los periodos CON CLEE de
+INEGI (2021+) se resuelven primero trivialmente (`columna = clee`). Luego
+los periodos huérfanos se procesan del más nuevo al más viejo, y cada
+periodo resuelto SE VUELVE referencia para los siguientes: 2019 se compara
+contra 2022, 2021...; cuando 2019 queda resuelto, 2018 se compara contra
+2022, 2021, ..., Y 2019. Así la identidad fluye del futuro al pasado.
+
+**¿Por qué dos métodos si dan el mismo resultado?** Porque por
+construcción DEBEN dar asignaciones idénticas (mismo radio de 500m, misma
+cascada) — verificado en paridad end-to-end. Lo que cambia es el CÓMO:
+BallTree = consultas geométricas secuenciales; H3 = joins columnares
+paralelos sobre celdas precomputadas. La comparación entre ambos es de
+**rendimiento** (tiempo/RAM), material del capítulo metodológico. La
+comparación de **precisión** requiere un método con otra regla de decisión
+y ground truth (CLEE enmascarado) — eso es la Fase 7 del `todo.md`.
+
 ### Two-Phase Architecture
 
 The resolver (`CLEEResolver.process_national()` in `clee_resolver.py:387`) runs two sequential phases:
@@ -351,9 +459,10 @@ method (`kb_cache/radio/` vs `kb_cache/h3/`); NEW_* synthetic IDs from the
 H3 method carry a distinct prefix suffix so they never collide with radio's.
 
 ```bash
-make clee-resolution                      # radio/BallTree -> clee_propagado_radio
-make clee-resolution-h3                   # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
-make clee-resolution-h3 ARGS="--force"    # reset ONLY clee_propagado_h3 (+ its KB cache) and re-resolve
+make clee-resolution-radio                   # radio/BallTree -> clee_propagado_radio
+make clee-resolution-h3                      # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
+make clee-resolution-radio ARGS="--force"    # reset ONLY clee_propagado_radio (+ its KB cache) and re-resolve
+make clee-resolution-h3 ARGS="--force"       # reset ONLY clee_propagado_h3 (+ its KB cache) and re-resolve
 ```
 
 `--force` is per-method: it NULLs only the active method's column and clears
@@ -400,7 +509,7 @@ uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-
 uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution --force
 
 # Or via Makefile
-make clee-resolution
+make clee-resolution-radio
 
 # Full transform (ingest + normalize-dates + clee-resolution, all on by default)
 uv run python -m src_etl.main transform
@@ -543,7 +652,7 @@ make transform                   # Transform raw data (Bronze -> Silver)
 make transform-force             # Force reprocess all
 make load                        # Load Silver -> Gold
 make h3-backfill                 # Backfill h3_cell_9/h3_cell_5 in Silver (incremental)
-make clee-resolution             # CLEE Resolution radio/BallTree -> clee_propagado_radio
+make clee-resolution-radio       # CLEE Resolution radio/BallTree -> clee_propagado_radio
 make clee-resolution-h3          # CLEE Resolution H3 blocking -> clee_propagado_h3
 make pipeline                    # Full: Extract -> Transform -> Load
 make pipeline-force              # Full pipeline with force mode

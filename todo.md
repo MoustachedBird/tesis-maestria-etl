@@ -61,7 +61,7 @@ columnas ausentes → `""`).
 - [x] Benchmark sintético (40K target × 200K KB, secuencial): **16.87s →
       6.65s (2.5x)** con matches idénticos (24,001). Paralelo (80K, 6
       workers): 4.02s, ~3.3x throughput vs secuencial. Falta benchmark
-      sobre un periodo real (correr con `make clee-resolution`).
+      sobre un periodo real (correr con `make clee-resolution-radio`).
 
 ## Fase 2 — Esquema H3 (migración Alembic + ORM)
 
@@ -166,11 +166,31 @@ me dice nada"):
 - [x] **Paridad verificada end-to-end** (scratch, esquema real, 2 periodos):
       ambos métodos poblaron 800/800 filas con asignaciones IDÉNTICAS
       (800/800 propagados coinciden radio==h3). 157 tests en verde.
-- [ ] Correr H3 sobre el Silver real: `make clee-resolution-h3` (radio ya
-      está poblado). Luego medir paridad real y benchmark tiempo/RAM H3 vs
-      BallTree. **En curso 2026-07-18 13:50** (Fase 1 completada, Fase 2
-      matcheando; OJO: esa corrida arrancó con el bug de logging de abajo,
-      corre muda — monitorear vía `ls -lt data/silver/kb_cache/h3/`).
+- [x] **Correr H3 sobre el Silver real: COMPLETADO 2026-07-19** (corrida
+      2026-07-18 23:15 → 2026-07-19 13:04, ~13h49m con --force). 19
+      periodos (8 determinísticos + 11 probabilísticos), 31,392,164 filas
+      probabilísticas, 0 pendientes, `clee_propagado_h3` poblada
+      76,758,727/76,758,727. Log por método funcionó
+      (`data/etl_clee_resolution_h3.log`, 1.4MB de progreso).
+- [ ] **Paridad real medida (2026-07-19) — HALLAZGO: no comparable aún.**
+      Sobre 76.76M filas: 64,789,784 idénticas (84.4%) + 5,841,839 ambas
+      NEW_* (acuerdo "sin match", 7.6%) = **92.0% de acuerdo semántico**;
+      6,054,174 con CLEE real DISTINTO (7.9% del total, ~19% de las filas
+      probabilísticas) y 72,930 matched-vs-new (0.10%). CAUSA PRINCIPAL:
+      `clee_propagado_radio` se pobló el **2026-03-14/15** (~15h52m) con el
+      código PRE-optimizaciones de Fase 1 — sin `sort_results=True` (el
+      viejo tomaba el primer candidato válido en orden arbitrario, no el
+      más cercano) y sin la retención del COMBINED más cercano. En zonas
+      densas con cadenas (varios candidatos válidos en 500m) la elección
+      difiere, y la ventana deslizante AMPLIFICA cada divergencia hacia
+      periodos más viejos (los resueltos divergentes son referencia).
+      La paridad end-to-end 800/800 (ambos métodos con código ACTUAL)
+      sigue siendo válida. → Para paridad y benchmark limpios: re-correr
+      radio con el código actual (`make clee-resolution-radio
+      ARGS="--force"`,
+      ~1 noche). OJO: resetea los 77M valores de marzo y regenera los
+      NEW_* de radio (decisión del usuario; tras eso reconstruir lo que
+      dependa de esa columna, p. ej. N3 cuando exista).
 - [x] **BUG de logging corregido (2026-07-18)**: `clee_resolver.py` y
       `entity_resolution.py` usaban `logging.getLogger(__name__)` sin
       handler (nunca migraron a `get_stage_logger` en la centralización
