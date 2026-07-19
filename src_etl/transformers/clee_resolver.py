@@ -113,15 +113,16 @@ class CLEEResolver:
         self._propagate = cfg["propagate"]
         self._prefix_suffix: str = cfg["prefix_suffix"]
 
-        # Log dedicado por metodo (archivo + stdout). El motor de matching
-        # compartido (entity_resolution) recibe el MISMO logger inyectado,
-        # asi todo el progreso de una corrida (periodos, particiones de KB,
-        # chunks de workers, heartbeat) cae en el archivo del metodo activo.
+        # Log dedicado por metodo (archivo + stdout). La INYECCION al motor
+        # de matching compartido (set_matching_logger) NO va aqui: el
+        # orquestador construye un resolver por metodo al arrancar y el
+        # ultimo constructor pisaria al resto -- se inyecta al INICIO de
+        # cada corrida (run/process_national), cuando este metodo es el
+        # unico activo.
         self.logger = get_stage_logger(
             f"src_etl.clee_resolution.{method}",
             Path(_LOG_FILE_TEMPLATE.format(method=method)),
         )
-        set_matching_logger(self.logger)
 
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
@@ -338,11 +339,15 @@ class CLEEResolver:
                 # Reset SOLO la columna de este metodo (no toca la del otro)
                 conn.execute(f"UPDATE establecimientos SET {col} = NULL")
 
-            # Copy clee -> master_column for all rows with CLEE
+            # Copy clee -> master_column for all rows with CLEE.
+            # IS DISTINCT FROM = no-op guard: en corridas incrementales las
+            # filas ya sembradas no se reescriben (sin el guard, DuckDB
+            # reescribia ~45M filas identicas en CADA corrida del transform).
             conn.execute(f"""
                 UPDATE establecimientos
                 SET {col} = clee
                 WHERE clee IS NOT NULL AND clee != ''
+                  AND {col} IS DISTINCT FROM clee
             """)
 
             # Count seeded rows
@@ -496,9 +501,20 @@ class CLEEResolver:
         Returns:
             Dict with resolution statistics.
         """
+        # Redirigir el motor de matching compartido al log de ESTE metodo
+        # (el orquestador instancia ambos resolvers; el activo se declara
+        # al correr, no al construirse).
+        set_matching_logger(self.logger)
+
         periods = self._get_sorted_periods()
         if not periods:
-            return {"total_resolved": 0, "periods_processed": 0}
+            return {
+                "total_resolved": 0,
+                "periods_processed": 0,
+                "deterministic_periods": 0,
+                "probabilistic_periods": 0,
+                "region_prefix": "",
+            }
 
         self.logger.info(f"   Periodos detectados ({len(periods)}): {periods}")
 

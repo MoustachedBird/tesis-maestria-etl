@@ -84,26 +84,87 @@ def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _valid_coords_mask(coords_deg: np.ndarray) -> np.ndarray:
+    """Mascara booleana de filas con coordenadas utilizables.
+
+    Utilizable = lat/lon presentes (no NaN, que es como llegan los NULL de
+    Polars via to_numpy) y dentro del dominio geografico [-90,90]/[-180,180]
+    -- el MISMO criterio con el que el ingest computa h3_cell_9, para que
+    ambos generadores de candidatos excluyan exactamente las mismas filas
+    (datos de encuesta: cualquier campo puede faltar; una fila sin coords
+    obtiene 0 candidatos en vez de tumbar el BallTree con NaN).
+    """
+    lat = coords_deg[:, 0]
+    lon = coords_deg[:, 1]
+    return (
+        np.isfinite(lat)
+        & np.isfinite(lon)
+        & (np.abs(lat) <= 90.0)
+        & (np.abs(lon) <= 180.0)
+    )
+
+
 def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
     """
     Ejecuta BallTree para encontrar indices vecinos.
 
-    Los vecinos se retornan ordenados por distancia ascendente
-    (sort_results=True): el candidato mas cercano se evalua primero,
-    lo que mejora precision (un COMBINED_MATCH cercano gana sobre uno
-    lejano) y adelanta el break de los matches directos.
+    Los vecinos se retornan ordenados por distancia ascendente y, en caso
+    de EMPATE exacto de distancia (coordenadas identicas: mismo edificio o
+    plaza, comun en DENUE), por indice de KB ascendente -- mismo tie-break
+    determinista que find_h3_neighbors, para que ambos metodos elijan el
+    mismo candidato y las corridas sean reproducibles. El candidato mas
+    cercano se evalua primero (un COMBINED_MATCH cercano gana sobre uno
+    lejano y el break de los matches directos se adelanta).
 
-    Retorna: (indices, distances)
+    Filas sin coordenadas validas (NULL/NaN o fuera de dominio) reciben 0
+    candidatos -- misma semantica que el blocking H3 (celda NULL), en vez
+    de crashear el BallTree con NaN.
+
+    Retorna: (indices, distances) -- arrays object de longitud
+    target_df.height; distancias en METROS (consistente con
+    find_h3_neighbors).
     """
-    ref_coords = np.radians(ref_df.select(["latitud", "longitud"]).to_numpy())
-    target_coords = np.radians(target_df.select(["latitud", "longitud"]).to_numpy())
+    ref_coords_deg = ref_df.select(["latitud", "longitud"]).to_numpy()
+    target_coords_deg = target_df.select(["latitud", "longitud"]).to_numpy()
+
+    n_target = target_coords_deg.shape[0]
+    indices = np.empty(n_target, dtype=object)
+    distances = np.empty(n_target, dtype=object)
+    for i in range(n_target):
+        indices[i] = np.array([], dtype=np.int64)
+        distances[i] = np.array([], dtype=np.float64)
+
+    ref_valid = _valid_coords_mask(ref_coords_deg) if ref_coords_deg.size else np.array([], dtype=bool)
+    tgt_valid = _valid_coords_mask(target_coords_deg) if target_coords_deg.size else np.array([], dtype=bool)
+    if not ref_valid.any() or not tgt_valid.any():
+        return indices, distances
+
+    # Indices originales de las filas validas: los vecinos retornados deben
+    # ser posicionales sobre ref_df COMPLETO (las listas _shared_kb_* se
+    # construyen sin filtrar), asi que se traducen de subset -> original.
+    ref_orig_idx = np.flatnonzero(ref_valid)
+    tgt_orig_idx = np.flatnonzero(tgt_valid)
 
     radius_rad = radius_meters / _EARTH_RADIUS_M
-
-    tree = BallTree(ref_coords, metric="haversine")
-    return tree.query_radius(
-        target_coords, r=radius_rad, return_distance=True, sort_results=True
+    tree = BallTree(np.radians(ref_coords_deg[ref_valid]), metric="haversine")
+    sub_indices, sub_distances = tree.query_radius(
+        np.radians(target_coords_deg[tgt_valid]),
+        r=radius_rad,
+        return_distance=True,
+        sort_results=True,
     )
+
+    for row_i, nbrs, dists in zip(tgt_orig_idx, sub_indices, sub_distances):
+        if len(nbrs) == 0:
+            continue
+        orig = ref_orig_idx[nbrs]
+        dists_m = dists * _EARTH_RADIUS_M
+        # lexsort: primario distancia, secundario indice de KB (tie-break)
+        order = np.lexsort((orig, dists_m))
+        indices[row_i] = orig[order]
+        distances[row_i] = dists_m[order]
+
+    return indices, distances
 
 
 def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
@@ -218,7 +279,9 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
         )
         .filter(pl.col("dist_m") <= radius_meters)
         .select("tgt_idx", "kb_idx", "dist_m")
-        .sort(["tgt_idx", "dist_m"])
+        # kb_idx como llave terciaria: tie-break determinista en empates
+        # exactos de distancia (coords identicas), igual que el BallTree.
+        .sort(["tgt_idx", "dist_m", "kb_idx"])
         .group_by("tgt_idx", maintain_order=True)
         .agg(pl.col("kb_idx"), pl.col("dist_m"))
         .collect(engine="streaming")
@@ -338,8 +401,13 @@ def calculate_match_score(
             return True, "RAZON_MATCH"
 
     # === PATH B: MATCH DIRECTO POR NOMBRE COMERCIAL ===
+    # El ratio se calcula una sola vez y se reutiliza como senal parcial
+    # en Path C (mismo par, mismo scorer -- evita un fuzzy duplicado por
+    # candidato en el hot loop).
+    name_ratio = None
     if len(t_name) > 2 and kb_name and len(kb_name) > 2:
-        if fuzz.token_sort_ratio(t_name, kb_name) > BUSINESS_NAME_MATCH_THRESH:
+        name_ratio = fuzz.token_sort_ratio(t_name, kb_name)
+        if name_ratio > BUSINESS_NAME_MATCH_THRESH:
             return True, "NAME_MATCH"
 
     # === PATH C: MATCH COMBINADO (senales debiles acumuladas) ===
@@ -347,10 +415,9 @@ def calculate_match_score(
     # declaramos match. Ninguna senal individual basta por si sola.
     signals = 0
 
-    # Senal 1: Nombre comercial parcial
-    if len(t_name) > 2 and kb_name and len(kb_name) > 2:
-        if fuzz.token_sort_ratio(t_name, kb_name) > PARTIAL_NAME_THRESH:
-            signals += 1
+    # Senal 1: Nombre comercial parcial (ratio reutilizado de Path B)
+    if name_ratio is not None and name_ratio > PARTIAL_NAME_THRESH:
+        signals += 1
 
     # Senal 2: Telefono exacto
     if len(t_tel) >= MIN_TEL_LENGTH and kb_tel and t_tel == kb_tel:

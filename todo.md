@@ -191,6 +191,36 @@ me dice nada"):
       ~1 noche). OJO: resetea los 77M valores de marzo y regenera los
       NEW_* de radio (decisión del usuario; tras eso reconstruir lo que
       dependa de esa columna, p. ej. N3 cuando exista).
+      **ACTUALIZACIÓN post-review 2026-07-19**: el tie-break determinista
+      (ver review abajo) cambió el orden de candidatos empatados en AMBOS
+      métodos — la columna `clee_propagado_h3` actual se calculó SIN
+      tie-break, así que para paridad estricta hay que re-correr **los
+      dos** métodos con `--force` (radio Y h3); si solo se re-corre radio
+      quedará un residuo de diferencias en coords idénticas (empates).
+- [x] **Review de código de propagación (2026-07-19)** — lógica core
+      verificada sana; bugs corregidos y mejoras aplicadas (174 tests en
+      verde):
+      1. Inyección del logger del motor movida de `__init__` a
+         `process_national()` (el orquestador construye ambos resolvers:
+         el último constructor pisaba al activo — los logs del motor en
+         corridas radio habrían caído al archivo h3).
+      2. `process_national()` con warehouse vacío devolvía dict sin
+         llaves → KeyError en `run()`; completado.
+      3. `find_spatial_neighbors` tolera coords NULL/NaN/fuera de dominio
+         (0 candidatos, mismo criterio que h3_cell_9) en vez de crashear
+         el BallTree; distancias ahora en METROS (paridad con
+         find_h3_neighbors; nadie consumía los radianes).
+      4. **Tie-break determinista en ambos generadores**: distancia asc +
+         índice de KB asc (coords idénticas = mismo edificio, común en
+         DENUE). Tests de paridad endurecidos: orden IDÉNTICO exigido +
+         3 tests nuevos (`TestRadioRobustnessAndTies`).
+      5. Fase 1 con no-op guard (`AND col IS DISTINCT FROM clee`): las
+         corridas incrementales ya no reescriben ~45M filas idénticas.
+      6. `calculate_match_score`: token_sort_ratio de nombre calculado una
+         vez (Path B) y reutilizado como señal parcial (Path C).
+      NO tocado (calibración, lo cuantificará la Fase 7): señales débiles
+      vulnerables a teléfonos basura/compartidos (tel exacto + CP bastan
+      para match combinado).
 - [x] **BUG de logging corregido (2026-07-18)**: `clee_resolver.py` y
       `entity_resolution.py` usaban `logging.getLogger(__name__)` sin
       handler (nunca migraron a `get_stage_logger` en la centralización
@@ -373,9 +403,9 @@ donde la paralelización NO es posible (con la razón).
       contiguos (1 por worker); zonas densas (CDMX) vs rurales generan
       workers desbalanceados. Usar ~4× chunks que workers con
       `imap_unordered` (ya se usa) para que los rápidos tomen más trabajo.
-- [ ] `assign_new_clees()` usa `map_elements` (lambda Python por fila,
-      single-thread): generar los UUIDs en bulk (lista Python + Series).
-      Impacto menor (solo filas sin match).
+- [x] `assign_new_clees()` ya genera los UUIDs en bulk (lista Python +
+      Series) — verificado en review 2026-07-19; el `map_elements` ya no
+      existe.
 - [ ] (Ya anotado en Fase 1) Vectorizar scoring con `rapidfuzz.process.cpdist
       (workers=-1)` — paralelismo C multihilo sin overhead de fork/pickle.
       Eliminaría de raíz el residuo de COW del fork (ver abajo).

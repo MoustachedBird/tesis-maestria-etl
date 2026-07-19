@@ -5,10 +5,9 @@ EXACTAMENTE los mismos conjuntos de vecinos dentro de SPATIAL_RADIUS_M que
 `find_spatial_neighbors` (BallTree, columna clee_propagado_radio): mismo
 radio, misma semantica; solo cambia el algoritmo de generacion.
 
-Nota de unidades: el BallTree retorna distancias en RADIANES (metrica
-haversine de sklearn) y find_h3_neighbors en METROS; ningun consumidor usa
-las distancias mas alla del ORDEN (ascendente), asi que la paridad se
-verifica convirtiendo radianes -> metros con _EARTH_RADIUS_M.
+Ambos generadores retornan distancias en METROS y comparten el mismo
+tie-break determinista (distancia ascendente, luego indice de KB), asi que
+la paridad exige orden IDENTICO de vecinos, no solo los mismos conjuntos.
 """
 
 import numpy as np
@@ -18,7 +17,6 @@ from h3.api import basic_int as h3i
 
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, SPATIAL_RADIUS_M
 from src_etl.utils.matching import (
-    _EARTH_RADIUS_M,
     find_h3_neighbors,
     find_spatial_neighbors,
 )
@@ -54,14 +52,11 @@ class TestH3NeighborParity:
         assert len(h3_idx) == target_df.height == len(bt_idx)
         n_with_neighbors = 0
         for i in range(target_df.height):
-            assert set(h3_idx[i]) == set(bt_idx[i]), f"vecinos distintos en target {i}"
-            # Mismas distancias (radianes BallTree -> metros) tras ordenar
-            # (el orden puede diferir solo en empates exactos).
-            np.testing.assert_allclose(
-                np.sort(h3_dist[i]),
-                np.sort(bt_dist[i] * _EARTH_RADIUS_M),
-                rtol=1e-6,
-            )
+            # Orden IDENTICO (tie-break determinista compartido), no solo
+            # los mismos conjuntos.
+            assert list(h3_idx[i]) == list(bt_idx[i]), f"vecinos distintos en target {i}"
+            # Mismas distancias en metros (ambos generadores).
+            np.testing.assert_allclose(h3_dist[i], bt_dist[i], rtol=1e-6)
             n_with_neighbors += 1 if len(h3_idx[i]) else 0
         # El escenario debe ejercitar de verdad el matching espacial.
         assert n_with_neighbors > 0
@@ -122,3 +117,56 @@ class TestH3NeighborEdgeCases:
 
         idx, _ = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
         assert all(len(a) == 0 for a in idx)
+
+
+@pytest.mark.unit
+class TestRadioRobustnessAndTies:
+    """Robustez de find_spatial_neighbors (coords nulas) y tie-break."""
+
+    def test_null_coords_get_zero_candidates_not_crash(self):
+        """Filas sin coords (NULL -> NaN) reciben 0 candidatos en radio,
+        misma semantica que el blocking H3 (antes: crash del BallTree)."""
+        ref_df = _make_points_df(20, seed=10)
+        target_df = _make_points_df(4, seed=11).with_columns(
+            latitud=pl.Series([19.43, None, 95.0, 19.44]),
+            longitud=pl.Series([-99.13, None, -99.0, -99.14]),
+        )
+
+        idx, dist = find_spatial_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert len(idx) == 4
+        assert len(idx[1]) == 0 and len(dist[1]) == 0  # coords NULL
+        assert len(idx[2]) == 0 and len(dist[2]) == 0  # fuera de dominio
+
+    def test_null_ref_coords_excluded(self):
+        ref_df = _make_points_df(5, seed=12).with_columns(
+            latitud=pl.Series([None] * 5, dtype=pl.Float64)
+        )
+        target_df = _make_points_df(3, seed=13)
+
+        idx, _ = find_spatial_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert all(len(a) == 0 for a in idx)
+
+    def test_exact_distance_ties_broken_by_kb_index_in_both(self):
+        """Coords identicas (mismo edificio, comun en DENUE) = empate exacto
+        de distancia: ambos generadores deben ordenar por indice de KB."""
+        lat, lon = 19.4326, -99.1332
+        cell = h3i.latlng_to_cell(lat, lon, H3_BLOCKING_RES)
+        ref_df = pl.DataFrame(
+            {
+                "latitud": [lat, lat, lat],
+                "longitud": [lon, lon, lon],
+                "h3_cell_9": pl.Series([cell] * 3, dtype=pl.Int64),
+            }
+        )
+        target_df = pl.DataFrame(
+            {
+                "latitud": [lat],
+                "longitud": [lon],
+                "h3_cell_9": pl.Series([cell], dtype=pl.Int64),
+            }
+        )
+
+        bt_idx, _ = find_spatial_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        h3_idx, _ = find_h3_neighbors(ref_df, target_df, SPATIAL_RADIUS_M)
+        assert list(bt_idx[0]) == [0, 1, 2]
+        assert list(h3_idx[0]) == [0, 1, 2]

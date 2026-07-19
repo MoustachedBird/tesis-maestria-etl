@@ -57,11 +57,14 @@ adicional en los hijos."""
 def set_matching_logger(stage_logger: logging.Logger) -> None:
     """Inyecta el logger del stage activo en el motor de matching.
 
-    Llamada por CLEEResolver.__init__ con su logger por metodo
-    (get_stage_logger). Las funciones de este modulo resuelven `logger`
-    como global al momento de cada llamada, asi que el rebind aplica a
-    todo el motor de inmediato. Los metodos nunca corren en paralelo
-    (DuckDB es single-writer), por lo que un solo logger activo basta.
+    Llamada al INICIO de cada corrida (CLEEResolver.process_national) con
+    el logger por metodo (get_stage_logger). NO se llama en __init__: el
+    orquestador construye un resolver por metodo al arrancar y el ultimo
+    constructor pisaria la inyeccion de los demas. Las funciones de este
+    modulo resuelven `logger` como global al momento de cada llamada, asi
+    que el rebind aplica a todo el motor de inmediato. Los metodos nunca
+    corren en paralelo (DuckDB es single-writer), por lo que un solo
+    logger activo basta.
 
     Args:
         stage_logger: Logger configurado (archivo + stdout) del metodo
