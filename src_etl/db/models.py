@@ -20,6 +20,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -630,3 +631,78 @@ class Localidad(Base):
 
     def __repr__(self) -> str:
         return f"<Localidad(cve_ent={self.cve_ent}, cve_mun={self.cve_mun}, cve_loc={self.cve_loc}, nombre={self.localidad})>"
+
+
+class SesnspDelito(Base):
+    """
+    SESNSP Crime Catalog.
+
+    Hierarchy bien_juridico -> tipo -> subtipo -> modalidad from the SESNSP
+    municipal crime incidence dataset. Surrogate ids are append-only
+    (materialized in data/seeds/seed_sesnsp_delitos.parquet) because the
+    fact table references them by FK.
+    """
+
+    __tablename__ = "sesnsp_delitos"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,  # ids explicitos (orden del seed parquet), no secuencia
+        comment="Surrogate id (seed order)",
+    )
+    bien_juridico: Mapped[str] = mapped_column(
+        String(100), nullable=False, comment="Affected legal good (bien juridico afectado)"
+    )
+    tipo: Mapped[str] = mapped_column(String(100), nullable=False, comment="Crime type")
+    subtipo: Mapped[str] = mapped_column(String(150), nullable=False, comment="Crime subtype")
+    modalidad: Mapped[str] = mapped_column(String(150), nullable=False, comment="Crime modality")
+
+    __table_args__ = (
+        UniqueConstraint("bien_juridico", "tipo", "subtipo", "modalidad", name="uq_sesnsp_delito"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SesnspDelito(id={self.id}, subtipo={self.subtipo}, modalidad={self.modalidad})>"
+
+
+class SesnspIncidenciaMunicipal(Base):
+    """
+    SESNSP Municipal Crime Incidence (monthly fact table).
+
+    Investigation folders (carpetas de investigacion) per municipality x
+    crime x month, unpivoted to long format from the SESNSP consolidated
+    CSV. Shares the DENUE geographic keys (cve_ent/cve_mun) so business
+    survival can be joined with crime incidence per municipality over time;
+    `fecha` follows the project-wide DATE YYYY-MM-01 convention.
+    """
+
+    __tablename__ = "sesnsp_incidencia_municipal"
+
+    cve_ent: Mapped[str] = mapped_column(String(2), primary_key=True, comment="State code")
+    cve_mun: Mapped[str] = mapped_column(String(3), primary_key=True, comment="Municipality code")
+    delito_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sesnsp_delitos.id"), primary_key=True, comment="Crime catalog FK"
+    )
+    fecha: Mapped[date] = mapped_column(Date, primary_key=True, comment="Month (YYYY-MM-01)")
+    carpetas: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Investigation folders opened in the month"
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(["cve_ent"], ["denue_entidades.cve_ent"]),
+        ForeignKeyConstraint(
+            ["cve_ent", "cve_mun"],
+            ["denue_municipios.cve_ent", "denue_municipios.cve_mun"],
+        ),
+    )
+
+    # Relationships
+    delito: Mapped["SesnspDelito"] = relationship()
+    municipio: Mapped["Municipio"] = relationship()
+
+    def __repr__(self) -> str:
+        return (
+            f"<SesnspIncidenciaMunicipal(mun={self.cve_ent}{self.cve_mun}, "
+            f"delito_id={self.delito_id}, fecha={self.fecha}, carpetas={self.carpetas})>"
+        )

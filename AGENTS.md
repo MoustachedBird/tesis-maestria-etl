@@ -12,6 +12,66 @@ Always ask the user before executing any destructive operation, even if it seems
 
 ---
 
+## Reglas permanentes del proyecto
+
+Directrices de trabajo definidas en `todo.md` (2026-07) y vigentes para
+TODO cambio futuro; se replican aquí porque AGENTS.md es la guía de
+desarrollo canónica.
+
+### Regla de oro — migraciones y esquema
+
+**No correr migraciones ni `ALTER TABLE` sobre los `.duckdb` de `data/`
+sin confirmación explícita del usuario.** Los cambios de esquema se
+preparan en código (migración Alembic + modelo ORM + DDL en el
+loader/writer correspondiente) y se aplican en un paso controlado
+(`make db-migrate`) que ejecuta el usuario. Esto aplica también a
+operaciones "solo aditivas" (CREATE TABLE, INSERT en catálogos): el paso
+de aplicación sobre las bases reales lo decide el usuario.
+
+### Regla de configuración
+
+**Toda variable importante de configuración o calibración se lee del
+entorno (`.env`) con default en código, y se documenta en TRES lugares:
+`.env` (entrada explícita), `.env.example` y AGENTS.md.** Las constantes
+que NO deben ser configurables (físicas como el radio de la Tierra, o
+estructurales acopladas a datos materializados como las resoluciones H3)
+se quedan en su archivo con un docstring que explique su significado y
+POR QUÉ no son `.env`. Además: **toda variable global y toda función
+deben tener docstring**.
+
+### Premisa de optimización
+
+**Toda mejora debe optimizar tiempo de ejecución Y uso de RAM a la vez,
+aprovechando la CPU con paralelización correcta** — el pipeline corre en
+una Mac M4 Pro/Max (límite DuckDB en `.env`), no en un servidor. Nada de
+caches sin cota, KBs monolíticas en RAM ni matrices gigantes
+precomputadas; preferir procesamiento columnar/streaming out-of-core,
+caches acotados o en disco, y liberar memoria entre pasadas. Para CPU:
+preferir el paralelismo interno de los motores (DuckDB threads, Polars,
+rapidfuzz workers) antes que multiprocessing manual; cuando se use
+multiprocessing, fork+COW sin copiar datos grandes. Los datos DENUE
+provienen de encuestas: cualquier campo puede venir vacío o faltar en un
+periodo completo — todo código de matching debe tolerarlo
+(`fill_null("")`, columnas ausentes → `""`).
+
+### Reglas operativas (de las auditorías 2026-07-17)
+
+- **Conexiones**: toda conexión nueva a Silver/Gold usa
+  `utils/warehouse.py:connect_configured()` (aplica
+  `DUCKDB_MEMORY_LIMIT`/`DUCKDB_THREADS`), nunca `duckdb.connect()`
+  directo.
+- **Logging**: los stages nuevos usan
+  `core/logging.py:get_stage_logger(name, log_file)` — jamás
+  `logging.basicConfig()` a nivel de módulo ni `print()`.
+- **Observabilidad**: todo job nuevo (extract/transform/load) se registra
+  en metadata (`job_runs` + tasks + lineage) vía `MetadataTracker`, mismo
+  contrato que los jobs existentes.
+- **Reutilizar, no reinventar**: `Downloader` para descargas HTTP, patrón
+  de seeds parquet committed (catálogos append-only), patrón kb_cache
+  para derivados regenerables.
+
+---
+
 ## Fixing Missing Localities (FK Violations)
 
 When `make transform` fails with a foreign key constraint error like:
@@ -525,6 +585,91 @@ uv run python -m src_etl.main transform
 
 ---
 
+## SESNSP: Incidencia Delictiva Municipal (segunda fuente)
+
+Segunda fuente de datos del proyecto (además de DENUE): cifras de
+incidencia delictiva del fuero común a nivel municipal del SESNSP
+(carpetas de investigación por municipio × delito × mes, 2015+), para
+cruzar la supervivencia/mortalidad de negocios con la evolución del
+crimen por municipio.
+
+### Origen y descarga automática
+
+- **Fuente oficial usada**: dataset "Incidencia delictiva" en datos.gob.mx
+  (CC-BY-4.0). El extractor (`extractors/sesnsp.py`) consulta la **API
+  CKAN** (`SESNSP_CKAN_PACKAGE_URL`) para descubrir la URL del CSV del
+  corte vigente — el nombre del archivo cambia con cada corte mensual
+  (`IDM_NM_dic25.csv` → `IDM_NM_jun26.csv`...), por eso nunca se fija en
+  código. `SESNSP_DOWNLOAD_URL` (env) permite forzar una URL directa.
+- **Por qué no el SharePoint del SESNSP**: el enlace de OneDrive exige
+  login Microsoft (verificado 2026-07-19) y gob.mx tiene challenge
+  anti-bot. El espejo de datos.gob.mx (`repodatos.atdt.gob.mx`) baja sin
+  autenticación, aunque puede ir un corte atrás del SharePoint; un CSV
+  bajado a mano del SharePoint a `data/bronze/sesnsp/` también se procesa
+  (el transform toma el CSV **más reciente por mtime** de esa carpeta).
+- **TLS**: datos.gob.mx sirve cadena TLS incompleta; la llamada CKAN usa
+  `truststore` (certificados del sistema, como curl). La descarga del CSV
+  no lo necesita.
+
+### Modelo en Silver (2 tablas nuevas, migración f1a2b3c4d5e6)
+
+- **`sesnsp_delitos`** (~98 filas): catálogo jerárquico bien jurídico →
+  tipo → subtipo → modalidad. Ids surrogate **append-only** materializados
+  en `data/seeds/seed_sesnsp_delitos.parquet` (committed); combinaciones
+  nuevas de cortes futuros se agregan con `max(id)+1` sin renumerar (los
+  hechos las referencian por FK).
+- **`sesnsp_incidencia_municipal`** (~30.7M filas): hechos en formato
+  largo — `cve_ent`, `cve_mun`, `delito_id` (FK), `fecha` (DATE
+  `YYYY-MM-01`, misma convención que `fecha_alta_date`/`period`),
+  `carpetas`. PK compuesta + FKs reales a `denue_entidades` y
+  `denue_municipios` (misma política de integridad física que
+  `establecimientos`).
+- **Municipios sintéticos**: el SESNSP usa claves `998` ("NO
+  ESPECIFICADO") y `999` ("OTROS MUNICIPIOS") en 6 estados; esas 8 filas
+  viven en `seed_municipios.parquet` (2,486 filas ahora) como filas
+  normales del catálogo para satisfacer la FK compuesta.
+- **Rebuild, no upsert**: cada corte del SESNSP REVISA cifras históricas,
+  así que el transform reconstruye la tabla de hechos completa
+  (DELETE + INSERT en una transacción, ~50s los 30.7M en M4). Incremental
+  a nivel archivo: un corte ya procesado con SUCCESS se omite (tracking
+  en `process_tasks`, job `sesnsp_transform`); `--force` reprocesa.
+- Claves geográficas zero-padded compatibles con DENUE: el CSV trae
+  `Cve. Municipio` = ent*1000+mun (p. ej. `1001`) → `cve_ent='01'`,
+  `cve_mun='001'`. Encoding del CSV autodetectado (latin-1 o utf-8).
+
+### CLI / Makefile
+
+```bash
+make extract-sesnsp                    # CKAN discovery + descarga a data/bronze/sesnsp/
+make transform-sesnsp                  # CSV mas reciente -> Silver (catalogo + hechos)
+make transform-sesnsp ARGS="--force"   # reprocesar el corte ya cargado
+# equivalentes: uv run python -m src_etl.main extract|transform --source sesnsp
+```
+
+`make load` no necesita nada especial: copia el archivo Silver completo a
+Gold, tablas SESNSP incluidas. Log del stage: `data/etl_sesnsp.log`.
+
+### Cruce negocios ↔ crimen (ejemplo)
+
+```sql
+-- Establecimientos y homicidios dolosos por municipio-año
+SELECT n.anio, n.establecimientos, c.carpetas
+FROM (SELECT year(period) anio, COUNT(DISTINCT id) establecimientos
+      FROM establecimientos WHERE cve_ent='23' AND cve_mun='005' GROUP BY 1) n
+JOIN (SELECT year(fecha) anio, SUM(carpetas) carpetas
+      FROM sesnsp_incidencia_municipal i
+      JOIN sesnsp_delitos d ON d.id = i.delito_id
+      WHERE i.cve_ent='23' AND i.cve_mun='005'
+        AND d.subtipo='Homicidio doloso' GROUP BY 1) c USING (anio)
+ORDER BY 1;
+```
+
+Granularidad temporal: DENUE son fotos (1-2 cortes/año) y SESNSP es flujo
+mensual — el cruce se resuelve agregando en la consulta (p. ej. sumar
+carpetas del año o del semestre entre cortes DENUE), no en el esquema.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)
@@ -556,20 +701,23 @@ etl-core/
 │   │   ├── enums.py               # DENUE enums (TipoVial, PersonalOcupado, etc.)
 │   │   └── seed_loader.py         # Seed orchestrator (delegates to loaders/)
 │   ├── extractors/                # Domain-specific data extraction
-│   │   └── denue.py               # DENUE orchestrator (Selenium + parallel)
+│   │   ├── denue.py               # DENUE orchestrator (Selenium + parallel)
+│   │   └── sesnsp.py              # SESNSP crime data (CKAN API discovery + HTTP)
 │   ├── transformers/              # Transformation layer
 │   │   ├── denue.py               # Unified orchestrator (DenueTransformer)
 │   │   ├── processor.py           # TransformStage: ZIP -> Silver DuckDB
 │   │   ├── date_normalizer.py     # normalize-dates stage (fecha_alta_str -> DATE)
 │   │   ├── h3_backfill.py         # h3-cells stage (h3_cell_9/h3_cell_5 backfill)
-│   │   └── clee_resolver.py       # CLEEResolver: Entity resolution across time
+│   │   ├── clee_resolver.py       # CLEEResolver: Entity resolution across time
+│   │   └── sesnsp.py              # SESNSP CSV -> Silver (unpivot + catalogo delitos)
 │   ├── loaders/                   # Data loading layer
 │   │   ├── loader.py              # LoaderStage: Silver -> Gold (file copy)
 │   │   ├── denue.py               # EstablecimientoWriter (DuckDB upsert, H3 in INSERT)
 │   │   ├── geography.py           # Geography seeds (entidades, municipios, localidades)
 │   │   ├── scian.py               # SCIAN economic activity seeds
 │   │   ├── estratos.py            # denue_estratos_personal seed
-│   │   └── dominios.py            # Domain catalogs seeds (vialidad/asentamiento/unidad)
+│   │   ├── dominios.py            # Domain catalogs seeds (vialidad/asentamiento/unidad)
+│   │   └── sesnsp.py              # SESNSP DDL + seed catalogo delitos (append-only)
 │   └── utils/                     # Shared utilities
 │       ├── browser.py             # Selenium Chrome driver setup
 │       ├── denue_schema.py        # DENUE column mappings, enums, aliases
@@ -598,9 +746,10 @@ etl-core/
 │   ├── gold/                      # Final DuckDB warehouse (not committed)
 │   ├── seeds/                     # Parquet seed files (committed)
 │   │   ├── seed_entidades.parquet       # 32 states
-│   │   ├── seed_municipios.parquet      # 2,478 municipalities
+│   │   ├── seed_municipios.parquet      # 2,486 municipalities (incl. 8 SESNSP 998/999)
 │   │   ├── seed_localidades.parquet     # 39,140 localities
-│   │   └── seed_actividades.parquet     # 1,127 economic activities
+│   │   ├── seed_actividades.parquet     # 1,127 economic activities
+│   │   └── seed_sesnsp_delitos.parquet  # 98 SESNSP crime hierarchy (append-only ids)
 │
 ├── alembic/                       # Database migrations
 ├── tests/
@@ -648,6 +797,8 @@ uv run pytest -vv                          # Verbose
 # ETL Pipeline
 make extract                     # Extract data from INEGI (Bronze)
 make extract ARGS="--force"      # Force re-download all files
+make extract-sesnsp              # Extract SESNSP crime data (datos.gob.mx -> Bronze)
+make transform-sesnsp            # Transform SESNSP CSV -> Silver
 make transform                   # Transform raw data (Bronze -> Silver)
 make transform-force             # Force reprocess all
 make load                        # Load Silver -> Gold
@@ -718,7 +869,8 @@ Data Flow:
 
 ```
 data/bronze/denue/{period}/*.zip      # Raw downloads
-data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5)
+data/bronze/sesnsp/*.csv              # SESNSP crime CSV (one file per monthly cut)
+data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5, sesnsp_*)
 data/silver/kb_cache/{radio|h3}/      # Per-method KB cache (parquet, regenerable)
 data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
 ```
@@ -737,11 +889,13 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 ## Database
 
-### ORM Models (9 tables)
+### ORM Models (11 tables)
 
 | Model | Table | Primary Key | Rows |
 |-------|-------|------------|------|
 | `Establecimiento` | `establecimientos` | `id` (hash) | 100M+ |
+| `SesnspDelito` | `sesnsp_delitos` | `id` (surrogate, seed order) | 98 |
+| `SesnspIncidenciaMunicipal` | `sesnsp_incidencia_municipal` | `(cve_ent, cve_mun, delito_id, fecha)` | ~30.7M |
 | `ActividadEconomica` | `denue_actividades_economicas` | `codigo_act` | 1,127 |
 | `EstratoPersonal` | `denue_estratos_personal` | `id` (surrogate) | 8 |
 | `TipoVialidad` | `denue_tipos_vialidad` | `id` (surrogate) | 39 |
@@ -919,6 +1073,11 @@ LOG_LEVEL=INFO
 API_TITLE=DENUE ETL API
 API_VERSION=0.1.0
 API_PREFIX=/api/v1
+
+# SESNSP (crime incidence, ver seccion SESNSP arriba)
+SESNSP_CKAN_PACKAGE_URL=https://www.datos.gob.mx/api/3/action/package_show?id=incidencia_delictiva
+SESNSP_RESOURCE_NAME=Incidencia delictiva municipal
+# SESNSP_DOWNLOAD_URL=            # override manual, salta el descubrimiento CKAN
 
 # Testing
 TEST_DB_PATH=data/denue_warehouse_most_recent.db

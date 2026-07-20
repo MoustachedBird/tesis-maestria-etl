@@ -21,25 +21,36 @@ BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 @app.command()
 def extract(
     source: str = typer.Option("denue", "--source", "-s", help="Data source to extract"),
-    headless: bool = typer.Option(True, help="Run browser in headless mode"),
-    output: Path = typer.Option(BRONZE_DIR, help="Output directory for downloaded files"),
+    headless: bool = typer.Option(True, help="Run browser in headless mode (denue only)"),
+    output: Path = typer.Option(None, help="Output directory for downloaded files"),
     force: bool = typer.Option(False, "--force", help="Re-download all files"),
 ):
     """
     STEP 1: Extract raw data from source.
 
-    Downloads data files from the configured source (default: DENUE/INEGI).
+    Sources: denue (INEGI, Selenium scraping) | sesnsp (datos.gob.mx, CKAN API).
     """
-    if source != "denue":
-        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+    if source not in ("denue", "sesnsp"):
+        console.print(f"[bold red]Unknown source: {source}. Available: denue, sesnsp[/bold red]")
         raise typer.Exit(code=1)
-
-    console.print("[bold green]Starting DENUE Extractor[/bold green]")
-    console.print(f"   Output: {output}")
-    console.print(f"   Headless: {headless}")
 
     if force:
         console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
+
+    if source == "sesnsp":
+        from src_etl.extractors.sesnsp import SesnspExtractor
+
+        output = output or (DATA_ROOT / "bronze" / "sesnsp")
+        console.print("[bold green]Starting SESNSP Extractor[/bold green]")
+        console.print(f"   Output: {output}")
+        extractor = SesnspExtractor(output_dir=output, force=force)
+        extractor.download_all()
+        return
+
+    output = output or BRONZE_DIR
+    console.print("[bold green]Starting DENUE Extractor[/bold green]")
+    console.print(f"   Output: {output}")
+    console.print(f"   Headless: {headless}")
 
     downloader = DenueExtractor(output_dir=output, headless=headless, force=force)
     downloader.download_all()
@@ -78,13 +89,34 @@ def transform(
     STEP 2: Transform raw data (Bronze -> Silver).
 
     Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    Sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution
+    DENUE sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution
     [-> clee-resolution-h3]. Control each with --ingest, --normalize-dates,
     --h3-cells, --clee-resolution and --clee-resolution-h3 flags.
+    SESNSP (--source sesnsp): CSV consolidado -> sesnsp_incidencia_municipal.
     """
-    if source != "denue":
-        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
+    if source not in ("denue", "sesnsp"):
+        console.print(f"[bold red]Unknown source: {source}. Available: denue, sesnsp[/bold red]")
         raise typer.Exit(code=1)
+
+    if source == "sesnsp":
+        console.print("[bold blue]Starting SESNSP Transform[/bold blue]")
+        if force:
+            console.print("[bold orange3]   FORCE MODE: Reprocessing current cut[/bold orange3]")
+        try:
+            from src_etl.transformers.sesnsp import SesnspProcessor
+
+            processor = SesnspProcessor(data_root=DATA_ROOT)
+            if processor.run(force=force):
+                console.print("[bold green]SESNSP transform completed successfully.[/bold green]")
+            else:
+                console.print("[bold yellow]SESNSP transform failed. Check logs.[/bold yellow]")
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except Exception as e:
+            console.print(f"[bold red]SESNSP transform failed: {escape(str(e))}[/bold red]")
+            raise typer.Exit(code=1)
+        return
 
     console.print("[bold blue]Starting DENUE Transform[/bold blue]")
 

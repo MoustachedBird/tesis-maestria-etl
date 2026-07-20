@@ -723,6 +723,48 @@ Depende de que la resolución CLEE esté estable. Es la misma tabla que la
 
 ---
 
+# Fuente SESNSP — Incidencia delictiva municipal (incorporada 2026-07-19)
+
+Segunda fuente del pipeline: carpetas de investigación por municipio ×
+delito × mes (2015+), para cruzar supervivencia/mortalidad de negocios
+con evolución del crimen. Detalle completo en AGENTS.md sección SESNSP.
+
+- [x] Extract `extractors/sesnsp.py`: descubrimiento vía API CKAN de
+      datos.gob.mx (el SharePoint del SESNSP exige login Microsoft y
+      gob.mx tiene challenge anti-bot — verificado 2026-07-19). TLS de
+      datos.gob.mx resuelto con `truststore` (cadena incompleta).
+      `make extract-sesnsp`; tracking en `download_tasks`.
+- [x] Transform `transformers/sesnsp.py`: unpivot 12 meses → formato
+      largo 100% dentro de DuckDB (out-of-core, `connect_configured`),
+      encoding autodetectado (latin-1/utf-8), claves geográficas
+      zero-padded compatibles con DENUE. Rebuild completo por corte (el
+      SESNSP revisa cifras históricas); incremental por archivo en
+      `process_tasks`. `make transform-sesnsp`.
+- [x] Esquema (migración `f1a2b3c4d5e6` + ORM): `sesnsp_delitos`
+      (catálogo 98, ids append-only en `seed_sesnsp_delitos.parquet`) +
+      `sesnsp_incidencia_municipal` (~30.7M filas, PK compuesta + FKs
+      reales a geografía DENUE). Seed de municipios +8 filas sintéticas
+      998/999 (2,486 total). Aplicado al Silver real 2026-07-19; carga
+      medida: 30,755,928 filas en ~50s.
+- [x] Tests (12 nuevos, suite 189 en verde) + AGENTS.md + .env/.env.example.
+- [ ] **Caveat mtime**: el transform toma el CSV más reciente POR MTIME de
+      `data/bronze/sesnsp/`. Si conviven un corte manual más nuevo
+      (SharePoint, p. ej. jun26) y una descarga automática más vieja
+      (espejo datos.gob.mx, hoy dic25/feb26), correr `extract-sesnsp`
+      plantaría un archivo con mtime mayor pero corte MENOR que ganaría
+      la selección. Mitigar cuando estorbe: parsear el corte del nombre
+      de archivo o comparar max(fecha) antes de reemplazar.
+- [ ] Re-descargar vía `make extract-sesnsp` cuando el espejo de
+      datos.gob.mx publique el corte jun26+ (hoy va un corte atrás del
+      SharePoint) y verificar que el rebuild reproduce las cifras.
+- [ ] (Análisis, futuro) Fuente de población municipal (CONAPO) para
+      tasas por 100k hab — sin denominador solo hay carpetas absolutas.
+      Mismo patrón extract/transform que SESNSP.
+- [ ] (Opcional) Recurso "Víctimas del fuero común" (IDVFC) del mismo
+      paquete CKAN si el análisis necesita víctimas además de carpetas.
+
+---
+
 ## Notas
 
 - Índices H3 válidos caben en BIGINT firmado (bit alto siempre 0).

@@ -60,6 +60,24 @@ class Settings(BaseSettings):
     SQLALCHEMY_POOL_PRE_PING: bool = True
 
     # -------------------------------------------------------------------------
+    # SESNSP (incidencia delictiva municipal)
+    # -------------------------------------------------------------------------
+    # API CKAN de datos.gob.mx que describe el dataset "Incidencia delictiva".
+    # El extractor la consulta para descubrir la URL del CSV del corte
+    # vigente (el nombre de archivo cambia con cada corte mensual, p. ej.
+    # IDM_NM_dic25.csv -> IDM_NM_jun26.csv), asi que nunca se fija la URL
+    # del archivo en codigo.
+    SESNSP_CKAN_PACKAGE_URL: str = (
+        "https://www.datos.gob.mx/api/3/action/package_show?id=incidencia_delictiva"
+    )
+    # Nombre del recurso CKAN a descargar dentro del paquete.
+    SESNSP_RESOURCE_NAME: str = "Incidencia delictiva municipal"
+    # Override manual: si se define, el extractor se salta el descubrimiento
+    # CKAN y descarga directamente esta URL (util si datos.gob.mx cambia de
+    # estructura o para apuntar a un corte especifico).
+    SESNSP_DOWNLOAD_URL: str | None = None
+
+    # -------------------------------------------------------------------------
     # Application Settings
     # -------------------------------------------------------------------------
     # Logging

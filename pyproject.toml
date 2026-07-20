@@ -27,6 +27,7 @@ dependencies = [
     "beautifulsoup4",
     "shellingham",
     "h3>=4.5.0",
+    "truststore>=0.10.4",
 ]
 
 [dependency-groups]

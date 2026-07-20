@@ -30,6 +30,12 @@ extract: ## Extract data from source (Bronze)
 transform: ## Transform raw data (Bronze -> Silver)
 	$(PYTHON) -m src_etl.main transform $(ARGS)
 
+extract-sesnsp: ## Extract SESNSP incidencia delictiva municipal (datos.gob.mx -> Bronze)
+	$(PYTHON) -m src_etl.main extract --source sesnsp $(ARGS)
+
+transform-sesnsp: ## Transform SESNSP CSV (Bronze -> Silver sesnsp_incidencia_municipal)
+	$(PYTHON) -m src_etl.main transform --source sesnsp $(ARGS)
+
 load: ## Load Silver -> Gold
 	$(PYTHON) -m src_etl.main load $(ARGS)
 
