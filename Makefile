@@ -36,6 +36,9 @@ extract-sesnsp: ## Extract SESNSP incidencia delictiva municipal (datos.gob.mx -
 transform-sesnsp: ## Transform SESNSP CSV (Bronze -> Silver sesnsp_incidencia_municipal)
 	$(PYTHON) -m src_etl.main transform --source sesnsp $(ARGS)
 
+build-entidades: ## Build entidades_economicas dimension (run AFTER CLEE resolution)
+	$(PYTHON) -m src_etl.main build-entidades
+
 load: ## Load Silver -> Gold
 	$(PYTHON) -m src_etl.main load $(ARGS)
 

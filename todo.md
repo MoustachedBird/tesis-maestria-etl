@@ -257,13 +257,77 @@ un método con otra regla de decisión y (b) ground truth.
 
 ### Protocolo de evaluación (aplica a los 3 métodos, hacer PRIMERO)
 
-- [ ] **Evaluación con CLEE enmascarado**: tomar los periodos que SÍ traen
-      CLEE oficial de INEGI, ocultarlo, correr cada método y comparar la
-      asignación contra la verdad → precision/recall/F1 por método. Sin
-      esto "cuál es más precisa" no tiene respuesta empírica. Es una
-      corrida de evaluación aparte (scratch/sample), no una columna nueva.
-      OJO sesgo: las filas con CLEE oficial pueden ser una submuestra no
-      aleatoria — reportarlo como limitación.
+**Diseño detallado (2026-07-20).** Idea: los periodos 2021+ traen CLEE
+oficial al 100% — se ENMASCARA el CLEE de un periodo objetivo P, se
+resuelve P con la misma maquinaria de producción contra los demás
+periodos como referencia, y se compara la asignación contra la verdad.
+Corrida de evaluación aparte (scratch/sample) — JAMÁS escribe en el
+Silver real.
+
+**Construcción del experimento:**
+
+1. **Periodo objetivo principal: `05_2021`** (el más viejo con CLEE
+   oficial) con referencias SOLO más nuevas (11_2021...2024). Es el
+   análogo más fiel a producción, donde la identidad se propaga del
+   futuro al pasado. Robustez: repetir con P=`11_2022` (referencias a
+   ambos lados) para medir sensibilidad a la distancia temporal.
+2. **Máscara**: en el scratch, `clee_propagado_* = NULL` para P;
+   las referencias conservan su CLEE oficial (determinístico).
+3. **Resolver P** reutilizando `build_single_period_kb` +
+   `propagate_clees_*` (mismos umbrales de producción, mismo radio).
+   Radio y H3 asignan idéntico por construcción (paridad verificada):
+   basta correr UNO para la cascada; el tercer método (prob/ML) correrá
+   el mismo protocolo con su propia regla de decisión.
+
+**Partición del resultado (clave para no inflar métricas):**
+
+- **Evaluables**: filas de P cuyo CLEE verdadero SÍ aparece en ≥1
+  periodo de referencia (el negocio existe en otra foto). Para ellas:
+  correcto = asignado == verdadero; error = falso match (asignó otro
+  CLEE) o falso nuevo (asignó NEW_* teniendo pareja).
+- **No-evaluables**: su CLEE verdadero no existe en ninguna referencia
+  (negocio presente solo en P). Comportamiento correcto = NEW_*;
+  cualquier CLEE real asignado = **falso match espurio** (mide cuánto
+  inventa la cascada — la métrica que radio/h3 no pueden darse solas).
+
+**Métricas a reportar (por método):**
+
+- Precision = correctos / asignados-no-NEW; Recall = correctos /
+  evaluables; F1.
+- Tasa de match espurio en no-evaluables.
+- Segmentadas por: path de match (A razón social / B nombre / C señales
+  débiles), densidad (urbano/rural por conteo de filas del municipio),
+  bucket de distancia al candidato elegido, sector SCIAN, y distancia
+  temporal target-referencia.
+
+**Plan de ejecución (presupuesto tiempo/RAM):**
+
+- Scratch DuckDB con muestra estratificada por entidad: ~3 estados
+  (denso p. ej. 09/14, medio, rural) o ~500K filas objetivo con semilla
+  fija — suficiente para IC de ±0.1% en precision y corre en minutos,
+  no una noche. Full-period opcional al final para el número
+  definitivo de la tesis.
+- Script dedicado `scripts/evaluate_masked_clee.py` (no una columna
+  nueva ni un método del registro): produce parquet de resultados
+  por fila + resumen de métricas.
+
+**Limitaciones a reportar en la tesis:**
+
+- Las filas con CLEE oficial (2021+) son una submuestra no aleatoria:
+  más recientes y posiblemente más formales que los targets reales
+  (2015-2020); la distancia temporal en producción llega a 9 años vs
+  ≤3 en la evaluación.
+- La verdad es el CLEE de INEGI, que puede tener sus propios errores de
+  asignación (se evalúa contra INEGI, no contra la realidad).
+
+- [ ] Implementar `scripts/evaluate_masked_clee.py` (muestreo + máscara +
+      resolución + partición evaluables/no-evaluables + métricas).
+- [ ] Correr con P=05_2021 (refs futuras) y P=11_2022 (robustez);
+      reportar tabla de métricas segmentadas.
+- [ ] (Opcional) Sensibilidad de umbrales: sweep de
+      `BUSINESS_NAME_MATCH_THRESH`/`ACTIVITY_GATE_THRESH` ±10 puntos
+      sobre la muestra — cuantifica la robustez de la calibración manual
+      (hoy defendida solo cualitativamente).
 
 ### Opción A (recomendada): probabilístico Fellegi-Sunter — `clee_propagado_prob`
 
@@ -690,19 +754,29 @@ Decisión del usuario: relaciones FÍSICAS por id, no joins por string
 Depende de que la resolución CLEE esté estable. Es la misma tabla que la
 "KB consolidada" de la Fase 5 del plan CLEE — un solo artefacto, dos usos.
 
-- [ ] Nueva tabla `entidades_economicas` (una fila por `clee_propagado_radio`):
-      `clee_propagado_radio` PK, `es_sintetica` (prefijo NEW_*), atributos del periodo
-      más reciente (`nom_estab`, `raz_social`, `codigo_act`, `cve_ent`,
-      `cve_mun`, `cod_postal`, `latitud`, `longitud`, `h3_cell_9`),
-      `primer_periodo`, `ultimo_periodo`, `n_periodos`, `fecha_alta_date`.
-- [ ] Paso de construcción en el pipeline (post CLEE-resolution, en Load):
-      agregación por `clee_propagado_radio` sobre Silver → tabla en Gold.
-- [ ] Migración Alembic + modelo ORM.
+- [x] **Preparado en código (2026-07-20, PENDIENTE de aplicar — regla de
+      oro)**: `loaders/entidades.py` (DDL + `build_entidades_economicas()`
+      + runner `EntidadesDimensionBuilder` con tracking, job
+      `entidades_build`), modelo ORM `EntidadEconomica`, migración
+      `b2c3d4e5f6a7` (crea tabla vacía), CLI `build-entidades` + target
+      `make build-entidades`, 5 tests (`test_entidades_dimension.py`).
+      Esquema según spec: PK `clee_propagado_radio`, `es_sintetica`,
+      atributos del periodo más reciente (desempate determinista por id),
+      `primer_periodo`/`ultimo_periodo`/`n_periodos`,
+      `fecha_alta_date` = mínima conocida. Decisión: se construye EN
+      SILVER (rebuild DROP+CREATE+INSERT transaccional) y Gold la hereda
+      en `make load` — el load queda como copia pura; sin FKs a catálogos
+      a propósito (artefacto derivado, docstring explica).
+- [ ] **Aplicar cuando termine la re-resolución radio con código actual**
+      (los NEW_* actuales van a regenerarse — no construir antes):
+      `make db-migrate` → `make build-entidades` → `make load`.
 - [ ] `establecimientos` pasa a leerse como tabla de observaciones
       (hechos por periodo); documentar el patrón de consulta de
-      supervivencia/mortalidad sobre la dimensión.
-- [ ] OJO: los `clee_propagado_radio` sintéticos (NEW_*) no son estables entre corridas
-      con `--force` — reconstruir la dimensión tras cada re-resolución.
+      supervivencia/mortalidad sobre la dimensión (borrador inicial en
+      `docs/cruce_denue_sesnsp.md`).
+- OJO (documentado en módulo y migración): los NEW_* no son estables
+  entre corridas con `--force` — reconstruir la dimensión tras cada
+  re-resolución (`make build-entidades`, rebuild total idempotente).
 
 ## N4 — (Opcional) 1NF de calles cruzadas
 
@@ -747,13 +821,12 @@ con evolución del crimen. Detalle completo en AGENTS.md sección SESNSP.
       998/999 (2,486 total). Aplicado al Silver real 2026-07-19; carga
       medida: 30,755,928 filas en ~50s.
 - [x] Tests (12 nuevos, suite 189 en verde) + AGENTS.md + .env/.env.example.
-- [ ] **Caveat mtime**: el transform toma el CSV más reciente POR MTIME de
-      `data/bronze/sesnsp/`. Si conviven un corte manual más nuevo
-      (SharePoint, p. ej. jun26) y una descarga automática más vieja
-      (espejo datos.gob.mx, hoy dic25/feb26), correr `extract-sesnsp`
-      plantaría un archivo con mtime mayor pero corte MENOR que ganaría
-      la selección. Mitigar cuando estorbe: parsear el corte del nombre
-      de archivo o comparar max(fecha) antes de reemplazar.
+- [x] **Caveat mtime RESUELTO (2026-07-20)**: `cut_sort_key()` parsea los
+      tokens mes-año del nombre (`dic25`, `jun26`, `jun2026`) y elige el
+      corte por el token MÁXIMO del nombre; mtime solo desempata cortes
+      iguales o nombres sin token. Un corte manual jun26 ya no pierde
+      contra una descarga automática dic25 más nueva en disco. 5 tests
+      (`TestCutSortKey`). `extract-sesnsp` es seguro de correr desde ya.
 - [ ] Re-descargar vía `make extract-sesnsp` cuando el espejo de
       datos.gob.mx publique el corte jun26+ (hoy va un corte atrás del
       SharePoint) y verificar que el rebuild reproduce las cifras.

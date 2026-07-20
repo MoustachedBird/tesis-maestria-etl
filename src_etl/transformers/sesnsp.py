@@ -22,6 +22,8 @@ Incremental: si el mismo archivo ya se proceso con SUCCESS se omite
 (los cortes nuevos traen nombre de archivo nuevo); --force reprocesa.
 """
 
+import re
+from datetime import date
 from pathlib import Path
 
 from src_etl.core.config import settings
@@ -63,6 +65,52 @@ CSV_DELITO_COLUMNS = {
     "Modalidad": "modalidad",
 }
 """Mapa columna del CSV -> columna del catalogo sesnsp_delitos."""
+
+
+SPANISH_MONTH_ABBR = {
+    "ene": 1,
+    "feb": 2,
+    "mar": 3,
+    "abr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "ago": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dic": 12,
+}
+"""Abreviaturas de mes en espanol usadas en los nombres de archivo del
+SESNSP (IDM_NM_dic25.csv, Municipal-Delitos-..._corte_jun26.csv)."""
+
+_CUT_TOKEN_RE = re.compile(
+    r"(" + "|".join(SPANISH_MONTH_ABBR) + r")(\d{4}|\d{2})",
+    re.IGNORECASE,
+)
+"""Token mes-anio en nombres de archivo: 'dic25', 'jun26', 'jun2026'."""
+
+
+def cut_sort_key(csv_path: Path) -> tuple[date, float]:
+    """
+    Clave de orden para elegir el CSV del corte mas reciente.
+
+    Extrae TODOS los tokens mes-anio del nombre (un archivo puede traer
+    varios: '...dic25_corte_jun26.csv' tiene el fin de datos Y el corte)
+    y usa el MAXIMO como fecha del corte; empates (o nombres sin token)
+    se resuelven por mtime. Asi un corte manual jun26 le gana a una
+    descarga automatica dic25 aunque esta ultima sea mas nueva en disco.
+
+    Returns:
+        (fecha_de_corte, mtime); date.min si el nombre no trae token.
+    """
+    cuts = []
+    for month_abbr, year_str in _CUT_TOKEN_RE.findall(csv_path.name):
+        year = int(year_str)
+        if year < 100:
+            year += 2000
+        cuts.append(date(year, SPANISH_MONTH_ABBR[month_abbr.lower()], 1))
+    return (max(cuts) if cuts else date.min, csv_path.stat().st_mtime)
 
 
 def detect_csv_encoding(csv_path: Path) -> str:
@@ -115,14 +163,19 @@ class SesnspProcessor:
         self.warehouse_path = Path(silver_db_path or settings.SILVER_DUCKDB_PATH)
 
     def _find_latest_csv(self) -> Path | None:
-        """CSV de corte mas reciente en Bronze (por fecha de modificacion).
+        """CSV del corte mas reciente en Bronze.
 
         Acepta tanto el nombre de datos.gob.mx (IDM_NM_*.csv) como el del
-        ZIP de SharePoint descargado a mano (Municipal-Delitos*.csv)."""
+        ZIP de SharePoint descargado a mano (Municipal-Delitos*.csv). El
+        corte se decide por el token mes-anio mas nuevo del NOMBRE del
+        archivo (`cut_sort_key`), no por mtime: una descarga automatica
+        del espejo publico (que va cortes atras) no debe ganarle a un
+        corte manual mas nuevo solo por ser un archivo mas reciente en
+        disco. mtime solo desempata cortes iguales o nombres sin token."""
         candidates = [p for p in self.bronze_dir.glob("*.csv") if p.is_file()]
         if not candidates:
             return None
-        return max(candidates, key=lambda p: p.stat().st_mtime)
+        return max(candidates, key=cut_sort_key)
 
     def _already_processed(self, csv_path: Path) -> bool:
         """True si este mismo archivo ya tiene una process_task SUCCESS."""

@@ -13,7 +13,11 @@ from src_etl.loaders.sesnsp import (
     sync_delitos_seed,
     sync_municipios_from_seed,
 )
-from src_etl.transformers.sesnsp import SesnspProcessor, detect_csv_encoding
+from src_etl.transformers.sesnsp import (
+    SesnspProcessor,
+    cut_sort_key,
+    detect_csv_encoding,
+)
 
 # Header real del CSV consolidado del SESNSP (formato ancho)
 CSV_HEADER = (
@@ -136,6 +140,61 @@ class TestSyncMunicipios:
 
 
 @pytest.mark.unit
+class TestCutSortKey:
+    """cut_sort_key(): el corte del NOMBRE manda sobre el mtime."""
+
+    def _touch(self, path: Path) -> Path:
+        """Crea un archivo vacio (el mtime queda al momento de creacion)."""
+        path.write_text("")
+        return path
+
+    def test_newer_cut_in_name_beats_newer_mtime(self, tmp_path):
+        import os
+        import time
+
+        manual = self._touch(tmp_path / "Municipal-Delitos - (2015-2025) dic25_corte_jun26.csv")
+        mirror = self._touch(tmp_path / "IDM_NM_dic25.csv")
+        # El espejo se descargo DESPUES (mtime mayor)...
+        now = time.time()
+        os.utime(manual, (now - 3600, now - 3600))
+        os.utime(mirror, (now, now))
+        # ...pero el corte jun26 del nombre manual gana
+        assert max([manual, mirror], key=cut_sort_key) == manual
+
+    def test_max_token_wins_within_name(self, tmp_path):
+        # dic25 (fin de datos) + jun26 (corte): usa jun26
+        path = self._touch(tmp_path / "algo_dic25_corte_jun26.csv")
+        assert cut_sort_key(path)[0].isoformat() == "2026-06-01"
+
+    def test_four_digit_year(self, tmp_path):
+        path = self._touch(tmp_path / "Municipal-Delitos-2015-2025_jun2026.csv")
+        assert cut_sort_key(path)[0].isoformat() == "2026-06-01"
+
+    def test_no_token_falls_back_to_mtime(self, tmp_path):
+        import os
+        import time
+
+        old = self._touch(tmp_path / "sin_token_a.csv")
+        new = self._touch(tmp_path / "sin_token_b.csv")
+        now = time.time()
+        os.utime(old, (now - 3600, now - 3600))
+        os.utime(new, (now, now))
+        assert cut_sort_key(old)[0] == cut_sort_key(new)[0]  # ambos date.min
+        assert max([old, new], key=cut_sort_key) == new
+
+    def test_equal_cut_tiebreak_by_mtime(self, tmp_path):
+        import os
+        import time
+
+        a = self._touch(tmp_path / "IDM_NM_jun26.csv")
+        b = self._touch(tmp_path / "Municipal-Delitos_corte_jun26.csv")
+        now = time.time()
+        os.utime(a, (now, now))
+        os.utime(b, (now - 3600, now - 3600))
+        assert max([a, b], key=cut_sort_key) == a
+
+
+@pytest.mark.unit
 class TestDetectEncoding:
     """detect_csv_encoding(): utf-8 vs latin-1."""
 
@@ -195,9 +254,7 @@ class TestLoadCsv:
 
     def test_utf8_csv_loads_identically(self, tmp_path):
         conn = self._run(tmp_path, "utf-8")
-        total = conn.execute(
-            "SELECT SUM(carpetas) FROM sesnsp_incidencia_municipal"
-        ).fetchone()[0]
+        total = conn.execute("SELECT SUM(carpetas) FROM sesnsp_incidencia_municipal").fetchone()[0]
         assert total == 2 + 1 + 3 + 5 + 4 + 1
 
     def test_rebuild_replaces_previous_load(self, tmp_path):

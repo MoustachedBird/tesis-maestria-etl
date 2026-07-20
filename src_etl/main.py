@@ -249,6 +249,35 @@ def pipeline(
 
 
 # ---------------------------------------------------------------------------
+# BUILD ENTIDADES (dimension N3)
+# ---------------------------------------------------------------------------
+@app.command()
+def build_entidades():
+    """
+    Build the entidades_economicas dimension (one row per resolved business).
+
+    Run AFTER CLEE resolution: aggregates establecimientos by
+    clee_propagado_radio in Silver (full rebuild -- NEW_* ids are not
+    stable across --force resolutions). Gold inherits on `make load`.
+    """
+    console.print("[bold blue]Building entidades_economicas dimension[/bold blue]")
+    try:
+        from src_etl.loaders.entidades import EntidadesDimensionBuilder
+
+        builder = EntidadesDimensionBuilder(data_root=DATA_ROOT)
+        if builder.run():
+            console.print("[bold green]Dimension built successfully.[/bold green]")
+        else:
+            console.print("[bold yellow]Dimension build failed. Check logs.[/bold yellow]")
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[bold red]Dimension build failed: {escape(str(e))}[/bold red]")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
 # RETRY (placeholder)
 # ---------------------------------------------------------------------------
 @app.command()
