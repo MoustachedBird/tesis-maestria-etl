@@ -45,14 +45,17 @@ def ensure_tables(conn, force: bool = False):
     """
     Ensure geography tables exist in DuckDB.
 
+    Nunca dropea: estas tablas son blanco de FKs de `establecimientos` Y de
+    `sesnsp_incidencia_municipal`, y DuckDB rechaza el DROP de una tabla
+    referenciada (su CASCADE no cubre FKs entrantes). Los cambios de esquema
+    van por Alembic (regla de oro en AGENTS.md); la siembra es idempotente
+    via INSERT OR IGNORE en load_seeds().
+
     Args:
         conn: DuckDB connection
-        force: If True, drop and recreate tables
+        force: Ignorado para el DDL (se conserva por compatibilidad de firma)
     """
     for _, table, _ in SEED_MAPPINGS:
-        if force:
-            conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-
         if not conn.execute(
             f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table}'"
         ).fetchone():
@@ -61,12 +64,18 @@ def ensure_tables(conn, force: bool = False):
 
 def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
     """
-    Load geography seeds from Parquet files into DuckDB.
+    Load geography seeds from Parquet files into DuckDB (idempotente).
+
+    INSERT OR IGNORE por PK: inserta solo las filas del seed que falten en
+    la tabla, sin dropear ni truncar (los catalogos son append-only y estan
+    referenciados por FKs de las tablas de hechos). Correr N veces es
+    seguro, con o sin force.
 
     Args:
         conn: DuckDB connection
         seeds_dir: Path to directory containing seed Parquet files
-        force: If True, drop tables and reload
+        force: Sin efecto en la siembra (idempotente siempre); se conserva
+            por compatibilidad con los demas loaders de _bootstrap_seeds
 
     Returns:
         dict: Row counts per table
@@ -86,11 +95,11 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
 
         logger.info(f"Seed validated: {file_name} ({row_count:,} records)")
 
-        # Only load if table was just created (empty) or force mode
-        existing = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        if existing == 0:
-            conn.execute(f"INSERT INTO {table} SELECT * FROM '{seed_path}'")
-            logger.info(f"Seed loaded: {table} from {file_name}")
+        inserted = conn.execute(
+            f"INSERT OR IGNORE INTO {table} SELECT * FROM '{seed_path}'"
+        ).fetchone()[0]
+        if inserted:
+            logger.info(f"Seed loaded: {table} +{inserted:,} rows from {file_name}")
 
         stats[display_name] = row_count
 

@@ -1,9 +1,28 @@
 """Tests for seed loader validation functions."""
 
+import duckdb
 import polars as pl
 import pytest
 
 from src_etl.loaders import geography, scian
+
+
+def _write_geography_seeds(tmp_path):
+    """Escribe los 3 seeds parquet minimos de geografia en tmp_path."""
+    pl.DataFrame({"cve_ent": ["01"], "entidad": ["Aguascalientes"]}).write_parquet(
+        tmp_path / "seed_entidades.parquet"
+    )
+    pl.DataFrame(
+        {"cve_ent": ["01"], "cve_mun": ["001"], "municipio": ["Aguascalientes"]}
+    ).write_parquet(tmp_path / "seed_municipios.parquet")
+    pl.DataFrame(
+        {
+            "cve_ent": ["01"],
+            "cve_mun": ["001"],
+            "cve_loc": ["0001"],
+            "localidad": ["Aguascalientes"],
+        }
+    ).write_parquet(tmp_path / "seed_localidades.parquet")
 
 
 @pytest.mark.unit
@@ -77,6 +96,51 @@ class TestScianValidateSeeds:
         )
         with pytest.raises(ValueError, match="missing columns"):
             scian.validate_seeds(tmp_path)
+
+
+@pytest.mark.unit
+class TestGeographyLoadSeeds:
+    """load_seeds() debe ser idempotente y jamas dropear los catalogos."""
+
+    def test_force_does_not_drop_fk_referenced_catalog(self, tmp_path):
+        """Regresion: sesnsp_incidencia_municipal referencia denue_entidades/
+        denue_municipios con FK; el bootstrap force debe re-sembrar sin DROP."""
+        _write_geography_seeds(tmp_path)
+        conn = duckdb.connect()
+        geography.load_seeds(conn, tmp_path, force=False)
+
+        conn.execute(
+            "CREATE TABLE fact_ref (cve_ent VARCHAR REFERENCES denue_entidades(cve_ent))"
+        )
+        conn.execute("INSERT INTO fact_ref VALUES ('01')")
+
+        geography.load_seeds(conn, tmp_path, force=True)
+
+        assert conn.execute("SELECT COUNT(*) FROM fact_ref").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM denue_entidades").fetchone()[0] == 1
+
+    def test_load_seeds_idempotent(self, tmp_path):
+        _write_geography_seeds(tmp_path)
+        conn = duckdb.connect()
+
+        geography.load_seeds(conn, tmp_path)
+        geography.load_seeds(conn, tmp_path, force=True)
+
+        for table in ("denue_entidades", "denue_municipios", "denue_localidades"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+
+    def test_load_seeds_inserts_only_missing_rows(self, tmp_path):
+        _write_geography_seeds(tmp_path)
+        conn = duckdb.connect()
+        geography.load_seeds(conn, tmp_path)
+
+        pl.DataFrame(
+            {"cve_ent": ["01", "02"], "entidad": ["Aguascalientes", "Baja California"]}
+        ).write_parquet(tmp_path / "seed_entidades.parquet")
+        geography.load_seeds(conn, tmp_path)
+
+        rows = conn.execute("SELECT cve_ent FROM denue_entidades ORDER BY cve_ent").fetchall()
+        assert [r[0] for r in rows] == ["01", "02"]
 
 
 @pytest.mark.unit
