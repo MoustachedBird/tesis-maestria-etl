@@ -296,6 +296,14 @@ class BronzeToSilverProcessor:
                     pl.col(col).cast(pl.Utf8).str.strip_chars().str.pad_start(width, "0")
                 )
 
+        # Coordenadas a Float64: el CSV se lee 100% como Utf8
+        # (infer_schema_length=0), pero el modelo/DDL las define DOUBLE y el
+        # calculo H3 del INSERT exige tipo numerico (BETWEEN contra
+        # literales). strict=False: texto invalido o vacio -> NULL.
+        for col in ("latitud", "longitud"):
+            if col in df.columns:
+                df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+
         # Parse fecha_alta_str -> fecha_alta_date (YYYY-MM format only, others -> NULL)
         if "fecha_alta_str" in df.columns:
             df = df.with_columns(
