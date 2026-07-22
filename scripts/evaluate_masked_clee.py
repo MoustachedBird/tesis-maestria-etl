@@ -21,8 +21,8 @@ Uso:
     # 2. Evaluar (solo parquets + scratch, seguro en cualquier momento)
     uv run python scripts/evaluate_masked_clee.py evaluate
 
-Salidas en data/curated/fase7_eval/: results.parquet (fila por target con
-su categoria) y metrics.json (resumen + segmentaciones).
+Salidas en data/eval/fase7_masked_clee/: results.parquet (fila por target
+con su categoria) y metrics.json (resumen + segmentaciones).
 """
 
 import json
@@ -56,9 +56,11 @@ logger = get_stage_logger(__name__, Path("./data/etl_fase7_eval.log"))
 
 app = typer.Typer(help="Fase 7: evaluacion de precision con CLEE enmascarado")
 
-EVAL_DIR = settings.DATA_DIR / "curated" / "fase7_eval"
+EVAL_DIR = settings.DATA_DIR / "eval" / "fase7_masked_clee"
 """Directorio de trabajo de la evaluacion (parquets de muestra + salidas).
-Vive en data/curated/ (gitignored, regenerable con `extract`)."""
+Fuera de la nomenclatura Bronze/Silver/Gold a proposito: NO es una etapa
+del pipeline, es un artefacto de analisis ad-hoc, regenerable con
+`extract` (no se commitea)."""
 
 DEFAULT_TARGET_PERIOD = "2021-05-01"
 """Periodo objetivo por defecto: 05_2021, el mas viejo con CLEE oficial
@@ -80,6 +82,16 @@ MASTER_COLUMN = "clee_propagado_radio"
 evaluacion. Solo existe en los DataFrames del scratch — el Silver real
 nunca se toca. Radio y H3 asignan identico por construccion (paridad
 verificada), asi que evaluar con el generador radio basta para la cascada."""
+
+EVAL_READ_QUERY = SILVER_READ_QUERY.replace(
+    "SELECT\n        e.id,",
+    "SELECT\n        e.id,\n        e.cve_ent,\n        e.cve_mun,",
+    1,
+)
+"""SILVER_READ_QUERY + cve_ent/cve_mun: produccion no las necesita (el
+matching no usa geografia administrativa), pero la evaluacion si, para
+segmentar metricas por entidad (protocolo de todo.md)."""
+assert "e.cve_ent," in EVAL_READ_QUERY, "SILVER_READ_QUERY cambio de formato; ajustar el replace"
 
 
 def _period_coverage(conn) -> pl.DataFrame:
@@ -123,7 +135,7 @@ def extract(
             raise typer.BadParameter(f"Sin periodos de referencia futuros a {target_period}.")
 
         placeholders = ", ".join(["?"] * len(states))
-        base = SILVER_READ_QUERY + f"\n    WHERE e.period = ? AND e.cve_ent IN ({placeholders})"
+        base = EVAL_READ_QUERY + f"\n    WHERE e.period = ? AND e.cve_ent IN ({placeholders})"
 
         df_target = conn.execute(base, [target_period, *states]).pl()
         df_target.write_parquet(EVAL_DIR / "target.parquet")
@@ -145,6 +157,47 @@ def extract(
         logger.info(f"Muestra lista en {EVAL_DIR}")
     finally:
         conn.close()
+
+
+def _load_masked(path: Path) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Carga un parquet de la muestra y enmascara su identidad.
+
+    Devuelve (df enmascarado, verdad). La verdad es (id, clee_verdadero);
+    el df queda con MASTER_COLUMN, clee y resolved_by_ref en NULL — la
+    maquinaria lo ve como un periodo sin resolver.
+    """
+    df = clean_contact_columns(pl.read_parquet(path))
+    truth = df.select("id", pl.col("clee").alias("clee_verdadero"))
+    df = df.with_columns(
+        pl.lit(None, dtype=pl.Utf8).alias(MASTER_COLUMN),
+        pl.lit(None, dtype=pl.Utf8).alias("clee"),
+        pl.lit(None, dtype=pl.Utf8).alias("resolved_by_ref"),
+    )
+    return df, truth
+
+
+def _propagate_and_attribute(df_target: pl.DataFrame, kb: pl.DataFrame, label: str) -> pl.DataFrame:
+    """
+    Propaga una KB al target y atribuye `resolved_by_ref` = label a lo
+    recien resuelto.
+
+    Atribucion por columnas, NUNCA por posicion: la propagacion devuelve
+    las filas reordenadas (resueltas primero), asi que una mascara
+    posicional pre/post quedaria desalineada. "Recien resuelta por esta
+    ref" = ya tiene identidad pero sin ref atribuida.
+    """
+    df_target = propagate_clees_radio(df_target, kb, SPATIAL_RADIUS_M)
+    df_target = df_target.with_columns(
+        pl.when(pl.col("resolved_by_ref").is_null() & pl.col(MASTER_COLUMN).is_not_null())
+        .then(pl.lit(label))
+        .otherwise(pl.col("resolved_by_ref"))
+        .alias("resolved_by_ref")
+    )
+    nuevos = (df_target["resolved_by_ref"] == label).sum()
+    pendientes = df_target[MASTER_COLUMN].is_null().sum()
+    logger.info(f"  ref {label}: +{nuevos:,} resueltas, {pendientes:,} pendientes")
+    return df_target
 
 
 def classify_results(
@@ -237,53 +290,89 @@ def _segment_metrics(results: pl.DataFrame) -> dict:
     return segments
 
 
+def _chain_metrics(results: pl.DataFrame) -> dict:
+    """
+    Metricas del experimento de dos saltos (categorias chain-aware).
+
+    Los correctos incluyen identidades sinteticas heredadas del intermedio
+    que apuntan al negocio verdadero (`correcto_new_heredado`); los
+    asignados incluyen las identidades NEW_CHAIN (son identidades
+    sustantivas del intermedio, no "sin match").
+    """
+    counts = dict(results.group_by("categoria").len().iter_rows())
+    categorias = [
+        "correcto",
+        "correcto_new_heredado",
+        "falso_match_heredado",
+        "falso_match",
+        "falso_nuevo",
+        "nuevo_correcto",
+        "match_espurio",
+    ]
+    correctos = counts.get("correcto", 0) + counts.get("correcto_new_heredado", 0)
+    falsos = (
+        counts.get("falso_match", 0)
+        + counts.get("falso_match_heredado", 0)
+        + counts.get("match_espurio", 0)
+    )
+    evaluables = results.filter(pl.col("evaluable")).height
+    asignados = correctos + falsos
+    precision = correctos / asignados if asignados else 0.0
+    recall = correctos / evaluables if evaluables else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    return {
+        "total": results.height,
+        "evaluables": evaluables,
+        "categorias": {k: counts.get(k, 0) for k in categorias},
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "f1": round(f1, 6),
+    }
+
+
 @app.command()
-def evaluate():
+def evaluate(
+    ref_order: str = typer.Option(
+        "nearest",
+        "--ref-order",
+        help="Orden de referencias: 'nearest' (mas cercana al target "
+        "primero, replica produccion) o 'newest' (orden legado, comparacion)",
+    ),
+):
     """
     Corre la evaluacion sobre la muestra extraida (solo parquets).
 
-    Enmascara el CLEE del target, lo resuelve contra cada referencia
-    (mas nueva primero, misma ventana que produccion), asigna NEW_* a lo
-    no resuelto y clasifica contra la verdad. Escribe results.parquet y
-    metrics.json en EVAL_DIR.
+    Enmascara el CLEE del target, lo resuelve contra cada referencia en el
+    orden pedido (--ref-order; 'nearest' replica la ventana de produccion
+    desde el hallazgo de Fase 7), asigna NEW_* a lo no resuelto y
+    clasifica contra la verdad. Escribe results/metrics en EVAL_DIR; el
+    sufijo del archivo es el orden ('' = newest legado, '_nearest' =
+    produccion) para poder compararlos lado a lado.
     """
+    if ref_order not in ("newest", "nearest"):
+        raise typer.BadParameter("--ref-order debe ser 'newest' o 'nearest'")
     manifest = json.loads((EVAL_DIR / "manifest.json").read_text())
     set_matching_logger(logger)
 
-    df_target = clean_contact_columns(pl.read_parquet(EVAL_DIR / "target.parquet"))
-    truth = df_target.select("id", pl.col("clee").alias("clee_verdadero"))
-    # Mascara: la maquinaria ve el periodo como no resuelto
-    df_target = df_target.with_columns(
-        pl.lit(None, dtype=pl.Utf8).alias(MASTER_COLUMN),
-        pl.lit(None, dtype=pl.Utf8).alias("clee"),
-        pl.lit(None, dtype=pl.Utf8).alias("resolved_by_ref"),
-    )
+    df_target, truth = _load_masked(EVAL_DIR / "target.parquet")
     logger.info(
         f"Evaluando {df_target.height:,} filas de {manifest['target_period']} "
-        f"contra {len(manifest['ref_periods'])} referencias..."
+        f"contra {len(manifest['ref_periods'])} referencias (orden: {ref_order})..."
     )
 
     known_clees: set[str] = set()
-    for rp in sorted(manifest["ref_periods"], reverse=True):
+    # Todas las refs son futuras al target, asi que orden ascendente
+    # equivale a "mas cercana temporalmente primero".
+    refs_ordenadas = sorted(manifest["ref_periods"], reverse=(ref_order == "newest"))
+    for rp in refs_ordenadas:
         df_ref = clean_contact_columns(pl.read_parquet(EVAL_DIR / f"ref_{rp}.parquet"))
         # Identidad de la KB = CLEE OFICIAL de la referencia (ground truth)
         kb = build_single_period_kb(df_ref, master_column="clee")
         known_clees.update(kb["clee_id"].to_list())
         del df_ref
-
-        antes = df_target[MASTER_COLUMN].is_null()
-        df_target = propagate_clees_radio(df_target, kb, SPATIAL_RADIUS_M)
-        nuevos = antes & df_target[MASTER_COLUMN].is_not_null()
-        df_target = df_target.with_columns(
-            pl.when(pl.Series(nuevos))
-            .then(pl.lit(rp))
-            .otherwise(pl.col("resolved_by_ref"))
-            .alias("resolved_by_ref")
-        )
-        pendientes = df_target[MASTER_COLUMN].is_null().sum()
-        logger.info(f"  ref {rp}: +{int(nuevos.sum()):,} resueltas, {pendientes:,} pendientes")
+        df_target = _propagate_and_attribute(df_target, kb, rp)
         del kb
-        if pendientes == 0:
+        if df_target[MASTER_COLUMN].is_null().sum() == 0:
             break
 
     df_target = assign_new_clees(df_target, region_prefix="EVAL", master_column=MASTER_COLUMN)
@@ -305,15 +394,17 @@ def evaluate():
         "cve_ent",
         "cve_mun",
     )
-    results.write_parquet(EVAL_DIR / "results.parquet")
+    sufijo = "" if ref_order == "newest" else f"_{ref_order}"
+    results.write_parquet(EVAL_DIR / f"results{sufijo}.parquet")
 
     metrics = {
         "manifest": manifest,
+        "ref_order": ref_order,
         "evaluated_at": datetime.now().isoformat(),
         "global": compute_metrics(results),
         "segments": _segment_metrics(results),
     }
-    (EVAL_DIR / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    (EVAL_DIR / f"metrics{sufijo}.json").write_text(json.dumps(metrics, indent=2))
 
     g = metrics["global"]
     logger.info(
@@ -322,7 +413,188 @@ def evaluate():
         f"(evaluables={g['evaluables']:,}, espurios={g['match_espurio']:,} "
         f"de {g['no_evaluables']:,} no-evaluables)"
     )
-    logger.info(f"Salidas: {EVAL_DIR / 'results.parquet'} y {EVAL_DIR / 'metrics.json'}")
+    logger.info(
+        f"Salidas: {EVAL_DIR / f'results{sufijo}.parquet'} y {EVAL_DIR / f'metrics{sufijo}.json'}"
+    )
+
+
+@app.command()
+def chain(
+    intermediate: str = typer.Option(
+        "2021-11-01",
+        "--intermediate",
+        help="Periodo intermedio I (debe estar en la muestra extraida): se "
+        "resuelve enmascarado y el target solo llega a el via encadenamiento",
+    ),
+):
+    """
+    Experimento de dos saltos: mide el error transitivo del encadenamiento.
+
+    Paso 1: enmascara el intermedio I y lo resuelve nearest-first contra
+    las referencias oficiales POSTERIORES a I (sus NEW_* llevan prefijo
+    CHAIN). Paso 2: resuelve el target usando I-RESUELTO como primera
+    referencia (identidad = columna propagada, como haria produccion con
+    nearest-first) y despues las mismas referencias oficiales; el target
+    NUNCA ve el clee oficial de I directamente.
+
+    Un match del target a una fila de I cuenta como correcto si esa fila
+    de I pertenece (segun su clee oficial) al mismo negocio — aunque la
+    identidad heredada sea NEW_CHAIN (correcto_new_heredado). Si el target
+    matcheo la fila correcta de I pero I la habia resuelto mal, es
+    falso_match_heredado (error del paso 1, no del 2). Comparar contra
+    metrics_nearest.json (un salto directo, mismo universo evaluable).
+
+    Escribe results_chain.parquet y metrics_chain.json.
+    """
+    manifest = json.loads((EVAL_DIR / "manifest.json").read_text())
+    if intermediate not in manifest["ref_periods"]:
+        raise typer.BadParameter(
+            f"{intermediate} no esta en la muestra extraida ({manifest['ref_periods']})"
+        )
+    set_matching_logger(logger)
+
+    refs_post = sorted(rp for rp in manifest["ref_periods"] if rp > intermediate)
+    if not refs_post:
+        raise typer.BadParameter(f"Sin referencias posteriores a {intermediate}.")
+
+    # ---- Paso 1: resolver el intermedio enmascarado (nearest-first) ----
+    df_i, truth_i = _load_masked(EVAL_DIR / f"ref_{intermediate}.parquet")
+    logger.info(
+        f"[chain 1/2] Resolviendo intermedio {intermediate} enmascarado "
+        f"({df_i.height:,} filas) contra {len(refs_post)} refs oficiales..."
+    )
+    known_oficiales: set[str] = set()
+    for rp in refs_post:
+        df_ref = clean_contact_columns(pl.read_parquet(EVAL_DIR / f"ref_{rp}.parquet"))
+        kb = build_single_period_kb(df_ref, master_column="clee")
+        known_oficiales.update(kb["clee_id"].to_list())
+        del df_ref
+        df_i = _propagate_and_attribute(df_i, kb, rp)
+        del kb
+        if df_i[MASTER_COLUMN].is_null().sum() == 0:
+            break
+    df_i = assign_new_clees(df_i, region_prefix="CHAIN", master_column=MASTER_COLUMN)
+
+    results_i = classify_results(
+        df_i.join(truth_i, on="id").with_columns(pl.col("resolved_by_ref").fill_null("sin_match")),
+        truth_col="clee_verdadero",
+        known_clees=known_oficiales,
+    )
+    metrics_i = compute_metrics(results_i)
+    logger.info(
+        f"[chain 1/2] Intermedio resuelto: precision={metrics_i['precision']:.4f} "
+        f"recall={metrics_i['recall']:.4f}"
+    )
+
+    # Identidad asignada en I -> clees oficiales reales de las filas de I
+    # que la portan. Si el target matchea esa identidad y su clee verdadero
+    # esta en la lista, el encadenamiento apunto al mismo negocio.
+    map_i = (
+        results_i.select(pl.col(MASTER_COLUMN).alias("__id_i"), "clee_verdadero")
+        .group_by("__id_i")
+        .agg(pl.col("clee_verdadero").unique().alias("clees_reales_i"))
+    )
+
+    # ---- Paso 2: target via I-resuelto, luego refs oficiales ----
+    df_t, truth_t = _load_masked(EVAL_DIR / "target.parquet")
+    via_label = f"via_{intermediate}"
+    logger.info(
+        f"[chain 2/2] Resolviendo target {manifest['target_period']} "
+        f"({df_t.height:,} filas): primero {via_label}, luego refs oficiales..."
+    )
+    kb_i = build_single_period_kb(df_i, master_column=MASTER_COLUMN)
+    del df_i
+    df_t = _propagate_and_attribute(df_t, kb_i, via_label)
+    del kb_i
+    for rp in refs_post:
+        if df_t[MASTER_COLUMN].is_null().sum() == 0:
+            break
+        df_ref = clean_contact_columns(pl.read_parquet(EVAL_DIR / f"ref_{rp}.parquet"))
+        kb = build_single_period_kb(df_ref, master_column="clee")
+        del df_ref
+        df_t = _propagate_and_attribute(df_t, kb, rp)
+        del kb
+    df_t = assign_new_clees(df_t, region_prefix="EVAL", master_column=MASTER_COLUMN)
+
+    # ---- Clasificacion chain-aware ----
+    # Universo evaluable: clees oficiales de I + refs posteriores = las 7
+    # referencias de la muestra (mismo universo que la corrida nearest).
+    universo = known_oficiales | set(truth_i["clee_verdadero"].to_list())
+
+    assigned = (
+        df_t.join(truth_t, on="id")
+        .with_columns(pl.col("resolved_by_ref").fill_null("sin_match"))
+        .join(map_i, left_on=MASTER_COLUMN, right_on="__id_i", how="left")
+    )
+
+    sin_identidad = pl.col(MASTER_COLUMN).str.starts_with("NEW_EVAL")
+    es_new_chain = pl.col(MASTER_COLUMN).str.starts_with("NEW_CHAIN")
+    es_via_i = pl.col("resolved_by_ref") == via_label
+    directo_ok = pl.col(MASTER_COLUMN) == pl.col("clee_verdadero")
+    mismo_negocio_i = (
+        pl.col("clees_reales_i").list.contains(pl.col("clee_verdadero")).fill_null(False)
+    )
+    evaluable = pl.col("clee_verdadero").is_in(sorted(universo))
+
+    results = (
+        assigned.with_columns(evaluable.alias("evaluable"))
+        .with_columns(
+            pl.when(pl.col("evaluable"))
+            .then(
+                pl.when(sin_identidad)
+                .then(pl.lit("falso_nuevo"))
+                .when(directo_ok)
+                .then(pl.lit("correcto"))
+                .when(es_new_chain & mismo_negocio_i)
+                .then(pl.lit("correcto_new_heredado"))
+                .when(es_via_i & mismo_negocio_i)
+                .then(pl.lit("falso_match_heredado"))
+                .otherwise(pl.lit("falso_match"))
+            )
+            .otherwise(
+                pl.when(sin_identidad)
+                .then(pl.lit("nuevo_correcto"))
+                .otherwise(pl.lit("match_espurio"))
+            )
+            .alias("categoria")
+        )
+        .select(
+            "id",
+            "clee_verdadero",
+            MASTER_COLUMN,
+            "evaluable",
+            "categoria",
+            "resolved_by_ref",
+            "codigo_act",
+            "cve_ent",
+            "cve_mun",
+        )
+    )
+    results.write_parquet(EVAL_DIR / "results_chain.parquet")
+
+    por_ref = {
+        str(key): _chain_metrics(group)
+        for (key,), group in sorted(
+            results.group_by("resolved_by_ref"), key=lambda kv: str(kv[0][0])
+        )
+    }
+    metrics = {
+        "manifest": manifest,
+        "intermediate": intermediate,
+        "evaluated_at": datetime.now().isoformat(),
+        "paso1_intermedio": metrics_i,
+        "paso2_target": {"global": _chain_metrics(results), "por_ref": por_ref},
+    }
+    (EVAL_DIR / "metrics_chain.json").write_text(json.dumps(metrics, indent=2))
+
+    g = metrics["paso2_target"]["global"]
+    logger.info(
+        f"✅ Chain completo: precision={g['precision']:.4f} recall={g['recall']:.4f} "
+        f"f1={g['f1']:.4f} (correcto_new_heredado="
+        f"{g['categorias']['correcto_new_heredado']:,}, falso_match_heredado="
+        f"{g['categorias']['falso_match_heredado']:,})"
+    )
+    logger.info(f"Salidas: {EVAL_DIR / 'results_chain.parquet'} y {EVAL_DIR / 'metrics_chain.json'}")
 
 
 if __name__ == "__main__":

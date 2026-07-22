@@ -30,6 +30,7 @@ env/
 data/bronze/*
 data/silver/*
 data/gold/*
+data/eval/*
 
 # Exception: Keep empty folder structure
 !data/models/.gitkeep

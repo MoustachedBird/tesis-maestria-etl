@@ -54,6 +54,15 @@ h3-backfill: ## Backfill H3 cells (h3_cell_9/h3_cell_5) in Silver
 reorganize-domain-ids: ## ONE-TIME: rebuild establecimientos con FKs por id (correr tras db-migrate)
 	$(PYTHON) scripts/reorganize_domain_ids.py
 
+eval-masked-clee-extract: ## Fase 7: extrae muestra de Silver (read-only) a data/eval/
+	$(PYTHON) scripts/evaluate_masked_clee.py extract $(ARGS)
+
+eval-masked-clee: ## Fase 7: evalua cascada con CLEE enmascarado (default nearest = produccion; ARGS="--ref-order newest" compara el orden legado)
+	$(PYTHON) scripts/evaluate_masked_clee.py evaluate $(ARGS)
+
+eval-masked-clee-chain: ## Fase 7: experimento dos saltos (target via intermedio resuelto probabilisticamente)
+	$(PYTHON) scripts/evaluate_masked_clee.py chain $(ARGS)
+
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry
 

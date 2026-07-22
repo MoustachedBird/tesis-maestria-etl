@@ -378,7 +378,8 @@ class CLEEResolver:
 
         For each target period P (no CLEE, newest-first):
           1. Load P from DuckDB (~3M rows, all clee_propagado_radio NULL)
-          2. For each already-resolved period R (newest-first):
+          2. For each already-resolved period R NEWER than P (nearest-first:
+             closest to P first; see docs/findings.md 2026-07-21):
              - Load R, build KB (scalar, ~6M rows max)
              - Run propagate_clees(P, KB_R) to assign matches
              - Free R from RAM
@@ -436,8 +437,18 @@ class CLEEResolver:
                     .alias(col)
                 )
 
-            # Sliding window: compare against each resolved period
-            for ref_period in resolved_periods:
+            # Ventana deslizante NEAREST-FIRST: solo referencias futuras al
+            # target (la propagacion va futuro -> pasado), de la mas CERCANA
+            # temporalmente a la mas lejana. Fase 7 (docs/findings.md,
+            # 2026-07-21) midio que la distancia temporal target-referencia
+            # domina la precision con los mismos umbrales: 95.9% nearest vs
+            # 71.3% newest (la referencia mas lejana acaparaba el 79% del
+            # volumen con ~65% de precision), y encadenar a traves de
+            # periodos resueltos probabilisticamente cuesta ~0.15 pts por
+            # salto — ordenes de magnitud menos que saltar años de distancia.
+            usable_refs = sorted(r for r in resolved_periods if r > target_period)
+
+            for ref_period in usable_refs:
                 # Count how many still need resolution
                 still_missing = df_target.filter(pl.col(col).is_null()).height
                 if still_missing == 0:

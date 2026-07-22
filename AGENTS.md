@@ -429,7 +429,7 @@ resolved_periods = [deterministic periods from Phase 1]  # e.g., 2021-2024
 FOR each target_period P in probabilistic_periods (newest-first):
     1. Load P from Silver DuckDB (all rows where clee_propagado_radio IS NULL)
 
-    2. FOR each ref_period R in resolved_periods (newest-first):
+    2. FOR each ref_period R in resolved_periods NEWER than P (nearest-first):
         a. If P has 0 remaining unresolved rows -> BREAK early
         b. Load R from DuckDB
         c. Build ephemeral KB from R  (build_single_period_kb)
@@ -446,6 +446,7 @@ FOR each target_period P in probabilistic_periods (newest-first):
 
 Key characteristics:
 - **Direction**: future-to-past (newest periods resolved first, propagated backward)
+- **Reference order**: nearest-first — for each target, references are tried from the temporally CLOSEST to the farthest. Fase 7 (docs/findings.md 2026-07-21) measured 95.9% precision nearest-first vs 71.3% newest-first with identical thresholds; chaining through probabilistically-resolved periods costs only ~0.15 pts per hop. Explicación integrada del diseño + experimentos: `docs/clee_propagation.md`
 - **Expanding reference**: after each target period resolves, it joins `resolved_periods`, so subsequent targets have more references
 - **One reference in RAM at a time**: peak RAM capped at ~5-8 GB by loading/discarding each reference individually
 - **Exhaustive comparison**: each target is compared against ALL resolved periods (not a fixed N-period window)
@@ -577,7 +578,7 @@ uv run python -m src_etl.main transform
 
 ### Tips
 
-- The sliding window processes periods **newest-first** (`ORDER BY period DESC`). This maximizes the chance of matching against data that already has INEGI-assigned CLEEs.
+- Target periods are processed **newest-first** (`ORDER BY period DESC`) so each resolved period feeds the next; within a target, references are tried **nearest-first** (temporal distance drives precision — Fase 7, docs/findings.md).
 - Peak RAM is controlled by loading only one reference period at a time (~5-8 GB). If RAM is a concern, monitor via `_count_unresolved()` progress logging.
 - The `--force` flag resets ALL `clee_propagado_radio` to NULL and re-runs from scratch. Use only when the matching algorithm changes or seed data is corrected.
 - Synthetic IDs (`NEW_*`) are stable within a single run but NOT across runs with `--force`. Do not use them as permanent foreign keys in downstream systems.
@@ -667,6 +668,88 @@ ORDER BY 1;
 Granularidad temporal: DENUE son fotos (1-2 cortes/año) y SESNSP es flujo
 mensual — el cruce se resuelve agregando en la consulta (p. ej. sumar
 carpetas del año o del semestre entre cortes DENUE), no en el esquema.
+Diseño completo del cruce (definiciones de supervivencia/mortalidad,
+query patrón negocio-intervalo, limitaciones): `docs/cruce_denue_sesnsp.md`.
+
+---
+
+## N3: Dimensión `entidades_economicas`
+
+Una fila por identidad de negocio resuelta (`clee_propagado_radio`), no
+por observación-periodo — la unidad de análisis de supervivencia/
+mortalidad de la tesis. Preparada en código (`loaders/entidades.py`,
+migración `b2c3d4e5f6a7`); **pendiente de aplicar** hasta que termine la
+re-resolución CLEE con el código actual (los ids `NEW_*` van a cambiar).
+
+- **Construcción**: `build_entidades_economicas(conn)` agrega
+  `establecimientos` por `clee_propagado_radio` — atributos del periodo
+  MÁS RECIENTE (desempate determinista por `id`), `primer_periodo`/
+  `ultimo_periodo`/`n_periodos` del rango observado,
+  `fecha_alta_date` = mínima conocida, `es_sintetica` = prefijo `NEW_`.
+- **Rebuild total siempre** (DROP + CREATE + INSERT transaccional): los
+  ids sintéticos no son estables entre corridas `--force`, así que la
+  dimensión NUNCA se actualiza incrementalmente — se reconstruye después
+  de cada re-resolución.
+- **Sin FKs a catálogos a propósito**: artefacto derivado de una tabla
+  que ya garantiza esos dominios; agregar FKs solo encarecería el
+  INSERT masivo sin aportar integridad nueva.
+- **Se construye en Silver** (no en Gold pese a que N3 originalmente lo
+  proponía ahí): `make load` la copia a Gold sin lógica adicional, igual
+  que el resto del esquema.
+
+```bash
+make build-entidades   # correr DESPUES de clee-resolution-radio --force
+# equivalente: uv run python -m src_etl.main build-entidades
+```
+
+Log del stage: `data/etl_entidades.log`. Tracking: job `entidades_build`
+en metadata (`process_tasks`).
+
+---
+
+## Fase 7: Evaluación con CLEE enmascarado (`scripts/evaluate_masked_clee.py`)
+
+Mide precision/recall de la cascada de matching usando el `clee` OFICIAL
+de INEGI como ground truth (no depende de `clee_propagado_*`, así que
+puede correrse antes o después de cualquier re-resolución). Protocolo
+completo diseñado en `todo.md` sección "Protocolo de evaluación".
+
+- **Idea**: toma un periodo con CLEE oficial al 100% (default `05_2021`,
+  el más viejo — análogo fiel a producción porque solo tiene referencias
+  futuras), lo ENMASCARA, lo resuelve con la misma maquinaria de
+  producción (`build_single_period_kb`, `propagate_clees_radio`,
+  ventana nearest-first; `--ref-order newest` reproduce el orden legado
+  para comparación) contra los demás periodos oficiales, y compara
+  contra la verdad.
+- **Partición del resultado en 5 categorías** (la pieza clave para no
+  inflar métricas): evaluables (la verdad SÍ existe en alguna
+  referencia) → `correcto`/`falso_match`/`falso_nuevo`; no-evaluables
+  (la verdad NO existe en ninguna referencia, comportamiento correcto es
+  NEW_*) → `nuevo_correcto`/`match_espurio`. `match_espurio` es la
+  métrica que radio/H3 no pueden darse solas: cuánto "inventa" la
+  cascada cuando no debería matchear nada.
+- **100% aislado de Silver real**: `extract` lee read-only a parquets en
+  `data/eval/fase7_masked_clee/`; `evaluate` trabaja solo sobre esos
+  parquets, nunca abre Silver en modo escritura.
+
+```bash
+make eval-masked-clee-extract   # lectura Silver -> parquets
+make eval-masked-clee           # nearest-first (produccion) -> *_nearest
+make eval-masked-clee ARGS="--ref-order newest"   # orden legado, para comparar
+make eval-masked-clee-chain     # dos saltos: target via intermedio resuelto
+```
+
+Salidas en `data/eval/fase7_masked_clee/`: `results*.parquet` (fila por
+target con su categoría y qué referencia la resolvió) + `metrics*.json`
+(global + segmentado por entidad, sector SCIAN, referencia). El sufijo
+del archivo es el orden (`metrics.json` = newest legado,
+`metrics_nearest.json` = producción, `metrics_chain.json` = dos saltos).
+Log: `data/etl_fase7_eval.log`.
+
+Nota: la atribución `resolved_by_ref` se hace por columnas (no por
+posición) porque `propagate_clees_radio` devuelve las filas reordenadas
+(resueltas primero) — una máscara posicional pre/post se desalinea
+(bug corregido 2026-07-21; ver `docs/findings.md`).
 
 ---
 
