@@ -54,6 +54,28 @@ provienen de encuestas: cualquier campo puede venir vacío o faltar en un
 periodo completo — todo código de matching debe tolerarlo
 (`fill_null("")`, columnas ausentes → `""`).
 
+### Regla de corridas largas — SIEMPRE `caffeinate`
+
+**Todo comando del pipeline con tiempo de ejecución largo (ingest masivo,
+normalize-dates, resolución CLEE, build-entidades, load) se lanza con
+`caffeinate -dims` antepuesto:**
+
+```bash
+caffeinate -dims make transform ARGS="..."
+caffeinate -dims make clee-resolution-radio ARGS="..."
+```
+
+Razón (incidente 2026-07-23): el rebuild de Silver corrió 27.5 horas y
+murió con `SIGBUS` (stack-guard violation dentro de DuckDB nativo) **2
+segundos después de que la Mac despertó de reposo** — el ciclo sleep/wake
+de macOS corrompe procesos con I/O intensivo mapeado en memoria. Faltaban
+51 archivos de 943. `caffeinate -dims` impide reposo del sistema y del
+disco mientras el comando vive; alternativa: "Evitar reposo automático"
+en Ajustes → Batería durante el rebuild. Recuperación: DuckDB commitea
+por archivo, así que tras un crash se reanuda incremental (SIN `--force`,
+que dropearía la tabla) — pero verificar en metadata que los pendientes
+no tengan SUCCESS viejos que el incremental saltaría.
+
 ### Reglas operativas (de las auditorías 2026-07-17)
 
 - **Conexiones**: toda conexión nueva a Silver/Gold usa
