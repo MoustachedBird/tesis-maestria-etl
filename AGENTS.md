@@ -65,16 +65,23 @@ caffeinate -dims make transform ARGS="..."
 caffeinate -dims make clee-resolution-radio ARGS="..."
 ```
 
-Razón (incidente 2026-07-23): el rebuild de Silver corrió 27.5 horas y
-murió con `SIGBUS` (stack-guard violation dentro de DuckDB nativo) **2
-segundos después de que la Mac despertó de reposo** — el ciclo sleep/wake
-de macOS corrompe procesos con I/O intensivo mapeado en memoria. Faltaban
-51 archivos de 943. `caffeinate -dims` impide reposo del sistema y del
-disco mientras el comando vive; alternativa: "Evitar reposo automático"
-en Ajustes → Batería durante el rebuild. Recuperación: DuckDB commitea
-por archivo, así que tras un crash se reanuda incremental (SIN `--force`,
-que dropearía la tabla) — pero verificar en metadata que los pendientes
-no tengan SUCCESS viejos que el incremental saltaría.
+Razón: las corridas duran horas/días y un reposo a medio camino las
+interrumpe. `caffeinate -dims` impide el reposo del sistema y del disco
+mientras el comando vive; alternativa: "Evitar reposo automático" en
+Ajustes → Batería.
+
+**Memoria en ingest masivo (incidente 2026-07-23):** el rebuild murió dos
+veces con `SIGBUS` (heap over-read dentro de DuckDB 1.4.3, mismo stack).
+El disparador NO fue el reposo: con `establecimientos` en ~28GB, el
+índice PK (ART sobre `id` VARCHAR) + buffers de commit ya no caben en
+`DUCKDB_MEMORY_LIMIT=8GB` — todos los INSERT fallaban con "could not
+allocate block (7.4/7.4 GiB)" y bajo esa presión sostenida DuckDB acaba
+en la ruta con el bug. Mitigación: subir `DUCKDB_MEMORY_LIMIT` en `.env`
+(12GB+) mientras la tabla es grande; si reaparecen OOMs, subir más o
+bajar `DUCKDB_THREADS`. Recuperación tras crash: DuckDB commitea por
+archivo — reanudar incremental (SIN `--force`, que dropearía la tabla) y
+verificar en metadata que los pendientes no tengan SUCCESS viejos que el
+incremental saltaría.
 
 ### Reglas operativas (de las auditorías 2026-07-17)
 
