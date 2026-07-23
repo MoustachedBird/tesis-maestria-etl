@@ -70,6 +70,10 @@ interrumpe. `caffeinate -dims` impide el reposo del sistema y del disco
 mientras el comando vive; alternativa: "Evitar reposo automático" en
 Ajustes → Batería.
 
+**Los índices no se tocan a mano.** El ingest y la resolución CLEE los
+suspenden y restituyen solos (ver "Índices" en Database); no hay comando
+manual precisamente para que la base no dependa de que alguien lo recuerde.
+
 **Memoria en ingest masivo (incidente 2026-07-23):** el rebuild murió dos
 veces con `SIGBUS` (heap over-read dentro de DuckDB 1.4.3, mismo stack).
 El disparador NO fue el reposo: con `establecimientos` en ~28GB, el
@@ -101,36 +105,37 @@ incremental saltaría.
 
 ---
 
-## Fixing Missing Localities (FK Violations)
+## Cortes nuevos de INEGI: catálogos que se quedan cortos
 
-When `make transform` fails with a foreign key constraint error like:
+Cada corte DENUE puede traer localidades, códigos SCIAN o etiquetas de
+dominio que no existían. **El pipeline ahora lo dice con nombre y apellido**
+(ver "Fail-fast" en la sección Database) en vez de fallar con una violación
+de FK que no distingue el nivel:
+
 ```
-Constraint Error: Violates foreign key constraint because key
-"cve_ent: XX, cve_mun: XXX, cve_loc: XXXX" does not exist in the referenced table
+❌ localidad fuera del catalogo denue_localidades: [('21', '119', '0057')]
+   (agregar al seed data/seeds y re-correr).
 ```
 
-Follow this procedure:
+### Procedimiento
 
-1. **Find the locality name** from the CSV that failed:
-   - Open the failing ZIP, read the data CSV (under `conjunto_de_datos/`)
-   - Filter for the missing `(cve_ent, cve_mun, cve_loc)` combination
-   - Extract the `localidad` column value
+**Un valor suelto**: agregarlo al parquet correspondiente en `data/seeds/`
+(nombres de localidad SIEMPRE en MAYÚSCULAS, ordenado por su PK) y correr
+`make db-migrate`. No se toca código.
 
-2. **Insert into Silver DuckDB** (do NOT delete/truncate anything):
-   ```sql
-   INSERT INTO denue_localidades (cve_ent, cve_mun, cve_loc, localidad)
-   VALUES ('XX', 'XXX', 'XXXX', 'NOMBRE EN MAYÚSCULAS');
-   ```
-   If DuckDB accepts the INSERT (no PK violation), the locality is valid.
+**Un corte completo** (decenas o cientos de altas): escanear los CSV del
+periodo y anexar de golpe las que falten. Caso real: el corte **2026-05
+trajo 1,060 localidades nuevas**, y sus 24 archivos fallaban todos. El
+escaneo lee cada ZIP, extrae `(cve_ent, cve_mun, cve_loc, localidad)`,
+normaliza (pad de ceros, mayúsculas) y hace un anti-join contra el seed.
 
-3. **Add to seed parquet** (`data/seeds/seed_localidades.parquet`):
-   - Read the parquet with Polars
-   - Append the new row (locality name in UPPERCASE)
-   - Write back, sorted by `(cve_ent, cve_mun, cve_loc)`
+**Etiquetas de dominio renombradas**: si INEGI cambia el nombre de un valor
+que ya existe, va como alias en `DOMAIN_VALUE_ALIASES`, NO como fila nueva
+del catálogo (evita dos ids para un concepto). Caso real: `tipo_asent`
+`"OTRO"` ≡ `"OTRA (ESPECIFICAR)"` desde 2026-05.
 
-4. **Re-run** `make transform` to continue processing.
-
-**Important:** All locality names in the seed must be UPPERCASE. Always apply `.upper()` before inserting.
+Un seed mal formado (PK duplicada, NULL en columna obligatoria) se detiene
+en `make db-migrate` con el archivo y los valores ofensores.
 
 ---
 
@@ -810,7 +815,7 @@ etl-core/
 │   ├── db/                        # Database layer
 │   │   ├── models.py              # SQLAlchemy ORM models (5 tables, 40 cols)
 │   │   ├── database.py            # Engine/session management
-│   │   ├── enums.py               # DENUE enums (TipoVial, PersonalOcupado, etc.)
+│   │   ├── indexes.py             # Suspensión/restitución automática de índices
 │   │   └── seed_loader.py         # Seed orchestrator (delegates to loaders/)
 │   ├── extractors/                # Domain-specific data extraction
 │   │   ├── denue.py               # DENUE orchestrator (Selenium + parallel)
@@ -923,9 +928,8 @@ make pipeline-force              # Full pipeline with force mode
 # Database
 make db-migrate                  # Run pending Alembic migrations
 make db-downgrade                # Rollback last migration
-make db-seed                     # Reload seed data (idempotent)
 make db-reset                    # Full reset (destructive, asks confirmation)
-make db-status                   # Show migration status
+make db-status                   # Migration status + index health
 
 # Metadata
 make metadata-query              # Query recent job runs
@@ -1017,46 +1021,105 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 | `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,478 |
 | `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 39,140 |
 
+### Los seeds parquet son la fuente de verdad de los catálogos
+
+**Regla:** el contenido de todo catálogo vive en `data/seeds/*.parquet`
+(versionados en git) y en ningún otro lado. NO hay enums de Python que lo
+dupliquen — `src_etl/db/enums.py` se eliminó justamente por eso: los mismos
+valores existían como enum, como parquet generado desde el enum, y como
+lista `DOMAIN_CATALOGS` contra la que validaba el ingest, así que dar de
+alta una etiqueta nueva de INEGI obligaba a tocar código.
+
+**Dar de alta un valor nuevo = editar el parquet y correr `make db-migrate`.
+No se toca código.** Aplica a los 4 catálogos de dominio, SCIAN, los 3
+niveles de geografía y los estratos de personal (cuyas cotas
+`empleados_min/max` y `categoria` también son columnas del parquet, no
+métodos de Python).
+
+Los ids son surrogate y **append-only**: millones de filas los referencian
+por FK, así que un valor nuevo se agrega al final y nunca se reordena.
+
+#### Validación de los seeds (corre en la migración)
+
+`loaders/seed_validation.py:validate_seed()` comprueba cada parquet contra
+las restricciones **declaradas en el modelo ORM** (no en una lista aparte:
+no pueden divergir) antes de insertar. Detecta PK duplicada, valor repetido
+en una columna UNIQUE, NULL donde la tabla exige NOT NULL, columna
+obligatoria ausente, columna que no existe en la tabla, y archivo vacío. El
+error nombra archivo, tabla, columnas y ejemplos de los valores ofensores.
+
+Sin esto un duplicado desaparecía en silencio, porque la siembra usa
+`INSERT OR IGNORE`.
+
+#### Sinónimos de dominio
+
+Cuando INEGI cambia la etiqueta de un valor que ya existe, se declara como
+alias en `denue_schema.DOMAIN_VALUE_ALIASES` en vez de agregar una fila
+nueva al catálogo (dos ids para un solo concepto). Caso real: el corte
+2026-05 empezó a usar `tipo_asent = "OTRO"` para lo que el catálogo llama
+`"OTRA (ESPECIFICAR)"`. El alias se aplica en la limpieza, antes de validar.
+
 ### Relational schema: real PK/FK links by surrogate ids
 
-The DuckDB ENUM column types that this schema once used were dropped in
-favour of catalog tables (user decision 2026-07-17; la cadena de
-migraciones se consolidó después para crear ya el diseño final): the domain catalogs carry `id INTEGER PRIMARY KEY` (the value's
-1-based position in its enum — see `enums.domain_id()`; enums are
-**append-only** because millions of rows reference these ids), the label as
-UNIQUE, and a `descripcion` column with the meaning of each value.
-Seeds are materialized as parquet files in `data/seeds/`
-(`seed_tipos_*.parquet`, `seed_estratos_personal.parquet`, same pattern as
-geography/SCIAN, tracked in git); the enums + descriptions in
-`loaders/dominios.py` GENERATE those files and regenerate them on drift —
-loaders always load the DB from the parquet.
+Los catálogos de dominio llevan `id INTEGER PRIMARY KEY`, la etiqueta como
+UNIQUE y una columna `descripcion` con el significado de cada valor.
 
-`establecimientos` links with **real FOREIGN KEYs (8 total)**:
+`establecimientos` enlaza con **FOREIGN KEYs reales (8 en total)**:
 `tipo_vial_id`, `tipo_asent_id`, `tipounieco_id`, `per_ocu_id` →
-`denue_tipos_*`/`denue_estratos_personal(id)`; `codigo_act` → SCIAN
-catalog; plus the 3 composite geography FKs. Canonical DDL:
-`loaders.denue.ESTABLECIMIENTOS_DDL` (same schema as the ORM model).
+`denue_tipos_*`/`denue_estratos_personal(id)`; `codigo_act` → catálogo
+SCIAN; más los 3 FKs compuestos de geografía. DDL canónico:
+`loaders.denue.ESTABLECIMIENTOS_DDL` (mismo esquema que el modelo ORM).
 
-Key implications:
-- **Ingest**: CSVs bring labels; `EstablecimientoWriter.upsert()` converts
-  label → id via LEFT JOIN with the catalogs (`DOMAIN_ID_COLUMNS`).
-  `validate_integrity()` fail-fasts out-of-domain labels BEFORE insert, and
-  `_validate_codigo_act()` catches new SCIAN codes with an actionable error
-  (update the catalog seed) instead of a cryptic FK violation.
-- **Reads**: labels come via JOIN (e.g. `SILVER_READ_QUERY` resolves
-  `per_ocu`/`tipo_asent` under their old column names, so the CLEE matching
-  pipeline is unchanged). ORM relationships (`actividad`, `estrato`,
-  `tipo_vialidad`, `tipo_asentamiento`, `tipo_unidad`, `entidad`,
-  `municipio`, `localidad`) are FK-driven.
-- **Cost accepted**: FKs imply per-row lookups/index maintenance on massive
-  DuckDB writes; the user chose physical referential integrity.
-- **DuckDB cannot `ALTER TABLE ... ADD CONSTRAINT`**: FKs only exist on
-  tables created with them. New DBs are born with the final DDL; converting
-  a populated Silver is the ONE-TIME script
-  `scripts/reorganize_domain_ids.py` (`make reorganize-domain-ids`), which
-  rebuilds the fact table (label→id joins, parity checks, swap, index
-  recreation). Run order on the real Silver: `make db-migrate` → 
-  `make reorganize-domain-ids`.
+#### Fail-fast: todo linkeo se valida contra la tabla, antes del INSERT
+
+`EstablecimientoWriter.upsert()` verifica que cada valor del negocio exista
+en su catálogo y falla con un mensaje accionable, en vez de dejar que
+aparezca como violación de FK (que no dice qué nivel falló):
+
+| Validación | Qué revisa | Contra |
+|---|---|---|
+| `validate_integrity()` | `tipo_vial`, `tipo_asent`, `tipounieco`, `per_ocu` | las tablas de catálogo, leídas de la BD |
+| `_validate_codigo_act()` | `codigo_act` | `denue_actividades_economicas` |
+| `_validate_geografia()` | `cve_ent`, `(cve_ent,cve_mun)`, `(cve_ent,cve_mun,cve_loc)` | entidades / municipios / localidades |
+
+Los valores permitidos **se leen de la BD**, que es exactamente lo que
+exigen los FKs — no de una copia en Python.
+
+Otras implicaciones:
+- **Ingest**: los CSV traen etiquetas; `upsert()` convierte etiqueta → id
+  con LEFT JOIN contra los catálogos (`DOMAIN_ID_COLUMNS`).
+- **Lecturas**: las etiquetas vuelven por JOIN (p.ej. `SILVER_READ_QUERY`
+  resuelve `per_ocu`/`tipo_asent` bajo sus nombres viejos, así el pipeline
+  de matching CLEE no cambia). Los relationships del ORM (`actividad`,
+  `estrato`, `tipo_vialidad`, `tipo_asentamiento`, `tipo_unidad`,
+  `entidad`, `municipio`, `localidad`) son FK-driven.
+- **DuckDB no soporta `ALTER TABLE ... ADD CONSTRAINT`**: los FKs solo
+  existen en tablas creadas con ellos. Las bases nuevas nacen con el DDL
+  final desde la migración base.
+
+### Índices: se gestionan solos, no hay comando manual
+
+Los índices sirven para **consultar, no para cargar**: DuckDB mantiene cada
+índice ART fila por fila, lo que hace las escrituras masivas órdenes de
+magnitud más lentas (medido en este repo con `ix_estab_h3_9`). Pero
+soltarlos a mano antes de cada carga deja la base a merced de que alguien lo
+recuerde.
+
+Por eso **no existe ningún comando de índices**. Las dos etapas que escriben
+en masa —el ingest y la resolución CLEE— envuelven su trabajo en
+`db/indexes.py:suspended_indexes()`, que los suelta al entrar y los recrea
+en un `finally`, así que vuelven también si la etapa falla con excepción.
+
+- El conjunto de índices se **deriva de `Base.metadata`**, no de SQL suelto:
+  no puede divergir de la migración que los crea.
+- Si el proceso muere de golpe (kill -9, corte de luz) quedan ausentes: la
+  base sigue siendo **correcta**, solo consulta más lento, y la siguiente
+  corrida los restituye porque `ensure_indexes()` es idempotente.
+- `make db-status` reporta cuántos hay presentes y cuáles faltan.
+
+Contexto de por qué importa: una consulta de trayectoria sobre 77M filas
+**sin índices** tomó 83 ms (DuckDB es columnar, escanea rápido); mantener
+16 índices durante 86M de INSERTs cuesta horas.
 
 ### Establecimiento (43 columns)
 
@@ -1117,32 +1180,54 @@ DUCKDB_MEMORY_LIMIT=16GB
 
 | Backend | Migrations | Use Case |
 |---------|-----------|----------|
-| DuckDB | `init_db()` (create_all) | Development, Analytics |
+| DuckDB | Alembic | Development, Analytics |
 | PostgreSQL | Alembic | Production, Multi-user |
 
-**DuckDB limitation:** Does not support Alembic autogenerate or foreign keys in ETL patterns. Use application-level integrity.
+### Migraciones: cadena consolidada, sin pasos intermedios
+
+**Estándar del proyecto: la base se crea desde cero.** La cadena son
+**3 migraciones** que producen el diseño final directamente, agrupadas por
+dominio y no por historia:
+
+| Revisión | Crea |
+|---|---|
+| `a1000denue` | Catálogos (geografía, SCIAN con jerarquía, los 4 de dominio, estratos) + `establecimientos` con FKs por id, índices y nombres definitivos. **Siembra los catálogos desde los parquet.** |
+| `a2000sesnsp` | `sesnsp_delitos` + `sesnsp_incidencia_municipal` |
+| `a3000entidades` | `entidades_economicas` (dimensión N3, nace vacía) |
+
+Antes eran 11, con rodeos que existían solo por historia: se creaban tipos
+ENUM de DuckDB para después convertirlos en tablas de catálogo y luego
+cambiar etiquetas por ids; se creaba `clee_master` para renombrarlo a
+`clee_propagado_radio`; se creaba el catálogo SCIAN para arreglarle la PK
+después. Con ellos se fue la maquinaria que esas conversiones exigían
+(capturar y recrear índices, commits intermedios a nivel DBAPI, tipos ENUM
+fantasma).
+
+El esquema se genera desde `src_etl.db.models` (metadata del ORM), así que
+**la migración no puede desincronizarse del modelo**.
+
+**Al consolidar se verificó** que la cadena nueva produce exactamente el
+mismo esquema que la histórica: tablas, columnas con tipo y nulabilidad,
+PKs, UNIQUEs, FKs, índices y filas sembradas. La comparación destapó que el
+modelo declaraba `latitud`/`longitud` como `Float` (precisión simple)
+mientras el DDL canónico usaba `DOUBLE` — es decir, `create_all` construía
+una tabla que producción nunca tuvo. Corregido a `Double`.
 
 ### Seed Loading
 
-Loading order (FK hierarchy): `entidades` -> `municipios` -> `localidades` -> `actividades_economicas`
+Los seeds se cargan **durante `make db-migrate`**, que es el único lugar
+donde ocurre (no hay `make db-seed`; se eliminó). Orden por jerarquía de
+FKs: `entidades` → `municipios` → `localidades` → `actividades_economicas`
+→ catálogos de dominio → estratos.
 
 ```bash
-make db-migrate          # Initial setup (creates schema + loads seeds)
-make db-seed             # Reload seeds (truncate-and-reload, idempotent)
+make db-migrate          # crea el esquema Y siembra los catálogos
+make db-status           # revisión: migración aplicada + salud de índices
 ```
 
-Verification:
-```bash
-uv run python -c "
-import duckdb
-from src_etl.core.config import settings
-conn = duckdb.connect(str(settings.GOLD_DUCKDB_PATH))
-for t in ['denue_entidades','denue_municipios','denue_localidades','denue_actividades_economicas']:
-    print(f'{t}: {conn.execute(f\"SELECT COUNT(*) FROM {t}\").fetchone()[0]}')
-conn.close()
-"
-# Expected: 32, 2478, 39140, 1127
-```
+Los loaders **no crean tablas ni toleran su ausencia**: si la tabla no
+existe es que no se corrió la migración, y eso debe fallar, no repararse a
+escondidas.
 
 ### API Endpoints
 
