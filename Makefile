@@ -1,4 +1,4 @@
-.PHONY: help setup extract transform load clee-resolution-radio clee-resolution-h3 h3-backfill reorganize-domain-ids pipeline clean db-migrate db-downgrade db-seed db-reset test
+.PHONY: help setup extract transform load clee-resolution-radio clee-resolution-h3 h3-backfill reorganize-domain-ids pipeline clean db-migrate db-downgrade db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
@@ -117,12 +117,6 @@ db-downgrade: ## Rollback last migration
 	@echo "Rolling back last migration..."
 	$(ALEMBIC) downgrade -1
 	@echo "Downgrade completed"
-
-db-seed: ## Load seeds (catalog data)
-	@echo "Loading seed data..."
-	$(ALEMBIC) downgrade cbc954c59583
-	$(ALEMBIC) upgrade head
-	@echo "Seed data loaded"
 
 db-reset: ## Full database reset (schema + seeds)
 	@echo "Resetting database..."

@@ -1,9 +1,9 @@
 """Tests de los catalogos de dominio y su linkeo por FKs reales.
 
 Cubre la normalizacion a esquema relacional por ids:
-  - Catalogos con surrogate id (posicion 1-based en su enum), label UNIQUE
-    y columna descripcion poblada; contenido derivado de los enums.
-  - `domain_id()` coincide con los ids sembrados.
+  - Catalogos con surrogate id, label UNIQUE y descripcion poblada;
+    contenido leido de los parquet de data/seeds.
+  - Los ids salen del seed parquet (fuente de verdad), no de enums.
   - Relationships FK-driven en Establecimiento navegan a los catalogos.
   - Los FOREIGN KEYs son reales: DuckDB rechaza ids fuera de catalogo.
   - validate_integrity() sigue dando fail-fast por labels en el ingest.
@@ -17,7 +17,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from src_etl.db.base import Base
-from src_etl.db.enums import PersonalOcupado, TipoUnidadEconomica, TipoVial, domain_id
 from src_etl.db.models import (
     ActividadEconomica,
     Establecimiento,
@@ -35,9 +34,15 @@ from src_etl.loaders.estratos import build_rows as build_estrato_rows
 from src_etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
 
 
+def _seed_id(table: str, label_col: str, label: str) -> int:
+    """Id de un valor de catalogo segun el seed parquet (fuente de verdad)."""
+    rows = build_estrato_rows() if table == "denue_estratos_personal" else build_rows()[table]
+    return next(r["id"] for r in rows if r[label_col] == label)
+
+
 @pytest.mark.unit
 class TestDominioSeeds:
-    """Los catalogos derivan de los enums: ids deterministas + descripcion."""
+    """Los catalogos salen del parquet: ids unicos + descripcion poblada."""
 
     def test_row_counts(self):
         rows = build_rows()
@@ -45,14 +50,15 @@ class TestDominioSeeds:
         assert len(rows["denue_tipos_asentamiento"]) == 45
         assert len(rows["denue_tipos_unidad_economica"]) == 3
 
-    def test_ids_are_enum_positions(self):
-        """domain_id() debe coincidir EXACTO con los ids sembrados."""
-        rows = build_rows()
-        for row, member in zip(rows["denue_tipos_vialidad"], TipoVial):
-            assert row["id"] == domain_id(member)
-            assert row["tipo_vial"] == member.value
-        assert domain_id(TipoUnidadEconomica.FIJO) == 2
-        assert domain_id(PersonalOcupado.PERSONAS_11_30) == 4
+    def test_ids_are_unique_and_stable(self):
+        """Los ids salen del parquet y son unicos: los FKs de millones de
+        filas dependen de ellos, por eso el catalogo es append-only."""
+        for table, rows in build_rows().items():
+            ids = [r["id"] for r in rows]
+            assert len(ids) == len(set(ids)), f"ids duplicados en {table}"
+            assert all(isinstance(i, int) and i > 0 for i in ids)
+        estratos = build_estrato_rows()
+        assert [r["id"] for r in estratos] == sorted({r["id"] for r in estratos})
 
     def test_domain_id_columns_cover_every_catalog(self):
         """DOMAIN_ID_COLUMNS es lo que usa la validacion del ingest para
@@ -110,10 +116,10 @@ def linked_session(tmp_path):
                 id="test-estab-1",
                 nom_estab="CAFE TEST",
                 codigo_act="722515",
-                per_ocu_id=domain_id(PersonalOcupado.PERSONAS_11_30),
-                tipo_vial_id=domain_id(TipoVial.CALLE),
-                tipo_asent_id=8,  # COLONIA (posicion 8 en TipoAsentamiento)
-                tipounieco_id=domain_id(TipoUnidadEconomica.FIJO),
+                per_ocu_id=_seed_id("denue_estratos_personal", "per_ocu", "11 A 30 PERSONAS"),
+                tipo_vial_id=_seed_id("denue_tipos_vialidad", "tipo_vial", "CALLE"),
+                tipo_asent_id=_seed_id("denue_tipos_asentamiento", "tipo_asent", "COLONIA"),
+                tipounieco_id=_seed_id("denue_tipos_unidad_economica", "tipounieco", "FIJO"),
                 period=date(2024, 11, 1),
             )
         )
@@ -180,19 +186,31 @@ class TestIngestDomainGuard:
     """validate_integrity() sigue siendo el fail-fast por labels del ingest."""
 
     def _conn_with_catalogs(self, tmp_path):
-        """Writer + conexion con los catalogos de dominio ya sembrados.
+        """Writer + conexion con los catalogos creados y sembrados.
 
-        La validacion ahora consulta la BD, asi que el guard necesita las
-        tablas presentes (seeds generados en tmp_path, sin tocar los del
-        repo)."""
+        Las tablas las crea el modelo (igual que la migracion) y las filas
+        salen de los seeds parquet del repo, que son la fuente de verdad.
+        """
+        import duckdb
+
+        from src_etl.db.base import Base
+        from src_etl.db.models import Establecimiento  # noqa: F401
         from src_etl.loaders.denue import EstablecimientoWriter
+        from src_etl.loaders.dominios import TABLES as DOM_TABLES
         from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
+        from src_etl.loaders.estratos import TABLE_NAME as EST_TABLE
         from src_etl.loaders.estratos import load_seeds as load_estratos_seeds
 
-        writer = EstablecimientoWriter(tmp_path / "guard.duckdb")
-        conn = writer._get_connection()
-        load_dominios_seeds(conn, tmp_path)
-        load_estratos_seeds(conn, tmp_path)
+        db = tmp_path / "guard.duckdb"
+        engine = create_engine(f"duckdb:///{db}")
+        names = [t for t, *_ in DOM_TABLES] + [EST_TABLE]
+        Base.metadata.create_all(engine, tables=[Base.metadata.tables[n] for n in names])
+        engine.dispose()
+
+        writer = EstablecimientoWriter(db)
+        conn = duckdb.connect(str(db))
+        load_dominios_seeds(conn)
+        load_estratos_seeds(conn)
         return writer, conn
 
     def test_rejects_out_of_domain_value(self, tmp_path):
@@ -252,47 +270,31 @@ class TestDomainValueAliases:
 
 @pytest.mark.unit
 class TestSeedParquets:
-    """Los seeds se materializan como parquet (patron geografia/SCIAN); el
-    ARCHIVO manda: los enums solo hacen el bootstrap inicial."""
+    """Los parquet de data/seeds son la fuente de verdad del catalogo."""
 
-    def test_parquets_generated_and_match_enums(self, tmp_path):
-        from src_etl.loaders.dominios import ensure_seed_parquets
-        from src_etl.loaders.estratos import ensure_seed_parquet
+    def test_seed_files_exist_and_are_versioned(self):
+        from src_etl.loaders.dominios import TABLES, seed_path
+        from src_etl.loaders.estratos import seed_path as estrato_seed_path
 
-        paths = ensure_seed_parquets(tmp_path)
-        assert {p.name for p in paths.values()} == {
-            "seed_tipos_vialidad.parquet",
-            "seed_tipos_asentamiento.parquet",
-            "seed_tipos_unidad_economica.parquet",
-        }
-        for table, path in paths.items():
-            assert pl.read_parquet(path).to_dicts() == build_rows()[table]
+        for table, *_ in TABLES:
+            assert seed_path(table).exists()
+        assert estrato_seed_path().exists()
 
-        path_est = ensure_seed_parquet(tmp_path)
-        assert path_est.name == "seed_estratos_personal.parquet"
-        assert pl.read_parquet(path_est).to_dicts() == build_estrato_rows()
+    def test_missing_seed_fails_loudly(self, tmp_path):
+        """Sin parquet no hay dominio: debe fallar claro, no silencioso."""
+        from src_etl.loaders.dominios import seed_path
 
-    def test_existing_parquet_is_never_overwritten(self, tmp_path):
-        """El parquet es la fuente de verdad: un valor agregado a mano
-        sobrevive, para poder dar de alta dominios nuevos sin tocar codigo."""
-        from src_etl.loaders.dominios import SEED_FILES, ensure_seed_parquets
+        with pytest.raises(FileNotFoundError, match="Seed requerido"):
+            seed_path("denue_tipos_vialidad", tmp_path)
 
-        ensure_seed_parquets(tmp_path)
-        path = tmp_path / SEED_FILES["denue_tipos_asentamiento"]
-        extended = pl.concat(
-            [
-                pl.read_parquet(path),
-                pl.DataFrame(
-                    {"id": [999], "tipo_asent": ["NUEVO"], "descripcion": ["corte nuevo"]}
-                ),
-            ]
-        )
-        extended.write_parquet(path)
+    def test_rows_come_from_the_parquet(self):
+        """build_rows refleja el archivo, sin lista paralela en Python."""
+        import polars as pl
 
-        ensure_seed_parquets(tmp_path)
-        after = pl.read_parquet(path)
-        assert after.height == extended.height
-        assert "NUEVO" in after["tipo_asent"].to_list()
+        from src_etl.loaders.dominios import seed_path
+
+        rows = build_rows()["denue_tipos_asentamiento"]
+        assert rows == pl.read_parquet(seed_path("denue_tipos_asentamiento")).to_dicts()
 
 
 @pytest.mark.unit

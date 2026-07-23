@@ -11,6 +11,8 @@ from pathlib import Path
 import polars as pl
 from sqlalchemy import Connection, text
 
+from src_etl.loaders.seed_validation import validate_seed
+
 logger = logging.getLogger(__name__)
 
 # Seed file -> table mappings in FK dependency order
@@ -89,10 +91,8 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
         if not seed_path.exists():
             raise FileNotFoundError(f"Required seed file not found: {seed_path}")
 
-        row_count = pl.scan_parquet(seed_path).select(pl.len()).collect().item()
-        if row_count == 0:
-            raise ValueError(f"Seed file '{file_name}' has 0 records")
-
+        df = validate_seed(pl.read_parquet(seed_path), table, str(seed_path))
+        row_count = df.height
         logger.info(f"Seed validated: {file_name} ({row_count:,} records)")
 
         inserted = conn.execute(
@@ -128,9 +128,7 @@ def load_seeds_sqlalchemy(
         if not seed_path.exists():
             raise FileNotFoundError(f"Seed file not found: {seed_path}")
 
-        df = pl.read_parquet(seed_path)
-        if len(df) == 0:
-            continue
+        df = validate_seed(pl.read_parquet(seed_path), table, str(seed_path))
 
         if truncate:
             connection.execute(text(f"DELETE FROM {table}"))

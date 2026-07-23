@@ -85,12 +85,12 @@ def seed_catalog_tables(
         scian_stats = load_scian(connection, seeds_dir)
         stats.update(scian_stats)
 
-        # 3. Personnel strata (parquet generado desde el enum PersonalOcupado)
+        # 3. Personnel strata (desde data/seeds/seed_estratos_personal.parquet)
         print("\n  Personnel strata catalog...")
         estratos_stats = load_estratos(connection, seeds_dir)
         stats.update(estratos_stats)
 
-        # 4. Domain-type catalogs (parquet generados desde los enums)
+        # 4. Domain-type catalogs (desde los parquet de data/seeds)
         print("\n  Domain-type catalogs (vialidad/asentamiento/unidad)...")
         dominios_stats = load_dominios(connection, seeds_dir)
         stats.update(dominios_stats)

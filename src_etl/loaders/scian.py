@@ -11,6 +11,8 @@ from pathlib import Path
 import polars as pl
 from sqlalchemy import Connection, text
 
+from src_etl.loaders.seed_validation import validate_seed
+
 logger = logging.getLogger(__name__)
 
 # Seed file -> table mapping
@@ -75,10 +77,10 @@ def load_seeds(conn, seeds_dir: Path, force: bool = False) -> dict[str, int]:
     if not seed_path.exists():
         raise FileNotFoundError(f"Required seed file not found: {seed_path}")
 
-    row_count = pl.scan_parquet(seed_path).select(pl.len()).collect().item()
-    if row_count == 0:
-        raise ValueError(f"Seed file '{SEED_FILE}' has 0 records")
-
+    df_seed = validate_seed(
+        _with_scian_hierarchy(pl.read_parquet(seed_path)), TABLE_NAME, str(seed_path)
+    )
+    row_count = df_seed.height
     logger.info(f"Seed validated: {SEED_FILE} ({row_count:,} records)")
 
     # Only load if table is empty or force mode
@@ -114,25 +116,11 @@ def load_seeds_sqlalchemy(
     if not seed_path.exists():
         raise FileNotFoundError(f"Seed file not found: {seed_path}")
 
-    df = pl.read_parquet(seed_path)
-    if len(df) == 0:
-        return {DISPLAY_NAME: 0}
-
-    # Schema-aware: the seed migration (dff9d0804542) replays against the
-    # legacy 2-column table; the hierarchy columns only exist after the
-    # normalization migration (173b3ded90cd) recreates the catalog.
-    table_columns = {
-        row[0]
-        for row in connection.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = :table"
-            ),
-            {"table": TABLE_NAME},
-        )
-    }
-    if "sector" in table_columns:
-        df = _with_scian_hierarchy(df)
+    # El catalogo nace siempre con la jerarquia (sector/subsector/rama):
+    # la migracion base lo crea con su forma final, sin pasos intermedios.
+    df = validate_seed(
+        _with_scian_hierarchy(pl.read_parquet(seed_path)), TABLE_NAME, str(seed_path)
+    )
 
     if truncate:
         connection.execute(text(f"DELETE FROM {TABLE_NAME}"))

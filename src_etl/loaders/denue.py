@@ -96,6 +96,38 @@ class EstablecimientoWriter(DuckDBWarehouse):
                     f"(catalogo {cat_table}; agregar al seed y re-correr si son legitimos)."
                 )
 
+    def _validate_geografia(self, conn, df: pl.DataFrame):
+        """Fail-fast de la geografia contra sus catalogos (tienen FK real).
+
+        Valida los tres niveles por separado para que el mensaje diga QUE
+        falta: una entidad, un municipio o una localidad. Sin esto el fallo
+        llega como violacion de FK, que no distingue el nivel y obliga a
+        abrir el CSV para averiguarlo.
+
+        Cada nivel se valida solo si el CSV trae todas sus columnas (los
+        datos de encuesta pueden venir incompletos).
+        """
+        niveles = [
+            (["cve_ent"], "denue_entidades", "entidad"),
+            (["cve_ent", "cve_mun"], "denue_municipios", "municipio"),
+            (["cve_ent", "cve_mun", "cve_loc"], "denue_localidades", "localidad"),
+        ]
+        for cols, catalogo, nombre in niveles:
+            if not all(c in df.columns for c in cols):
+                continue
+            claves = df.select(cols).unique().drop_nulls()  # noqa: F841
+            on = " AND ".join(f"k.{c} = cat.{c}" for c in cols)
+            faltantes = conn.execute(
+                f"SELECT {', '.join('k.' + c for c in cols)} FROM claves k "
+                f"LEFT JOIN {catalogo} cat ON {on} "
+                f"WHERE cat.{cols[0]} IS NULL LIMIT 10"
+            ).fetchall()
+            if faltantes:
+                raise ValueError(
+                    f"❌ {nombre} fuera del catalogo {catalogo}: {faltantes} "
+                    f"(agregar al seed data/seeds y re-correr)."
+                )
+
     def _validate_codigo_act(self, conn, df: pl.DataFrame):
         """Fail-fast de codigo_act contra el catalogo SCIAN (tiene FK real).
 
@@ -123,6 +155,7 @@ class EstablecimientoWriter(DuckDBWarehouse):
             conn.execute(ESTABLECIMIENTOS_DDL.format(table=self.table_id))
             self.validate_integrity(conn, df)
             self._validate_codigo_act(conn, df)
+            self._validate_geografia(conn, df)
 
             # Build column list and SELECT expressions, using NULL for missing columns
             select_exprs = [

@@ -15,7 +15,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Date,
-    Float,
+    Double,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -26,12 +26,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src_etl.db.base import Base
-from src_etl.db.enums import (
-    TipoUnidadEconomica as TipoUnidadEconomicaEnum,
-)
-from src_etl.db.enums import (
-    domain_id,
-)
 
 
 class Establecimiento(Base):
@@ -169,8 +163,11 @@ class Establecimiento(Base):
     manzana: Mapped[str | None] = mapped_column(String(3), comment="Block (manzana) code")
 
     # ===== GEOGRAPHIC COORDINATES =====
-    latitud: Mapped[float | None] = mapped_column(Float, comment="Latitude (WGS84)")
-    longitud: Mapped[float | None] = mapped_column(Float, comment="Longitude (WGS84)")
+    # Double (no Float): el DDL canonico del writer usa DOUBLE y FLOAT de
+    # precision simple redondea las coordenadas ~4 cm, ademas de dejar el
+    # ORM desalineado con la tabla real.
+    latitud: Mapped[float | None] = mapped_column(Double, comment="Latitude (WGS84)")
+    longitud: Mapped[float | None] = mapped_column(Double, comment="Longitude (WGS84)")
 
     # ===== H3 SPATIAL INDEX (CLEE resolution blocking) =====
     h3_cell_9: Mapped[int | None] = mapped_column(
@@ -358,13 +355,15 @@ class Establecimiento(Base):
         """
         Check if establishment is fixed (permanent) vs semi-fixed (temporary).
 
-        Compara el FK contra el id determinista del enum (domain_id), sin
-        necesitar sesion ni JOIN.
+        Resuelve la etiqueta navegando el catalogo (`tipo_unidad`), que es la
+        fuente de verdad del dominio: no hay una copia del dominio en Python
+        contra la cual comparar. Requiere que el objeto este ligado a una
+        sesion (o el catalogo precargado); si el FK es NULL devuelve False.
 
         Returns:
             True if fixed establishment, False otherwise
         """
-        return self.tipounieco_id == domain_id(TipoUnidadEconomicaEnum.FIJO)
+        return self.tipo_unidad is not None and self.tipo_unidad.tipounieco == "FIJO"
 
     def has_contact_info(self) -> bool:
         """
@@ -456,7 +455,8 @@ class EstratoPersonal(Base):
 
     Materializes the INEGI employee-count ranges (per_ocu) with their numeric
     bounds and business-size category, making SME classification queryable in
-    plain SQL. Seeded from the `PersonalOcupado` enum (single source of truth).
+    plain SQL. Sembrado desde `data/seeds/seed_estratos_personal.parquet`
+    (fuente de verdad del catalogo).
     """
 
     __tablename__ = "denue_estratos_personal"
@@ -465,7 +465,7 @@ class EstratoPersonal(Base):
         Integer,
         primary_key=True,
         autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
-        comment="Surrogate id (posicion 1-based en PersonalOcupado; ver enums.domain_id)",
+        comment="Surrogate id (del seed parquet; append-only: los hechos lo referencian)",
     )
     per_ocu: Mapped[str] = mapped_column(
         String(50), nullable=False, unique=True, comment="Employee count range label (INEGI)"
@@ -489,9 +489,8 @@ class TipoVialidad(Base):
     Road/Street Type Domain Catalog.
 
     Normalizes the old `tipo_vial_type` DuckDB ENUM into a catalog table:
-    `establecimientos.tipo_vial_id` references `id` with a real FK. Seeded
-    from the `TipoVial` enum + generated descriptions (single source of
-    truth, `src_etl/loaders/dominios.py`).
+    `establecimientos.tipo_vial_id` references `id` with a real FK. Sembrado
+    desde `data/seeds/seed_tipos_vialidad.parquet` (fuente de verdad).
     """
 
     __tablename__ = "denue_tipos_vialidad"
@@ -500,7 +499,7 @@ class TipoVialidad(Base):
         Integer,
         primary_key=True,
         autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
-        comment="Surrogate id (posicion 1-based en TipoVial; ver enums.domain_id)",
+        comment="Surrogate id (del seed parquet; append-only)",
     )
     tipo_vial: Mapped[str] = mapped_column(
         String(50), nullable=False, unique=True, comment="Road type label (INEGI)"
@@ -518,10 +517,8 @@ class TipoAsentamiento(Base):
     Settlement Type Domain Catalog.
 
     Normalizes the old `tipo_asent_type` DuckDB ENUM into a catalog table:
-    `establecimientos.tipo_asent_id` references `id` with a real FK. Seeded
-    from the `TipoAsentamiento` enum in `src_etl/db/enums.py` (imported
-    under another name to avoid clashing with this model) + generated
-    descriptions.
+    `establecimientos.tipo_asent_id` references `id` with a real FK. Sembrado
+    desde `data/seeds/seed_tipos_asentamiento.parquet` (fuente de verdad).
     """
 
     __tablename__ = "denue_tipos_asentamiento"
@@ -530,7 +527,7 @@ class TipoAsentamiento(Base):
         Integer,
         primary_key=True,
         autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
-        comment="Surrogate id (posicion 1-based en TipoAsentamiento enum)",
+        comment="Surrogate id (del seed parquet; append-only)",
     )
     tipo_asent: Mapped[str] = mapped_column(
         String(50), nullable=False, unique=True, comment="Settlement type label (INEGI)"
@@ -550,8 +547,8 @@ class TipoUnidadEconomica(Base):
     Normalizes the old `tipounieco_type` DuckDB ENUM into a catalog table:
     `establecimientos.tipounieco_id` references `id` with a real FK. The
     permanence semantics (FIJO/SEMIFIJO) live in the queryable `descripcion`
-    column instead of Python-only comments. Seeded from the
-    `TipoUnidadEconomica` enum (aliased as TipoUnidadEconomicaEnum here).
+    column instead of Python-only comments. Sembrado desde
+    `data/seeds/seed_tipos_unidad_economica.parquet` (fuente de verdad).
     """
 
     __tablename__ = "denue_tipos_unidad_economica"
@@ -560,7 +557,7 @@ class TipoUnidadEconomica(Base):
         Integer,
         primary_key=True,
         autoincrement=False,  # ids explicitos (posicion en el enum), no secuencia
-        comment="Surrogate id (posicion 1-based en TipoUnidadEconomica enum)",
+        comment="Surrogate id (del seed parquet; append-only)",
     )
     tipounieco: Mapped[str] = mapped_column(
         String(20), nullable=False, unique=True, comment="Economic unit type label (INEGI)"
@@ -751,8 +748,10 @@ class EntidadEconomica(Base):
     cod_postal: Mapped[str | None] = mapped_column(
         String(10), comment="Postal code (most recent period)"
     )
-    latitud: Mapped[float | None] = mapped_column(Float, comment="Latitude (most recent period)")
-    longitud: Mapped[float | None] = mapped_column(Float, comment="Longitude (most recent period)")
+    latitud: Mapped[float | None] = mapped_column(Double, comment="Latitude (most recent period)")
+    longitud: Mapped[float | None] = mapped_column(
+        Double, comment="Longitude (most recent period)"
+    )
     h3_cell_9: Mapped[int | None] = mapped_column(
         BigInteger, comment="H3 res-9 cell (most recent period)"
     )

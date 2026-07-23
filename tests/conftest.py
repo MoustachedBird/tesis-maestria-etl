@@ -11,18 +11,12 @@ Environment Variables:
 
 import os
 from datetime import date
+from pathlib import Path
 
 import duckdb
 import pytest
 from sqlalchemy import inspect
 
-from src_etl.db.enums import (
-    PersonalOcupado,
-    TipoAsentamiento,
-    TipoUnidadEconomica,
-    TipoVial,
-    domain_id,
-)
 from src_etl.db.models import (
     ActividadEconomica,
     Entidad,
@@ -32,6 +26,9 @@ from src_etl.db.models import (
 )
 from src_etl.db.models import (
     TipoAsentamiento as TipoAsentamientoCat,
+)
+from src_etl.db.models import (
+    TipoUnidadEconomica as TipoUnidadEconomicaCat,
 )
 from src_etl.db.models import (
     TipoVialidad as TipoVialidadCat,
@@ -55,6 +52,26 @@ def get_test_db_path() -> str:
 # ============================================================================
 # DATABASE FIXTURES (INTEGRATION TESTS - REAL DATA)
 # ============================================================================
+
+
+
+
+def _catalog_id(table: str, label_col: str, label: str) -> int:
+    """Id de un valor de catalogo leido del seed parquet (fuente de verdad).
+
+    Los tests no pueden hardcodear ids ni derivarlos de un enum: el dominio
+    vive en `data/seeds/*.parquet` y de ahi salen los ids que referencian
+    los FKs.
+    """
+    import polars as pl
+
+    from src_etl.core.config import get_settings
+    from src_etl.loaders.dominios import SEED_FILES
+
+    seeds = Path(get_settings().SEEDS_DIR)
+    fname = SEED_FILES.get(table, f"seed_{table.removeprefix('denue_')}.parquet")
+    df = pl.read_parquet(seeds / fname)
+    return int(df.filter(pl.col(label_col) == label)["id"][0])
 
 
 @pytest.fixture(scope="session")
@@ -185,10 +202,10 @@ def sample_establecimiento() -> Establecimiento:
         raz_social="TEST BUSINESS SA DE CV",
         codigo_act="722515",
         # Business type (FKs por id; el label vive en el catalogo)
-        tipounieco_id=domain_id(TipoUnidadEconomica.FIJO),
-        per_ocu_id=domain_id(PersonalOcupado.PERSONAS_11_30),
+        tipounieco_id=_catalog_id("denue_tipos_unidad_economica", "tipounieco", "FIJO"),
+        per_ocu_id=_catalog_id("denue_estratos_personal", "per_ocu", "11 A 30 PERSONAS"),
         # Address components
-        tipo_vial_id=domain_id(TipoVial.CALLE),
+        tipo_vial_id=_catalog_id("denue_tipos_vialidad", "tipo_vial", "CALLE"),
         nom_vial="INSURGENTES SUR",
         numero_ext="1234",
         letra_ext="A",
@@ -196,14 +213,14 @@ def sample_establecimiento() -> Establecimiento:
         letra_int="B",
         edificio="TORRE EMPRESARIAL",
         # Cross streets
-        tipo_v_e_1=TipoVial.AVENIDA.value,
+        tipo_v_e_1="AVENIDA",
         nom_v_e_1="REFORMA",
-        tipo_v_e_2=TipoVial.CALLE.value,
+        tipo_v_e_2="CALLE",
         nom_v_e_2="CHAPULTEPEC",
-        tipo_v_e_3=TipoVial.BOULEVARD.value,
+        tipo_v_e_3="BOULEVARD",
         nom_v_e_3="CONSTITUYENTES",
         # Settlement
-        tipo_asent_id=domain_id(TipoAsentamiento.COLONIA),
+        tipo_asent_id=_catalog_id("denue_tipos_asentamiento", "tipo_asent", "COLONIA"),
         nomb_asent="DEL VALLE",
         # Shopping center
         nom_cencom="PLAZA INSURGENTES",
@@ -231,11 +248,18 @@ def sample_establecimiento() -> Establecimiento:
     # asignan los objetos de catalogo para que los helpers de direccion
     # resuelvan los labels igual que con una fila persistida + JOIN.
     estab.tipo_vialidad = TipoVialidadCat(
-        id=domain_id(TipoVial.CALLE), tipo_vial=TipoVial.CALLE.value, descripcion="test"
+        id=_catalog_id("denue_tipos_vialidad", "tipo_vial", "CALLE"),
+        tipo_vial="CALLE",
+        descripcion="test",
     )
     estab.tipo_asentamiento = TipoAsentamientoCat(
-        id=domain_id(TipoAsentamiento.COLONIA),
-        tipo_asent=TipoAsentamiento.COLONIA.value,
+        id=_catalog_id("denue_tipos_asentamiento", "tipo_asent", "COLONIA"),
+        tipo_asent="COLONIA",
+        descripcion="test",
+    )
+    estab.tipo_unidad = TipoUnidadEconomicaCat(
+        id=_catalog_id("denue_tipos_unidad_economica", "tipounieco", "FIJO"),
+        tipounieco="FIJO",
         descripcion="test",
     )
     return estab
@@ -255,7 +279,7 @@ def sample_establecimiento_minimal() -> Establecimiento:
         id="test_minimal_001",
         nom_estab="Minimal Business",
         codigo_act="722515",
-        per_ocu_id=domain_id(PersonalOcupado.PERSONAS_0_5),
+        per_ocu_id=_catalog_id("denue_estratos_personal", "per_ocu", "0 A 5 PERSONAS"),
         cve_ent="09",
     )
 

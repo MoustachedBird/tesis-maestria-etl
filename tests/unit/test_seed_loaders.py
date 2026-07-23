@@ -144,39 +144,6 @@ class TestGeographyLoadSeeds:
 
 
 @pytest.mark.unit
-class TestDominiosAppendOnly:
-    """El reseed de dominios debe APPEND-ear valores nuevos del enum sin
-    DELETE (los catalogos tienen FKs entrantes con datos vivos)."""
-
-    def test_new_enum_value_appended_without_delete(self, tmp_path):
-        """Regresion tipo_asent 'OTRO' (corte DENUE 2026-05): con filas
-        referenciando el catalogo, el drift append-only inserta solo lo
-        faltante en vez de DELETE+INSERT (que DuckDB bloquearia)."""
-        from src_etl.loaders import dominios
-
-        conn = duckdb.connect()
-        dominios.load_seeds(conn, tmp_path)
-        total = conn.execute("SELECT COUNT(*) FROM denue_tipos_asentamiento").fetchone()[0]
-
-        # Estado previo simulado: el catalogo sin el ultimo valor del enum,
-        # y una tabla de hechos referenciandolo por FK.
-        conn.execute(f"DELETE FROM denue_tipos_asentamiento WHERE id = {total}")
-        conn.execute(
-            "CREATE TABLE fact_ref (tipo_asent_id INTEGER "
-            "REFERENCES denue_tipos_asentamiento(id))"
-        )
-        conn.execute("INSERT INTO fact_ref VALUES (1)")
-
-        stats = dominios.load_seeds(conn, tmp_path)
-
-        assert stats["settlement_types"] == total
-        assert (
-            conn.execute("SELECT COUNT(*) FROM denue_tipos_asentamiento").fetchone()[0] == total
-        )
-        assert conn.execute("SELECT COUNT(*) FROM fact_ref").fetchone()[0] == 1
-
-
-@pytest.mark.unit
 class TestGeographyConstants:
     """Test geography module constants."""
 

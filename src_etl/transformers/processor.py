@@ -17,10 +17,6 @@ import polars as pl
 from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
 from src_etl.loaders.denue import EstablecimientoWriter
-from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
-from src_etl.loaders.estratos import load_seeds as load_estratos_seeds
-from src_etl.loaders.geography import load_seeds as load_geography_seeds
-from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_etl.utils.denue_schema import (
     COLUMN_ALIASES,
     DOMAIN_VALUE_ALIASES,
@@ -73,7 +69,6 @@ class BronzeToSilverProcessor:
         self.warehouse_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.datastore = EstablecimientoWriter(self.warehouse_path)
-        self._bootstrap_seeds()
 
     def _normalize_text_col(self, col_name: str):
         """
@@ -139,33 +134,22 @@ class BronzeToSilverProcessor:
             .str.strip_chars()
         )
 
-    def _bootstrap_seeds(self, force: bool = False):
+    def _reset_fact_table(self, force: bool = False):
+        """Vacia la tabla de hechos cuando se pide reprocesar todo.
+
+        NO siembra catalogos ni crea tablas: el esquema y los seeds son
+        responsabilidad de las migraciones (`make db-migrate`), que es el
+        unico lugar donde se cargan. Aqui solo se limpia el contenido para
+        que `--force` reprocese los 943 archivos sobre una tabla vacia.
+
+        Se usa DELETE y no DROP a proposito: dropear la tabla la recrearia
+        sin los indices que definio la migracion.
         """
-        Bootstrap seed catalog tables for referential integrity.
-
-        Delegates to domain-specific loaders:
-        - geography: entidades, municipios, localidades
-        - scian: actividades_economicas
-        - dominios: tipos_vialidad, tipos_asentamiento, tipos_unidad_economica
-
-        Los dominios de tipo son tablas de catalogo (denue_tipos_*), NO tipos
-        ENUM de DuckDB: el dominio es dato consultable/evolucionable, y la
-        validacion fail-fast del ingest la hace validate_integrity() con
-        DOMAIN_CATALOGS (derivado de los mismos enums que siembran las tablas).
-        """
-        seeds_dir = self.data_root / "seeds"
-
+        if not force:
+            return
+        logger.warning("MODO FORCE: vaciando la tabla de hechos...")
         with self.datastore._get_connection() as conn:
-            if force:
-                logger.warning("Dropping fact table for integrity constraint reset...")
-                conn.execute(f"DROP TABLE IF EXISTS {self.datastore.table_id} CASCADE")
-
-            # Load seed catalogs via loaders (todos ANTES del DDL del
-            # writer: la tabla de hechos les apunta con FKs reales)
-            load_geography_seeds(conn, seeds_dir, force=force)
-            load_scian_seeds(conn, seeds_dir, force=force)
-            load_dominios_seeds(conn, seeds_dir, force=force)
-            load_estratos_seeds(conn, seeds_dir, force=force)
+            conn.execute(f"DELETE FROM {self.datastore.table_id}")
 
     def _clean_raw_data(self, zip_path: Path, period: str) -> tuple[pl.DataFrame, dict[str, Any]]:
         """
@@ -399,7 +383,7 @@ class BronzeToSilverProcessor:
         """
         if force:
             logger.warning("⚠️ MODO FORCE ACTIVADO: Se re-procesarán todos los archivos en disco.")
-            self._bootstrap_seeds(force=True)
+            self._reset_fact_table(force=True)
 
         # Create job run
         run_id = self.tracker.create_run(

@@ -641,7 +641,7 @@ crimen por municipio.
   `truststore` (certificados del sistema, como curl). La descarga del CSV
   no lo necesita.
 
-### Modelo en Silver (2 tablas nuevas, migración f1a2b3c4d5e6)
+### Modelo en Silver (2 tablas nuevas, migración a2000sesnsp)
 
 - **`sesnsp_delitos`** (~98 filas): catálogo jerárquico bien jurídico →
   tipo → subtipo → modalidad. Ids surrogate **append-only** materializados
@@ -707,7 +707,7 @@ query patrón negocio-intervalo, limitaciones): `docs/cruce_denue_sesnsp.md`.
 Una fila por identidad de negocio resuelta (`clee_propagado_radio`), no
 por observación-periodo — la unidad de análisis de supervivencia/
 mortalidad de la tesis. Preparada en código (`loaders/entidades.py`,
-migración `b2c3d4e5f6a7`); **pendiente de aplicar** hasta que termine la
+migración `a3000entidades`); **pendiente de aplicar** hasta que termine la
 re-resolución CLEE con el código actual (los ids `NEW_*` van a cambiar).
 
 - **Construcción**: `build_entidades_economicas(conn)` agrega
@@ -1019,9 +1019,9 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 ### Relational schema: real PK/FK links by surrogate ids
 
-The old DuckDB ENUM column types (`tipo_vial_type`, etc.) were fully
-normalized (migrations `ae66f32a9bed` + `c3a26327aec3`, user decision
-2026-07-17): the domain catalogs carry `id INTEGER PRIMARY KEY` (the value's
+The DuckDB ENUM column types that this schema once used were dropped in
+favour of catalog tables (user decision 2026-07-17; la cadena de
+migraciones se consolidó después para crear ya el diseño final): the domain catalogs carry `id INTEGER PRIMARY KEY` (the value's
 1-based position in its enum — see `enums.domain_id()`; enums are
 **append-only** because millions of rows reference these ids), the label as
 UNIQUE, and a `descripcion` column with the meaning of each value.
