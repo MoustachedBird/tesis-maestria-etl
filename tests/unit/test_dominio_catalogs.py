@@ -32,7 +32,7 @@ from src_etl.db.models import (
 )
 from src_etl.loaders.dominios import build_rows
 from src_etl.loaders.estratos import build_rows as build_estrato_rows
-from src_etl.utils.denue_schema import DOMAIN_CATALOGS
+from src_etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
 
 
 @pytest.mark.unit
@@ -42,7 +42,7 @@ class TestDominioSeeds:
     def test_row_counts(self):
         rows = build_rows()
         assert len(rows["denue_tipos_vialidad"]) == 39
-        assert len(rows["denue_tipos_asentamiento"]) == 46
+        assert len(rows["denue_tipos_asentamiento"]) == 45
         assert len(rows["denue_tipos_unidad_economica"]) == 3
 
     def test_ids_are_enum_positions(self):
@@ -54,19 +54,17 @@ class TestDominioSeeds:
         assert domain_id(TipoUnidadEconomica.FIJO) == 2
         assert domain_id(PersonalOcupado.PERSONAS_11_30) == 4
 
-    def test_seeds_match_ingest_domain(self):
-        """Catalogo y validacion del ingest deben ser el MISMO dominio."""
-        rows = build_rows()
-        assert [r["tipo_vial"] for r in rows["denue_tipos_vialidad"]] == (
-            DOMAIN_CATALOGS["tipo_vial"]
-        )
-        assert [r["tipo_asent"] for r in rows["denue_tipos_asentamiento"]] == (
-            DOMAIN_CATALOGS["tipo_asent"]
-        )
-        assert [r["tipounieco"] for r in rows["denue_tipos_unidad_economica"]] == (
-            DOMAIN_CATALOGS["tipounieco"]
-        )
-        assert [r["per_ocu"] for r in build_estrato_rows()] == DOMAIN_CATALOGS["per_ocu"]
+    def test_domain_id_columns_cover_every_catalog(self):
+        """DOMAIN_ID_COLUMNS es lo que usa la validacion del ingest para
+        saber que tabla consultar: debe cubrir los 4 dominios."""
+        assert set(DOMAIN_ID_COLUMNS) == {"tipo_vial", "tipo_asent", "tipounieco", "per_ocu"}
+        tables = {t for _id, t, _label in DOMAIN_ID_COLUMNS.values()}
+        assert tables == {
+            "denue_tipos_vialidad",
+            "denue_tipos_asentamiento",
+            "denue_tipos_unidad_economica",
+            "denue_estratos_personal",
+        }
 
     def test_all_rows_have_descripcion(self):
         """Todo valor de dominio lleva descripcion no vacia (seed generado)."""
@@ -181,19 +179,30 @@ class TestEstablecimientoLinks:
 class TestIngestDomainGuard:
     """validate_integrity() sigue siendo el fail-fast por labels del ingest."""
 
-    def _writer(self, tmp_path):
-        from src_etl.loaders.denue import EstablecimientoWriter
+    def _conn_with_catalogs(self, tmp_path):
+        """Writer + conexion con los catalogos de dominio ya sembrados.
 
-        return EstablecimientoWriter(tmp_path / "guard.duckdb")
+        La validacion ahora consulta la BD, asi que el guard necesita las
+        tablas presentes (seeds generados en tmp_path, sin tocar los del
+        repo)."""
+        from src_etl.loaders.denue import EstablecimientoWriter
+        from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
+        from src_etl.loaders.estratos import load_seeds as load_estratos_seeds
+
+        writer = EstablecimientoWriter(tmp_path / "guard.duckdb")
+        conn = writer._get_connection()
+        load_dominios_seeds(conn, tmp_path)
+        load_estratos_seeds(conn, tmp_path)
+        return writer, conn
 
     def test_rejects_out_of_domain_value(self, tmp_path):
-        writer = self._writer(tmp_path)
+        writer, conn = self._conn_with_catalogs(tmp_path)
         df = pl.DataFrame({"per_ocu": ["0 A 5 PERSONAS", "VALOR INVENTADO"]})
         with pytest.raises(ValueError, match="per_ocu"):
-            writer.validate_integrity(df)
+            writer.validate_integrity(conn, df)
 
     def test_accepts_domain_and_nulls(self, tmp_path):
-        writer = self._writer(tmp_path)
+        writer, conn = self._conn_with_catalogs(tmp_path)
         df = pl.DataFrame(
             {
                 "per_ocu": ["0 A 5 PERSONAS", None],
@@ -201,13 +210,50 @@ class TestIngestDomainGuard:
                 "tipounieco": ["FIJO", "SEMIFIJO"],
             }
         )
-        writer.validate_integrity(df)  # no debe lanzar
+        writer.validate_integrity(conn, df)  # no debe lanzar
+
+    def test_new_catalog_row_accepted_without_code_change(self, tmp_path):
+        """El punto del refactor: un valor de dominio nuevo se habilita
+        agregandolo a la TABLA (via seed), sin tocar codigo Python."""
+        writer, conn = self._conn_with_catalogs(tmp_path)
+        df = pl.DataFrame({"tipo_asent": ["INVENTADO NUEVO"]})
+        with pytest.raises(ValueError, match="tipo_asent"):
+            writer.validate_integrity(conn, df)
+
+        conn.execute(
+            "INSERT INTO denue_tipos_asentamiento VALUES "
+            "(999, 'INVENTADO NUEVO', 'alta de un corte nuevo')"
+        )
+        writer.validate_integrity(conn, df)  # ahora pasa, sin cambiar codigo
+
+
+@pytest.mark.unit
+class TestDomainValueAliases:
+    """Sinonimos de INEGI que se unifican al valor canonico del catalogo."""
+
+    def test_otro_is_alias_of_otra(self):
+        assert DOMAIN_VALUE_ALIASES["tipo_asent"]["OTRO"] == "OTRA (ESPECIFICAR)"
+
+    def test_alias_target_exists_in_catalog(self):
+        """Todo canonico de un alias debe existir en el dominio sembrado."""
+        rows = build_rows()
+        labels = {r["tipo_asent"] for r in rows["denue_tipos_asentamiento"]}
+        for canonical in DOMAIN_VALUE_ALIASES["tipo_asent"].values():
+            assert canonical in labels
+
+    def test_cleaning_maps_otro_to_canonical(self):
+        """La limpieza convierte OTRO -> OTRA (ESPECIFICAR) antes de validar."""
+        from src_etl.utils.denue_schema import DOMAIN_VALUE_ALIASES as aliases
+
+        df = pl.DataFrame({"tipo_asent": ["OTRO", "COLONIA"]})
+        out = df.with_columns(pl.col("tipo_asent").replace(aliases["tipo_asent"]))
+        assert out["tipo_asent"].to_list() == ["OTRA (ESPECIFICAR)", "COLONIA"]
 
 
 @pytest.mark.unit
 class TestSeedParquets:
-    """Los seeds se materializan como parquet (patron geografia/SCIAN) y
-    los enums mandan: drift en el archivo -> se regenera."""
+    """Los seeds se materializan como parquet (patron geografia/SCIAN); el
+    ARCHIVO manda: los enums solo hacen el bootstrap inicial."""
 
     def test_parquets_generated_and_match_enums(self, tmp_path):
         from src_etl.loaders.dominios import ensure_seed_parquets
@@ -226,14 +272,62 @@ class TestSeedParquets:
         assert path_est.name == "seed_estratos_personal.parquet"
         assert pl.read_parquet(path_est).to_dicts() == build_estrato_rows()
 
-    def test_drifted_parquet_is_regenerated(self, tmp_path):
+    def test_existing_parquet_is_never_overwritten(self, tmp_path):
+        """El parquet es la fuente de verdad: un valor agregado a mano
+        sobrevive, para poder dar de alta dominios nuevos sin tocar codigo."""
         from src_etl.loaders.dominios import SEED_FILES, ensure_seed_parquets
 
         ensure_seed_parquets(tmp_path)
-        drifted = tmp_path / SEED_FILES["denue_tipos_vialidad"]
-        pl.DataFrame(
-            {"id": [1], "tipo_vial": ["FALSO"], "descripcion": ["drift"]}
-        ).write_parquet(drifted)
+        path = tmp_path / SEED_FILES["denue_tipos_asentamiento"]
+        extended = pl.concat(
+            [
+                pl.read_parquet(path),
+                pl.DataFrame(
+                    {"id": [999], "tipo_asent": ["NUEVO"], "descripcion": ["corte nuevo"]}
+                ),
+            ]
+        )
+        extended.write_parquet(path)
 
         ensure_seed_parquets(tmp_path)
-        assert pl.read_parquet(drifted).height == 39  # regenerado desde el enum
+        after = pl.read_parquet(path)
+        assert after.height == extended.height
+        assert "NUEVO" in after["tipo_asent"].to_list()
+
+
+@pytest.mark.unit
+class TestEntityValueNormalization:
+    """Nombres de entidad federativa unificados al canonico.
+
+    Regresion: el mapa es {valor: canonico} y se aplicaba recorriendolo
+    como si fuera {columna: mapa}, asi que el `if col in df.columns` era
+    siempre falso y la normalizacion nunca corria.
+    """
+
+    def _clean(self, df):
+        """Replica el paso de normalizacion de processor._clean_raw_data."""
+        from src_etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
+
+        if "entidad" in df.columns:
+            df = df.with_columns(pl.col("entidad").replace(ENTITY_VALUE_NORMALIZATION))
+        return df
+
+    def test_normalizes_known_aliases(self):
+        df = pl.DataFrame({"entidad": ["DISTRITO FEDERAL", "DF", "MÉXICO", "JALISCO"]})
+        assert self._clean(df)["entidad"].to_list() == [
+            "CIUDAD DE MÉXICO",
+            "CIUDAD DE MÉXICO",
+            "ESTADO DE MÉXICO",
+            "JALISCO",
+        ]
+
+    def test_map_is_keyed_by_value_not_column(self):
+        """Sus claves son valores del dato: recorrerlo por columna no aplica."""
+        from src_etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
+
+        assert "DISTRITO FEDERAL" in ENTITY_VALUE_NORMALIZATION
+        assert all(isinstance(v, str) for v in ENTITY_VALUE_NORMALIZATION.values())
+
+    def test_noop_when_column_absent(self):
+        df = pl.DataFrame({"cve_ent": ["09"]})
+        assert self._clean(df).equals(df)

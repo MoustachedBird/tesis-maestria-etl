@@ -2,13 +2,6 @@
 Constants and configurations for DENUE data normalization.
 """
 
-from src_etl.db.enums import (
-    PersonalOcupado,
-    TipoAsentamiento,
-    TipoUnidadEconomica,
-    TipoVial,
-)
-
 # MASTER SCHEMA: Todas las columnas que deben existir en el Warehouse final.
 MASTER_COLUMNS = [
     "id",
@@ -181,6 +174,9 @@ COLUMN_ALIASES = {
 }
 
 # ENTITY VALUE NORMALIZATION: Corrección de nombres de estados para uniformidad.
+# Mapa {valor observado: valor canonico} que se aplica a la columna
+# `entidad` en processor._clean_raw_data (NO esta indexado por columna:
+# ojo al recorrerlo, sus claves son valores del dato).
 ENTITY_VALUE_NORMALIZATION = {
     "DISTRITO FEDERAL": "CIUDAD DE MÉXICO",
     "DISTRITO_FEDERAL": "CIUDAD DE MÉXICO",
@@ -193,19 +189,20 @@ ENTITY_VALUE_NORMALIZATION = {
     "EDO. DE MÉXICO": "ESTADO DE MÉXICO",
 }
 
-DOMAIN_CATALOGS = {
-    "tipo_vial": [t.value for t in TipoVial],
-    "tipo_asent": [t.value for t in TipoAsentamiento],
-    "tipounieco": [t.value for t in TipoUnidadEconomica],
-    "per_ocu": [t.value for t in PersonalOcupado],
+DOMAIN_VALUE_ALIASES: dict[str, dict[str, str]] = {
+    "tipo_asent": {
+        # INEGI usa "OTRO" desde el corte 2026-05 para lo que el catalogo
+        # historico llama "OTRA (ESPECIFICAR)": mismo concepto, etiqueta
+        # distinta. Se unifica al canonico en vez de duplicar la fila del
+        # catalogo (evita dos ids para un solo dominio).
+        "OTRO": "OTRA (ESPECIFICAR)",
+    },
 }
-"""Dominios validos por columna-label del CSV (columna -> valores).
+"""Sinonimos de valores de dominio por columna: {columna: {alias: canonico}}.
 
-DERIVADO de los enums de `src_etl/db/enums.py` (fuente unica de verdad;
-los mismos enums siembran las tablas de catalogo `denue_tipos_*` y
-`denue_estratos_personal`). Usado por `EstablecimientoWriter.
-validate_integrity()` como validacion fail-fast del ingest ANTES de mapear
-los labels a ids de catalogo (da mensaje claro en vez de violacion de FK)."""
+Aplicado en la limpieza (`processor._clean_raw_data`) ANTES de la
+validacion contra la BD, para que un cambio de etiqueta de INEGI entre
+cortes no exija una fila nueva de catalogo ni un id nuevo."""
 
 DOMAIN_ID_COLUMNS = {
     "tipo_vial": ("tipo_vial_id", "denue_tipos_vialidad", "tipo_vial"),

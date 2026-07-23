@@ -64,6 +64,16 @@ DOMAIN_COLUMNS = {
     "per_ocu": "per_ocu_type",
 }
 
+DOMAIN_CATALOG_TABLES = {
+    "tipo_vial": "denue_tipos_vialidad",
+    "tipo_asent": "denue_tipos_asentamiento",
+    "tipounieco": "denue_tipos_unidad_economica",
+    "per_ocu": "denue_estratos_personal",
+}
+"""Columna de dominio -> tabla de catalogo (la columna label se llama igual
+que la columna). Congelado en la migracion a proposito: el downgrade lee
+los valores de estas tablas, no de constantes de la app."""
+
 FACT_TABLE = "establecimientos"
 
 
@@ -184,9 +194,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Recrea los tipos ENUM, revierte las columnas y borra los catalogos."""
-    from src_etl.utils.denue_schema import DOMAIN_CATALOGS
+    """Recrea los tipos ENUM, revierte las columnas y borra los catalogos.
 
+    Los valores de dominio se leen de las tablas de catalogo que esta misma
+    migracion creo (no de una constante de la app): una migracion debe ser
+    un artefacto congelado, reproducible aunque el dominio evolucione
+    despues.
+    """
     conn = op.get_bind()
 
     if _fact_table_exists(conn):
@@ -197,7 +211,10 @@ def downgrade() -> None:
                 {"n": type_name},
             ).scalar()
             if not exists:
-                vals = ", ".join(f"'{v}'" for v in DOMAIN_CATALOGS[col])
+                labels = conn.execute(
+                    sa.text(f"SELECT {col} FROM {DOMAIN_CATALOG_TABLES[col]} ORDER BY id")
+                ).scalars()
+                vals = ", ".join("'" + v.replace("'", "''") + "'" for v in labels)
                 conn.execute(sa.text(f"CREATE TYPE {type_name} AS ENUM ({vals})"))
 
         # Mismo baile de indices que en upgrade()

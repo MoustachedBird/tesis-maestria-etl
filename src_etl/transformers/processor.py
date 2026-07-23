@@ -23,6 +23,7 @@ from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.scian import load_seeds as load_scian_seeds
 from src_etl.utils.denue_schema import (
     COLUMN_ALIASES,
+    DOMAIN_VALUE_ALIASES,
     ENTITY_VALUE_NORMALIZATION,
     MASTER_COLUMNS,
     REQUIRED_COLUMNS,
@@ -270,10 +271,18 @@ class BronzeToSilverProcessor:
         df = df.drop_nulls(subset=REQUIRED_COLUMNS)
         logs["stats"]["rows_dropped_invalid_req"] = initial_height - df.height
 
-        # Apply entity normalization
-        for col, norm_map in ENTITY_VALUE_NORMALIZATION.items():
+        # Nombres de entidad federativa al canonico (DISTRITO FEDERAL ->
+        # CIUDAD DE MEXICO, MEXICO -> ESTADO DE MEXICO). El mapa es
+        # {valor: canonico} y aplica a UNA columna, `entidad`.
+        if "entidad" in df.columns:
+            df = df.with_columns(pl.col("entidad").replace(ENTITY_VALUE_NORMALIZATION))
+
+        # Sinonimos de dominio -> valor canonico del catalogo (p.ej. INEGI
+        # empezo a usar tipo_asent "OTRO" por "OTRA (ESPECIFICAR)" en el
+        # corte 2026-05). Va ANTES de la validacion contra la BD.
+        for col, aliases in DOMAIN_VALUE_ALIASES.items():
             if col in df.columns:
-                df = df.with_columns(pl.col(col).replace(norm_map))
+                df = df.with_columns(pl.col(col).replace(aliases))
 
         # Normalize ENUM text columns (names must match post-alias MASTER_COLUMNS)
         text_cols = [

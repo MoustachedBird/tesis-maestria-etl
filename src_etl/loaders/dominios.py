@@ -18,11 +18,14 @@ DELETE ciego: si el contenido ya coincide con los enums se salta; si
 difiere y hay filas referenciandolo, DuckDB lo bloquea (correcto: un
 cambio de dominio con datos vivos exige migracion consciente).
 
-Seeds en parquet (mismo patron que geografia/SCIAN): las filas se
-materializan en `data/seeds/seed_tipos_*.parquet` y los loaders cargan
-DESDE el parquet. Los enums + DESCRIPCIONES_* son la fuente que GENERA los
-archivos: si un parquet falta o difiere del contenido derivado de los
-enums, se regenera automaticamente (los enums mandan).
+Seeds en parquet (mismo patron que geografia/SCIAN): las filas viven en
+`data/seeds/seed_tipos_*.parquet` y los loaders cargan DESDE el parquet,
+que es la FUENTE DE VERDAD del contenido. Los enums + DESCRIPCIONES_* solo
+generan el archivo la primera vez (bootstrap) y aportan las referencias
+semanticas que el codigo usa por nombre; un parquet existente NUNCA se
+sobreescribe. Asi, un valor de dominio nuevo se agrega en un unico lugar
+(el parquet -> la tabla) sin tocar codigo, y la validacion del ingest lo
+lee de la BD.
 
 Two entry points, same rows:
   - `load_seeds(conn, seeds_dir, force)`: native DuckDB (ingest bootstrap).
@@ -154,7 +157,6 @@ DESCRIPCIONES_ASENTAMIENTO: dict[TipoAsentamiento, str] = {
     TipoAsentamiento.LOCALIDAD: "Lugar habitado reconocido con nombre y categoria propios",
     TipoAsentamiento.PARQUE: "Espacio verde publico usado como referencia de asentamiento",
     TipoAsentamiento.OTRA: "Tipo de asentamiento no incluido en el catalogo INEGI",
-    TipoAsentamiento.OTRO: "Tipo de asentamiento no especificado (etiqueta del corte DENUE 2026-05)",
 }
 """Seed generado: significado de cada tipo de asentamiento humano INEGI
 (no existe seed oficial descargable). Debe cubrir TODOS los valores de
@@ -228,10 +230,15 @@ def _default_seeds_dir() -> Path:
 
 def ensure_seed_parquets(seeds_dir: Path | None = None) -> dict[str, Path]:
     """
-    Materializa los seeds parquet desde los enums (los enums MANDAN).
+    Garantiza que exista cada `seed_tipos_*.parquet`; NO sobreescribe.
 
-    Escribe cada `seed_tipos_*.parquet` si no existe o si su contenido
-    difiere del derivado de los enums (drift -> se regenera y se loguea).
+    El parquet es la FUENTE DE VERDAD del contenido del catalogo: si ya
+    existe se respeta tal cual, de modo que agregar un valor de dominio
+    nuevo (INEGI evoluciona sus etiquetas entre cortes) se hace en un solo
+    lugar — el parquet — sin tocar codigo Python. Los enums solo sirven
+    para el bootstrap inicial (cuando el archivo no existe) y para las
+    referencias semanticas que el codigo necesita por nombre (p.ej.
+    `TipoUnidadEconomica.FIJO` en `Establecimiento.is_fixed_establishment`).
 
     Returns:
         Dict tabla -> Path del parquet listo para cargar.
@@ -243,10 +250,10 @@ def ensure_seed_parquets(seeds_dir: Path | None = None) -> dict[str, Path]:
 
     for table, _label, _enum, display_name in TABLES:
         path = seeds_dir / SEED_FILES[table]
-        expected = pl.DataFrame(rows_by_table[table])
-        if not path.exists() or not expected.equals(pl.read_parquet(path)):
-            expected.write_parquet(path)
-            logger.info(f"   Seed regenerado desde enums: {path.name} ({len(expected)} filas)")
+        if not path.exists():
+            generated = pl.DataFrame(rows_by_table[table])
+            generated.write_parquet(path)
+            logger.info(f"   Seed generado desde enums: {path.name} ({len(generated)} filas)")
         paths[table] = path
     return paths
 

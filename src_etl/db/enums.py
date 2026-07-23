@@ -73,7 +73,7 @@ class TipoVial(str, Enum):
 
 class TipoAsentamiento(str, Enum):
     """
-    Settlement Type Classifications (46 values).
+    Settlement Type Classifications (45 values).
 
     Official INEGI catalog for types of human settlements and zones.
     Single source of truth for the `denue_tipos_asentamiento` catalog table
@@ -125,10 +125,6 @@ class TipoAsentamiento(str, Enum):
     LOCALIDAD = "LOCALIDAD"
     PARQUE = "PARQUE"
     OTRA = "OTRA (ESPECIFICAR)"
-    # Append-only: los ids de catalogo son la posicion 1-based en este enum;
-    # todo valor nuevo de INEGI se agrega AL FINAL (OTRO aparecio en el
-    # corte DENUE 2026-05).
-    OTRO = "OTRO"
 
 
 class TipoUnidadEconomica(str, Enum):

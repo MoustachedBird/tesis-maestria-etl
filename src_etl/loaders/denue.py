@@ -17,7 +17,6 @@ import polars as pl
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
 from src_etl.utils.denue_schema import (
     DB_FACT_COLUMNS,
-    DOMAIN_CATALOGS,
     DOMAIN_ID_COLUMNS,
 )
 from src_etl.utils.warehouse import DuckDBWarehouse, load_h3_extension
@@ -64,16 +63,25 @@ class EstablecimientoWriter(DuckDBWarehouse):
         super().__init__(warehouse_path)
         self.table_id = "establecimientos"
 
-    def validate_integrity(self, df: pl.DataFrame):
-        """Validador fail-fast en Polars contra los dominios de catalogo.
+    def validate_integrity(self, conn, df: pl.DataFrame):
+        """Validador fail-fast de los dominios, leidos DE LA BD.
+
+        Los valores permitidos salen de las tablas de catalogo
+        (`denue_tipos_*`, `denue_estratos_personal`), que es lo mismo que
+        exigen los FKs — no de una lista duplicada en Python. Asi, agregar
+        un valor de dominio nuevo se hace en UN solo lugar (el seed que
+        alimenta la tabla) y no requiere tocar codigo.
 
         Corre ANTES del INSERT para que un valor fuera de dominio de un CSV
         nuevo de INEGI produzca un error claro (columna + valores) en vez
         de una violacion de FK criptica a media carga.
         """
-        for col, allowed in DOMAIN_CATALOGS.items():
+        for col, (_id_col, cat_table, cat_label) in DOMAIN_ID_COLUMNS.items():
             if col not in df.columns:
                 continue
+            allowed = [
+                r[0] for r in conn.execute(f"SELECT {cat_label} FROM {cat_table}").fetchall()
+            ]
             invalid = (
                 df.select(col)
                 .unique()
@@ -84,7 +92,8 @@ class EstablecimientoWriter(DuckDBWarehouse):
             )
             if invalid:
                 raise ValueError(
-                    f"❌ Error de integridad en '{col}': valores {invalid} no permitidos."
+                    f"❌ Error de integridad en '{col}': valores {invalid} no permitidos "
+                    f"(catalogo {cat_table}; agregar al seed y re-correr si son legitimos)."
                 )
 
     def _validate_codigo_act(self, conn, df: pl.DataFrame):
@@ -110,10 +119,9 @@ class EstablecimientoWriter(DuckDBWarehouse):
             )
 
     def upsert(self, df: pl.DataFrame):
-        self.validate_integrity(df)
-
         with self._get_connection() as conn:
             conn.execute(ESTABLECIMIENTOS_DDL.format(table=self.table_id))
+            self.validate_integrity(conn, df)
             self._validate_codigo_act(conn, df)
 
             # Build column list and SELECT expressions, using NULL for missing columns
