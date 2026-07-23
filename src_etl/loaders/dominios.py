@@ -154,6 +154,7 @@ DESCRIPCIONES_ASENTAMIENTO: dict[TipoAsentamiento, str] = {
     TipoAsentamiento.LOCALIDAD: "Lugar habitado reconocido con nombre y categoria propios",
     TipoAsentamiento.PARQUE: "Espacio verde publico usado como referencia de asentamiento",
     TipoAsentamiento.OTRA: "Tipo de asentamiento no incluido en el catalogo INEGI",
+    TipoAsentamiento.OTRO: "Tipo de asentamiento no especificado (etiqueta del corte DENUE 2026-05)",
 }
 """Seed generado: significado de cada tipo de asentamiento humano INEGI
 (no existe seed oficial descargable). Debe cubrir TODOS los valores de
@@ -186,6 +187,29 @@ def _rows_match(existing: list[tuple], expected: list[dict]) -> bool:
     """True si el contenido actual de la tabla ya es el esperado."""
     expected_tuples = [tuple(r.values()) for r in expected]
     return sorted(existing) == sorted(expected_tuples)
+
+
+def _missing_appended_rows(existing: list[tuple], expected: list[dict]) -> list[dict] | None:
+    """
+    Filas por INSERTAR si el drift es una extension append-only del enum.
+
+    Los enums son append-only y los catalogos estan referenciados por FKs
+    con datos vivos: cuando INEGI agrega un valor nuevo (p.ej. tipo_asent
+    'OTRO' en el corte 2026-05), el reseed por DELETE+INSERT fallaria
+    porque DuckDB bloquea el DELETE de filas referenciadas. Si todo lo
+    existente sigue siendo valido y solo hay filas nuevas al final, basta
+    insertar las faltantes.
+
+    Returns:
+        Lista de filas faltantes si existing es subconjunto estricto de
+        expected; None si el drift NO es append-only (requiere el camino
+        de reseed completo / migracion consciente).
+    """
+    existing_set = set(existing)
+    expected_tuples = {tuple(r.values()) for r in expected}
+    if not existing_set <= expected_tuples:
+        return None
+    return [r for r in expected if tuple(r.values()) not in existing_set]
 
 
 SEED_FILES = {table: f"seed_{table.removeprefix('denue_')}.parquet" for table, *_ in TABLES}
@@ -264,15 +288,18 @@ def load_seeds(conn, seeds_dir: Path | None = None, force: bool = False) -> dict
 
         rows = _seed_rows(seeds_dir, table)
         cols = list(rows[0].keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        insert_sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
         existing = conn.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
         if not _rows_match(existing, rows):
-            conn.execute(f"DELETE FROM {table}")
-            placeholders = ", ".join(["?"] * len(cols))
-            conn.executemany(
-                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})",
-                [[r[c] for c in cols] for r in rows],
-            )
-            logger.info(f"   Loaded {len(rows):,} {display_name}")
+            missing = _missing_appended_rows(existing, rows)
+            if missing is not None:
+                conn.executemany(insert_sql, [[r[c] for c in cols] for r in missing])
+                logger.info(f"   Appended {len(missing):,} new {display_name}")
+            else:
+                conn.execute(f"DELETE FROM {table}")
+                conn.executemany(insert_sql, [[r[c] for c in cols] for r in rows])
+                logger.info(f"   Loaded {len(rows):,} {display_name}")
         stats[display_name] = len(rows)
 
     return stats
@@ -315,16 +342,19 @@ def load_seeds_sqlalchemy(
 
         rows = _seed_rows(seeds_dir, table)
         cols = list(rows[0].keys())
+        params = ", ".join(f":{c}" for c in cols)
+        insert_sql = text(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({params})")
         existing = connection.execute(text(f"SELECT {', '.join(cols)} FROM {table}")).fetchall()
         if not _rows_match([tuple(r) for r in existing], rows):
-            if truncate:
-                connection.execute(text(f"DELETE FROM {table}"))
-            params = ", ".join(f":{c}" for c in cols)
-            connection.execute(
-                text(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({params})"),
-                rows,
-            )
-            print(f"   Loaded {len(rows):,} {display_name}")
+            missing = _missing_appended_rows([tuple(r) for r in existing], rows)
+            if missing is not None:
+                connection.execute(insert_sql, missing)
+                print(f"   Appended {len(missing):,} new {display_name}")
+            else:
+                if truncate:
+                    connection.execute(text(f"DELETE FROM {table}"))
+                connection.execute(insert_sql, rows)
+                print(f"   Loaded {len(rows):,} {display_name}")
         stats[display_name] = len(rows)
 
     return stats

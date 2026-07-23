@@ -3,7 +3,7 @@ ENUM class tests.
 
 Tests for all 4 ENUM classes defined in src/db/enums.py:
 - TipoVial (39 values)
-- TipoAsentamiento (45 values)
+- TipoAsentamiento (46 values)
 - TipoUnidadEconomica (3 values)
 - PersonalOcupado (7 values + helper methods)
 
@@ -217,11 +217,17 @@ class TestTipoVial:
 
 @pytest.mark.unit
 class TestTipoAsentamiento:
-    """Test TipoAsentamiento enum (45 settlement types)."""
+    """Test TipoAsentamiento enum (46 settlement types)."""
 
     def test_enum_values_count(self):
-        """Verify TipoAsentamiento has 45 values."""
-        assert len(TipoAsentamiento) == 45
+        """Verify TipoAsentamiento has 46 values."""
+        assert len(TipoAsentamiento) == 46
+
+    def test_otro_appended_last(self):
+        """OTRO (corte DENUE 2026-05) debe ser el ULTIMO valor: los ids de
+        catalogo son posicionales y agregarlo en otra posicion los
+        desplazaria."""
+        assert list(TipoAsentamiento)[-1] is TipoAsentamiento.OTRO
 
     def test_common_settlement_types_exist(self):
         """Test most common settlement types exist."""

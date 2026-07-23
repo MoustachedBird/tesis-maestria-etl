@@ -42,7 +42,7 @@ class TestDominioSeeds:
     def test_row_counts(self):
         rows = build_rows()
         assert len(rows["denue_tipos_vialidad"]) == 39
-        assert len(rows["denue_tipos_asentamiento"]) == 45
+        assert len(rows["denue_tipos_asentamiento"]) == 46
         assert len(rows["denue_tipos_unidad_economica"]) == 3
 
     def test_ids_are_enum_positions(self):

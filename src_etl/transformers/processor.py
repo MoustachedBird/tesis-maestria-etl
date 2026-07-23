@@ -335,6 +335,16 @@ class BronzeToSilverProcessor:
             pl.concat_str(id_exprs, separator="|").hash().cast(pl.Utf8).alias("id")
         )
 
+        # Dedupe DENTRO del archivo: INSERT OR IGNORE solo protege contra
+        # duplicados vs la tabla, no dentro del mismo batch (DuckDB truena
+        # con PK duplicada intra-INSERT; visto en comercio_al_por_menor
+        # 03_2017). Filas con los mismos 5 componentes de id son el mismo
+        # registro para el pipeline: se conserva la primera.
+        pre_dedupe = df.height
+        df = df.unique(subset=["id"], keep="first")
+        if pre_dedupe != df.height:
+            logs["stats"]["rows_dropped_dup_id"] = pre_dedupe - df.height
+
         logs["stats"]["rows_final"] = df.height
         return df, logs
 
