@@ -16,6 +16,7 @@ import polars as pl
 
 from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
+from src_etl.db.indexes import suspended_indexes
 from src_etl.loaders.denue import EstablecimientoWriter
 from src_etl.utils.denue_schema import (
     COLUMN_ALIASES,
@@ -418,56 +419,61 @@ class BronzeToSilverProcessor:
         tasks_succeeded = 0
         tasks_failed = 0
 
-        for idx, task_info in enumerate(tasks, start=1):
-            zip_path = Path.cwd() / task_info["source_path"]
+        # Los indices de la tabla de hechos se suspenden mientras dura la
+        # carga y se restituyen al terminar (tambien si falla): mantener
+        # ART fila por fila sobre decenas de millones de INSERTs es ordenes
+        # de magnitud mas lento. No hay paso manual que recordar.
+        with self.datastore._get_connection() as index_conn, suspended_indexes(index_conn):
+            for idx, task_info in enumerate(tasks, start=1):
+                zip_path = Path.cwd() / task_info["source_path"]
 
-            if not zip_path.exists():
-                logger.warning(
-                    f"   ⚠️ [{idx}/{len(tasks)}] Archivo no encontrado físicamente: {zip_path.name}"
+                if not zip_path.exists():
+                    logger.warning(
+                        f"   ⚠️ [{idx}/{len(tasks)}] Archivo no encontrado físicamente: {zip_path.name}"
+                    )
+                    continue
+
+                # Create process task (use relative path to match download_tasks.target_path for JOIN)
+                task_id = self.tracker.create_process_task(
+                    run_id=run_id,
+                    task_name=zip_path.name,
+                    source_path=task_info["source_path"],
+                    period=task_info.get("period"),
+                    target_table="denue_establecimientos",
                 )
-                continue
 
-            # Create process task (use relative path to match download_tasks.target_path for JOIN)
-            task_id = self.tracker.create_process_task(
-                run_id=run_id,
-                task_name=zip_path.name,
-                source_path=task_info["source_path"],
-                period=task_info.get("period"),
-                target_table="denue_establecimientos",
-            )
-
-            logger.info(
-                f"📦 [{idx}/{len(tasks)}] Procesando: {zip_path.name} (Periodo: {task_info.get('period')})..."
-            )
-
-            self.tracker.start_process_task(task_id)
-
-            # Process the file
-            status, message, row_count = self.process_zip(zip_path, task_info.get("period", ""))
-
-            # Update task
-            if status == "DONE":
-                self.tracker.complete_process_task(
-                    task_id=task_id,
-                    status=TaskStatus.SUCCESS,
-                    rows_loaded=row_count,
-                    file_size_bytes=zip_path.stat().st_size if zip_path.exists() else None,
+                logger.info(
+                    f"📦 [{idx}/{len(tasks)}] Procesando: {zip_path.name} (Periodo: {task_info.get('period')})..."
                 )
-                session_total_rows += row_count
-                tasks_succeeded += 1
-                logger.info(f"   ✅ Éxito: {row_count:,} registros integrados.")
-            else:
-                self.tracker.complete_process_task(
-                    task_id=task_id,
-                    status=TaskStatus.FAILED,
-                    error_message=message,
-                )
-                tasks_failed += 1
-                logger.error(f"   ❌ Fallo en archivo {zip_path.name}: {message}")
 
-        # Checkpoint warehouse
-        with self.datastore._get_connection() as conn:
-            conn.execute("CHECKPOINT;")
+                self.tracker.start_process_task(task_id)
+
+                # Process the file
+                status, message, row_count = self.process_zip(zip_path, task_info.get("period", ""))
+
+                # Update task
+                if status == "DONE":
+                    self.tracker.complete_process_task(
+                        task_id=task_id,
+                        status=TaskStatus.SUCCESS,
+                        rows_loaded=row_count,
+                        file_size_bytes=zip_path.stat().st_size if zip_path.exists() else None,
+                    )
+                    session_total_rows += row_count
+                    tasks_succeeded += 1
+                    logger.info(f"   ✅ Éxito: {row_count:,} registros integrados.")
+                else:
+                    self.tracker.complete_process_task(
+                        task_id=task_id,
+                        status=TaskStatus.FAILED,
+                        error_message=message,
+                    )
+                    tasks_failed += 1
+                    logger.error(f"   ❌ Fallo en archivo {zip_path.name}: {message}")
+
+            # Checkpoint warehouse
+            with self.datastore._get_connection() as conn:
+                conn.execute("CHECKPOINT;")
 
         # Complete job run
         final_status = JobStatus.SUCCESS if tasks_failed == 0 else JobStatus.PARTIAL

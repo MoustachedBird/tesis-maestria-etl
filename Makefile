@@ -131,13 +131,23 @@ db-reset: ## Full database reset (schema + seeds)
 		echo "Reset cancelled"; \
 	fi
 
-db-status: ## Show migration status
+db-status: ## Show migration status and index health
 	@echo "Current database status:"
 	@echo ""
 	$(ALEMBIC) current --verbose
 	@echo ""
 	@echo "Migration history:"
 	$(ALEMBIC) history
+	@echo ""
+	@echo "Indexes:"
+	@$(PYTHON) -c "from src_etl.core.config import settings; \
+from src_etl.utils.warehouse import connect_configured; \
+from src_etl.db.indexes import missing_indexes, expected_indexes; \
+conn = connect_configured(settings.SILVER_DUCKDB_PATH, read_only=True); \
+m = missing_indexes(conn); \
+print(f'  {len(expected_indexes()) - len(m)}/{len(expected_indexes())} presentes' + (f' | FALTAN: {m}' if m else ' (completos)')); \
+print('  (faltan tras una corrida interrumpida: la siguiente los restituye)' if m else ''); \
+conn.close()"
 
 # ─── Development ─────────────────────────────────────────────────────────────
 

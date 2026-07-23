@@ -26,6 +26,7 @@ import duckdb
 import polars as pl
 
 from src_etl.core.logging import get_stage_logger
+from src_etl.db.indexes import suspended_indexes
 from src_etl.utils.clee_resolution_config import (
     SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,
@@ -615,8 +616,12 @@ class CLEEResolver:
                 self.tracker.complete_run(run_id, JobStatus.SUCCESS)
                 return True
 
-            # Run the two-phase resolution
-            stats = self.process_national(force=force)
+            # La resolucion reescribe la columna maestra sobre decenas de
+            # millones de filas; con su indice ART vivo cada UPDATE lo
+            # mantiene fila por fila. Se suspende aqui y se restituye al
+            # terminar (tambien si falla), sin paso manual.
+            with self._get_connection() as index_conn, suspended_indexes(index_conn):
+                stats = self.process_national(force=force)
 
             # Count remaining unresolved
             remaining = self._count_unresolved()
