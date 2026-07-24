@@ -9,9 +9,12 @@ del SESNSP, la fuente con la que se cruza la supervivencia de negocios.
     delito x mes, en formato largo. Comparte las llaves geograficas de DENUE
     (FKs a entidades y municipios), por eso depende de la migracion core.
 
-El catalogo de delitos NO se siembra aqui: sus filas salen del propio CSV
-del SESNSP durante el transform, que las materializa en
-`data/seeds/seed_sesnsp_delitos.parquet`.
+El catalogo de delitos SE SIEMBRA aqui desde
+`data/seeds/seed_sesnsp_delitos.parquet`, que es su fuente de verdad (mismo
+patron que los catalogos DENUE). El transform de cada corte anual NO
+descubre delitos: valida que los del CSV existan ya en el catalogo y los
+enlaza por FK, igual que un establecimiento se valida contra SCIAN o contra
+el tipo de asentamiento. Un delito nuevo se da de alta en el parquet.
 
 Revision ID: a2000sesnsp
 Revises: a1000denue
@@ -38,13 +41,17 @@ def _tables(metadata, names):
 
 
 def upgrade() -> None:
-    """Crea el catalogo de delitos y la tabla de incidencia mensual."""
+    """Crea las tablas SESNSP y siembra el catalogo de delitos."""
+    from src_etl.core.config import settings
     from src_etl.db.base import Base
     from src_etl.db.models import SesnspIncidenciaMunicipal  # noqa: F401
+    from src_etl.loaders.sesnsp import load_seeds_sqlalchemy as load_delitos
 
     conn = op.get_bind()
     Base.metadata.create_all(bind=conn, tables=_tables(Base.metadata, SESNSP_TABLES))
     print(f"   Esquema SESNSP creado: {', '.join(SESNSP_TABLES)}")
+
+    print(f"   Delitos: {load_delitos(conn, settings.SEEDS_DIR)}")
 
 
 def downgrade() -> None:

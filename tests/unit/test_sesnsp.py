@@ -8,10 +8,11 @@ import pytest
 
 from src_etl.loaders.sesnsp import (
     SEED_DELITOS_FILE,
+    build_delitos_rows,
+    delitos_seed_path,
     ensure_tables,
-    load_delitos_catalog,
-    sync_delitos_seed,
-    sync_municipios_from_seed,
+    validate_delitos_del_csv,
+    validate_municipios_del_csv,
 )
 from src_etl.transformers.sesnsp import (
     SesnspProcessor,
@@ -62,81 +63,89 @@ def _bootstrap_geography(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("INSERT INTO denue_municipios VALUES ('01', '001', 'AGUASCALIENTES')")
 
 
+def _seed_delitos(tmp_path: Path) -> Path:
+    """Escribe un seed del catalogo con las 2 combinaciones de muestra."""
+    catalogo = _sample_delitos().with_row_index("id", offset=1).with_columns(
+        pl.col("id").cast(pl.Int32)
+    )
+    path = tmp_path / SEED_DELITOS_FILE
+    catalogo.write_parquet(path)
+    return path
+
+
+def _tabla_delitos_sembrada(conn: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
+    """Crea sesnsp_delitos y la siembra desde el seed, como la migracion."""
+    from src_etl.loaders.sesnsp import SESNSP_DELITOS_DDL
+
+    _seed_delitos(tmp_path)
+    conn.execute(SESNSP_DELITOS_DDL)
+    for row in build_delitos_rows(tmp_path):
+        conn.execute(
+            "INSERT INTO sesnsp_delitos VALUES (?, ?, ?, ?, ?)",
+            [row["id"], row["bien_juridico"], row["tipo"], row["subtipo"], row["modalidad"]],
+        )
+
+
 @pytest.mark.unit
-class TestDelitosSeed:
-    """sync_delitos_seed(): asignacion de ids append-only."""
+class TestDelitosSeedEsFuenteDeVerdad:
+    """El catalogo sale del parquet; el transform ya no lo descubre."""
 
-    def test_first_sync_creates_seed_sorted(self, tmp_path):
-        catalog = sync_delitos_seed(_sample_delitos(), tmp_path)
+    def test_rows_come_from_the_parquet(self, tmp_path):
+        _seed_delitos(tmp_path)
+        rows = build_delitos_rows(tmp_path)
+        assert [r["id"] for r in rows] == [1, 2]
+        assert {r["tipo"] for r in rows} == {"Homicidio", "Robo"}
 
-        assert catalog.height == 2
-        assert catalog["id"].to_list() == [1, 2]
-        # Orden determinista por clave natural: "El patrimonio" < "La vida..."
-        assert catalog.row(0)[1] == "El patrimonio"
-        assert (tmp_path / SEED_DELITOS_FILE).exists()
+    def test_missing_seed_fails_loudly(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Seed requerido"):
+            delitos_seed_path(tmp_path)
 
-    def test_resync_is_idempotent(self, tmp_path):
-        sync_delitos_seed(_sample_delitos(), tmp_path)
-        catalog = sync_delitos_seed(_sample_delitos(), tmp_path)
-        assert catalog.height == 2
+    def test_seed_malformado_se_detecta(self, tmp_path):
+        """Un id repetido viola la PK del catalogo y debe detenerse."""
+        catalogo = _sample_delitos().with_columns(pl.lit(1, dtype=pl.Int32).alias("id"))
+        catalogo.select(["id", *_sample_delitos().columns]).write_parquet(
+            tmp_path / SEED_DELITOS_FILE
+        )
+        with pytest.raises(ValueError, match="repetido"):
+            build_delitos_rows(tmp_path)
 
-    def test_new_delito_appends_without_renumbering(self, tmp_path):
-        first = sync_delitos_seed(_sample_delitos(), tmp_path)
+
+@pytest.mark.unit
+class TestLinkeoDelCorte:
+    """Cada corte anual se valida contra los catalogos, como un negocio."""
+
+    def test_delitos_del_catalogo_pasan(self, tmp_path):
+        conn = duckdb.connect()
+        _tabla_delitos_sembrada(conn, tmp_path)
+        validate_delitos_del_csv(conn, _sample_delitos())  # no debe lanzar
+
+    def test_delito_nuevo_se_reporta_para_darlo_de_alta(self, tmp_path):
+        conn = duckdb.connect()
+        _tabla_delitos_sembrada(conn, tmp_path)
         nuevo = pl.DataFrame(
             {
                 "bien_juridico": ["La libertad personal"],
                 "tipo": ["Secuestro"],
-                "subtipo": ["Secuestro"],
+                "subtipo": ["Secuestro extorsivo"],
                 "modalidad": ["Secuestro extorsivo"],
             }
         )
-        catalog = sync_delitos_seed(nuevo, tmp_path)
+        with pytest.raises(ValueError, match="fuera del catalogo sesnsp_delitos"):
+            validate_delitos_del_csv(conn, nuevo)
 
-        assert catalog.height == 3
-        # Ids existentes intactos, el nuevo al final con max+1
-        assert catalog.head(2).equals(first)
-        assert catalog.row(2)[0] == 3
-
-
-@pytest.mark.unit
-class TestLoadDelitosCatalog:
-    """load_delitos_catalog(): carga append-only del seed a la tabla."""
-
-    def test_loads_and_is_idempotent(self, tmp_path):
+    def test_municipio_del_catalogo_pasa(self):
         conn = duckdb.connect()
         _bootstrap_geography(conn)
-        ensure_tables(conn)
-        sync_delitos_seed(_sample_delitos(), tmp_path)
+        claves = pl.DataFrame({"cve_ent": ["01"], "cve_mun": ["001"]})
+        validate_municipios_del_csv(conn, claves)  # no debe lanzar
 
-        assert load_delitos_catalog(conn, tmp_path) == 2
-        assert load_delitos_catalog(conn, tmp_path) == 0
-
-    def test_missing_seed_raises(self, tmp_path):
+    def test_municipio_ausente_se_reporta(self):
+        """Incluye los sinteticos 998/999 si no estan en el seed geografico."""
         conn = duckdb.connect()
         _bootstrap_geography(conn)
-        ensure_tables(conn)
-        with pytest.raises(FileNotFoundError):
-            load_delitos_catalog(conn, tmp_path)
-
-
-@pytest.mark.unit
-class TestSyncMunicipios:
-    """sync_municipios_from_seed(): inserta solo lo faltante."""
-
-    def test_inserts_missing_rows_only(self, tmp_path):
-        conn = duckdb.connect()
-        _bootstrap_geography(conn)
-        pl.DataFrame(
-            {
-                "cve_ent": ["01", "09"],
-                "cve_mun": ["001", "998"],
-                "municipio": ["AGUASCALIENTES", "NO ESPECIFICADO"],
-            }
-        ).write_parquet(tmp_path / "seed_municipios.parquet")
-        conn.execute("INSERT INTO denue_entidades VALUES ('09', 'Ciudad de México')")
-
-        assert sync_municipios_from_seed(conn, tmp_path) == 1
-        assert sync_municipios_from_seed(conn, tmp_path) == 0
+        claves = pl.DataFrame({"cve_ent": ["01"], "cve_mun": ["998"]})
+        with pytest.raises(ValueError, match="fuera del catalogo denue_municipios"):
+            validate_municipios_del_csv(conn, claves)
 
 
 @pytest.mark.unit
@@ -214,17 +223,22 @@ class TestLoadCsv:
     """SesnspProcessor._load_csv(): unpivot ancho -> largo con FKs."""
 
     def _run(self, tmp_path, encoding: str) -> duckdb.DuckDBPyConnection:
-        """Ejecuta la carga completa sobre una BD en memoria."""
+        """Ejecuta la carga completa sobre una BD en memoria.
+
+        El catalogo de delitos se siembra antes desde el parquet, como hace
+        `make db-migrate`: el transform ya no lo descubre del CSV.
+        """
         conn = duckdb.connect()
         _bootstrap_geography(conn)
         ensure_tables(conn)
+        _tabla_delitos_sembrada(conn, tmp_path)
         csv_path = tmp_path / "corte.csv"
         _write_sample_csv(csv_path, encoding=encoding)
 
         processor = SesnspProcessor.__new__(SesnspProcessor)
         processor.seeds_dir = tmp_path
         new_delitos, rows = processor._load_csv(conn, csv_path)
-        assert new_delitos == 2
+        assert new_delitos == 0  # el catalogo no se modifica aqui
         assert rows == 24  # 2 filas anchas x 12 meses
         return conn
 
@@ -261,6 +275,7 @@ class TestLoadCsv:
         conn = duckdb.connect()
         _bootstrap_geography(conn)
         ensure_tables(conn)
+        _tabla_delitos_sembrada(conn, tmp_path)
         csv_path = tmp_path / "corte.csv"
         _write_sample_csv(csv_path)
 

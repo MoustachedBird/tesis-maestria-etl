@@ -5,8 +5,10 @@ Toma el CSV de incidencia delictiva municipal del corte mas reciente en
 data/bronze/sesnsp/ (formato ancho: 12 columnas de mes) y lo carga en
 Silver en formato largo:
 
-- `sesnsp_delitos`: catalogo append-only de la jerarquia del delito,
-  sincronizado con data/seeds/seed_sesnsp_delitos.parquet.
+- `sesnsp_delitos`: catalogo de la jerarquia del delito. NO se toca aqui:
+  lo siembra `make db-migrate` desde data/seeds/seed_sesnsp_delitos.parquet.
+  Este transform solo VALIDA que los delitos del corte existan en el
+  catalogo y los enlaza por FK.
 - `sesnsp_incidencia_municipal`: una fila por municipio x delito x mes,
   `fecha` DATE YYYY-MM-01 y claves geograficas zero-padded compatibles con
   DENUE (cve_ent '09', cve_mun '015').
@@ -15,7 +17,7 @@ Cada corte mensual del SESNSP REVISA cifras historicas (las carpetas de un
 mes pasado pueden corregirse), por lo que la tabla de hechos se
 reconstruye completa en cada ingesta en vez de hacerse upsert incremental.
 Todo el unpivot corre dentro de DuckDB (out-of-core); Polars solo se usa
-para el catalogo (~98 filas).
+para las combinaciones distintas que se validan contra los catalogos.
 
 Tracking: job `sesnsp_transform`, una process_task por archivo de corte.
 Incremental: si el mismo archivo ya se proceso con SUCCESS se omite
@@ -28,13 +30,10 @@ from pathlib import Path
 
 from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
-from src_etl.loaders.geography import load_seeds as load_geography_seeds
 from src_etl.loaders.sesnsp import (
     DELITO_KEY_COLUMNS,
-    ensure_tables,
-    load_delitos_catalog,
-    sync_delitos_seed,
-    sync_municipios_from_seed,
+    validate_delitos_del_csv,
+    validate_municipios_del_csv,
 )
 from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
@@ -192,10 +191,11 @@ class SesnspProcessor:
 
     def _load_csv(self, conn, csv_path: Path) -> tuple[int, int]:
         """
-        Carga el CSV en Silver: catalogo (append-only) + hechos (rebuild).
+        Valida los linkeos del corte y reconstruye la tabla de hechos.
 
         Returns:
-            (filas_catalogo_nuevas, filas_hechos_cargadas)
+            (siempre 0 -- el catalogo ya no se modifica aqui,
+             filas_hechos_cargadas)
         """
         encoding = detect_csv_encoding(csv_path)
         logger.info(f"   Encoding detectado: {encoding}")
@@ -203,15 +203,27 @@ class SesnspProcessor:
             f"read_csv('{csv_path}', encoding='{encoding}', header=true, sample_size=20000)"
         )
 
-        # 1. Catalogo de delitos: distinct del CSV -> seed parquet -> tabla.
+        # 1. Linkeo del corte contra los catalogos (sembrados en la
+        # migracion desde los parquet): cada delito y cada municipio del CSV
+        # debe existir ya, igual que un negocio se valida contra SCIAN o
+        # tipo de asentamiento. Un valor nuevo se reporta para darlo de alta
+        # en el seed, no se auto-inventa un id.
         delito_select = ", ".join(
             f'trim("{src}") AS {dst}' for src, dst in CSV_DELITO_COLUMNS.items()
         )
         distinct_delitos = conn.execute(f"SELECT DISTINCT {delito_select} FROM {csv_relation}").pl()
-        sync_delitos_seed(distinct_delitos, self.seeds_dir)
-        new_delitos = load_delitos_catalog(conn, self.seeds_dir)
-        if new_delitos:
-            logger.info(f"   Catalogo delitos: +{new_delitos} filas nuevas")
+        validate_delitos_del_csv(conn, distinct_delitos)
+
+        distinct_municipios = conn.execute(
+            f"""
+            SELECT DISTINCT
+                lpad(CAST(CAST("Clave_Ent" AS INTEGER) AS VARCHAR), 2, '0') AS cve_ent,
+                lpad(CAST(CAST("Cve. Municipio" AS INTEGER) % 1000 AS VARCHAR), 3, '0') AS cve_mun
+            FROM {csv_relation}
+            """
+        ).pl()
+        validate_municipios_del_csv(conn, distinct_municipios)
+        new_delitos = 0
 
         # 2. Hechos: rebuild completo (cada corte revisa cifras historicas).
         month_casts = ", ".join(
@@ -299,14 +311,9 @@ class SesnspProcessor:
 
         conn = connect_configured(self.warehouse_path)
         try:
-            # Bootstrap: geografia (si Silver es nuevo) + municipios
-            # sinteticos 998/999 (si Silver es previo a este seed).
-            load_geography_seeds(conn, self.seeds_dir)
-            added_muns = sync_municipios_from_seed(conn, self.seeds_dir)
-            if added_muns:
-                logger.info(f"   Municipios agregados desde seed: {added_muns}")
-            ensure_tables(conn)
-
+            # El esquema y los catalogos (delitos, geografia) los crea y
+            # siembra `make db-migrate` desde los seeds parquet; aqui solo
+            # se cargan hechos y se validan sus linkeos.
             new_delitos, rows_loaded = self._load_csv(conn, csv_path)
 
             self.tracker.complete_process_task(

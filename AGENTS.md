@@ -648,11 +648,15 @@ crimen por municipio.
 
 ### Modelo en Silver (2 tablas nuevas, migración a2000sesnsp)
 
-- **`sesnsp_delitos`** (~98 filas): catálogo jerárquico bien jurídico →
-  tipo → subtipo → modalidad. Ids surrogate **append-only** materializados
-  en `data/seeds/seed_sesnsp_delitos.parquet` (committed); combinaciones
-  nuevas de cortes futuros se agregan con `max(id)+1` sin renumerar (los
-  hechos las referencian por FK).
+- **`sesnsp_delitos`** (98 filas): catálogo jerárquico bien jurídico →
+  tipo → subtipo → modalidad. Su **fuente de verdad es
+  `data/seeds/seed_sesnsp_delitos.parquet`** (versionado), desde donde lo
+  siembra la migración `a2000sesnsp` — igual que los catálogos DENUE.
+  El transform **NO descubre delitos del CSV**: valida que los del corte
+  existan y los enlaza por FK, como un establecimiento contra SCIAN o
+  tipo de asentamiento. Un delito nuevo se da de alta al FINAL del parquet
+  (ids append-only: los hechos los referencian) y se corre `make
+  db-migrate`.
 - **`sesnsp_incidencia_municipal`** (~30.7M filas): hechos en formato
   largo — `cve_ent`, `cve_mun`, `delito_id` (FK), `fecha` (DATE
   `YYYY-MM-01`, misma convención que `fecha_alta_date`/`period`),
@@ -1030,6 +1034,10 @@ valores existían como enum, como parquet generado desde el enum, y como
 lista `DOMAIN_CATALOGS` contra la que validaba el ingest, así que dar de
 alta una etiqueta nueva de INEGI obligaba a tocar código.
 
+Aplica a **todo catálogo que tenga seed**, DENUE y SESNSP por igual:
+`sesnsp_delitos` también se siembra desde su parquet en la migración, y el
+transform de cada corte anual solo **valida y enlaza** contra él.
+
 **Dar de alta un valor nuevo = editar el parquet y correr `make db-migrate`.
 No se toca código.** Aplica a los 4 catálogos de dominio, SCIAN, los 3
 niveles de geografía y los estratos de personal (cuyas cotas
@@ -1047,6 +1055,13 @@ no pueden divergir) antes de insertar. Detecta PK duplicada, valor repetido
 en una columna UNIQUE, NULL donde la tabla exige NOT NULL, columna
 obligatoria ausente, columna que no existe en la tabla, y archivo vacío. El
 error nombra archivo, tabla, columnas y ejemplos de los valores ofensores.
+
+**Un seed corrupto detiene la migración**, no se repara a escondidas.
+Verificado corrompiendo cada seed a propósito: PK duplicada (SCIAN), PK
+compuesta duplicada (localidades), UNIQUE de columna (tipos de vialidad),
+UNIQUE compuesto de tabla (`uq_sesnsp_delito`) y NULL en columna NOT NULL
+(entidades) — los cinco hacen fallar `make db-migrate` nombrando archivo,
+tabla, columnas y valores.
 
 Sin esto un duplicado desaparecía en silencio, porque la siembra usa
 `INSERT OR IGNORE`.
@@ -1081,6 +1096,8 @@ aparezca como violación de FK (que no dice qué nivel falló):
 | `validate_integrity()` | `tipo_vial`, `tipo_asent`, `tipounieco`, `per_ocu` | las tablas de catálogo, leídas de la BD |
 | `_validate_codigo_act()` | `codigo_act` | `denue_actividades_economicas` |
 | `_validate_geografia()` | `cve_ent`, `(cve_ent,cve_mun)`, `(cve_ent,cve_mun,cve_loc)` | entidades / municipios / localidades |
+| `validate_delitos_del_csv()` | la jerarquía del delito de cada corte SESNSP | `sesnsp_delitos` |
+| `validate_municipios_del_csv()` | los municipios del corte SESNSP (incl. sintéticos 998/999) | `denue_municipios` |
 
 Los valores permitidos **se leen de la BD**, que es exactamente lo que
 exigen los FKs — no de una copia en Python.
@@ -1192,7 +1209,7 @@ dominio y no por historia:
 | Revisión | Crea |
 |---|---|
 | `a1000denue` | Catálogos (geografía, SCIAN con jerarquía, los 4 de dominio, estratos) + `establecimientos` con FKs por id, índices y nombres definitivos. **Siembra los catálogos desde los parquet.** |
-| `a2000sesnsp` | `sesnsp_delitos` + `sesnsp_incidencia_municipal` |
+| `a2000sesnsp` | `sesnsp_delitos` (**sembrado desde su parquet**) + `sesnsp_incidencia_municipal` |
 | `a3000entidades` | `entidades_economicas` (dimensión N3, nace vacía) |
 
 Antes eran 11, con rodeos que existían solo por historia: se creaban tipos

@@ -73,3 +73,20 @@ class TestSeedMalFormado:
         mun = pl.read_parquet("data/seeds/seed_municipios.parquet")
         with pytest.raises(ValueError, match="cve_ent, cve_mun"):
             validate_seed(pl.concat([mun, mun.head(1)]), "denue_municipios", "x.parquet")
+
+    def test_unique_compuesto_de_tabla(self):
+        """sesnsp_delitos declara UNIQUE(bien_juridico, tipo, subtipo,
+        modalidad): repetir la clave natural con otro id debe detenerse."""
+        from src_etl.loaders.sesnsp import delitos_seed_path
+
+        delitos = pl.read_parquet(delitos_seed_path())
+        otro_id = delitos.head(1).with_columns(
+            pl.lit(9999, dtype=delitos["id"].dtype).alias("id")
+        )
+        with pytest.raises(ValueError, match="bien_juridico, tipo, subtipo, modalidad"):
+            validate_seed(pl.concat([delitos, otro_id]), "sesnsp_delitos", "x.parquet")
+
+    def test_seeds_de_sesnsp_del_repo_son_validos(self):
+        from src_etl.loaders.sesnsp import build_delitos_rows
+
+        assert len(build_delitos_rows()) == 98

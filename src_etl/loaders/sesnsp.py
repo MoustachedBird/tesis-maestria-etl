@@ -9,10 +9,11 @@ transformers/sesnsp.py).
 
 Esquema relacional con FKs reales (misma politica que establecimientos):
 - `sesnsp_delitos`: catalogo del delito (bien juridico -> tipo -> subtipo
-  -> modalidad), ids surrogate append-only materializados en
-  `data/seeds/seed_sesnsp_delitos.parquet` (comprometido en git, mismo
-  patron que loaders/dominios.py). Append-only porque millones de filas de
-  hechos referencian estos ids.
+  -> modalidad). Su FUENTE DE VERDAD es
+  `data/seeds/seed_sesnsp_delitos.parquet` (versionado en git, mismo patron
+  que los catalogos DENUE): la migracion base SESNSP lo siembra desde ahi.
+  Los ids son append-only porque millones de hechos los referencian por FK,
+  asi que un delito nuevo se agrega AL FINAL del parquet.
 - `sesnsp_incidencia_municipal`: hechos mensuales; comparte las claves
   geograficas de DENUE (`cve_ent`/`cve_mun` zero-padded) para poder cruzar
   establecimientos con incidencia delictiva por municipio y periodo.
@@ -28,6 +29,8 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+from src_etl.loaders.seed_validation import validate_seed
+
 SESNSP_DELITOS_DDL = """
 CREATE TABLE IF NOT EXISTS sesnsp_delitos (
     id INTEGER PRIMARY KEY,
@@ -39,7 +42,7 @@ CREATE TABLE IF NOT EXISTS sesnsp_delitos (
 )
 """
 """DDL del catalogo de delitos SESNSP (~98 filas). El id es surrogate
-append-only asignado por orden de aparicion en el seed parquet."""
+append-only; el orden y los ids los define el seed parquet."""
 
 SESNSP_INCIDENCIA_DDL = """
 CREATE TABLE IF NOT EXISTS sesnsp_incidencia_municipal (
@@ -64,6 +67,12 @@ DuckDB reconstruye los indices PK/FK en el mismo INSERT masivo."""
 SEED_DELITOS_FILE = "seed_sesnsp_delitos.parquet"
 """Nombre del parquet seed del catalogo de delitos dentro de data/seeds/."""
 
+DELITOS_TABLE = "sesnsp_delitos"
+"""Tabla del catalogo (poblada desde el seed en la migracion base SESNSP)."""
+
+DISPLAY_NAME = "sesnsp_delitos"
+"""Nombre para los stats de siembra."""
+
 DELITO_KEY_COLUMNS = ["bien_juridico", "tipo", "subtipo", "modalidad"]
 """Clave natural del catalogo de delitos, en orden jerarquico SESNSP."""
 
@@ -75,96 +84,114 @@ def ensure_tables(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(SESNSP_INCIDENCIA_DDL)
 
 
-def sync_delitos_seed(distinct_delitos: pl.DataFrame, seeds_dir: Path) -> pl.DataFrame:
-    """
-    Sincroniza el seed parquet del catalogo de delitos (append-only).
+def delitos_seed_path(seeds_dir: Path | None = None) -> Path:
+    """Ruta del seed del catalogo; falla claro si no esta versionado."""
+    if seeds_dir is None:
+        from src_etl.core.config import get_settings
 
-    Combinaciones nuevas encontradas en un corte se agregan al final con
-    ids consecutivos (max(id)+1..), ordenadas por la clave natural para que
-    la asignacion sea determinista. Las filas existentes NUNCA cambian de
-    id: la tabla de hechos las referencia.
+        seeds_dir = Path(get_settings().SEEDS_DIR)
+    path = seeds_dir / SEED_DELITOS_FILE
+    if not path.exists():
+        raise FileNotFoundError(f"Seed requerido no encontrado: {path}")
+    return path
+
+
+def build_delitos_rows(seeds_dir: Path | None = None) -> list[dict]:
+    """Filas del catalogo leidas del seed parquet, ya validadas."""
+    path = delitos_seed_path(seeds_dir)
+    return validate_seed(pl.read_parquet(path), DELITOS_TABLE, str(path)).to_dicts()
+
+
+def load_seeds_sqlalchemy(
+    connection, seeds_dir: Path | None = None, truncate: bool = True
+) -> dict[str, int]:
+    """
+    Siembra `sesnsp_delitos` desde el parquet (entry point de la migracion).
 
     Args:
-        distinct_delitos: DataFrame con las combinaciones distintas del CSV
-            (columnas DELITO_KEY_COLUMNS).
-        seeds_dir: Directorio de seeds (data/seeds/).
+        connection: SQLAlchemy connection.
+        seeds_dir: Directorio de seeds (default: settings.SEEDS_DIR).
+        truncate: Si True, vacia la tabla antes de sembrar cuando su
+            contenido difiere del parquet.
 
     Returns:
-        Catalogo completo (id + DELITO_KEY_COLUMNS) tras la sincronizacion.
+        dict: display_name -> numero de filas del catalogo.
     """
-    seed_path = seeds_dir / SEED_DELITOS_FILE
-    incoming = distinct_delitos.select(DELITO_KEY_COLUMNS).unique()
+    from sqlalchemy import text
 
-    if seed_path.exists():
-        catalog = pl.read_parquet(seed_path)
-        new_rows = incoming.join(catalog, on=DELITO_KEY_COLUMNS, how="anti")
-        next_id = catalog["id"].max() + 1
-    else:
-        catalog = pl.DataFrame(schema={"id": pl.Int32, **{c: pl.Utf8 for c in DELITO_KEY_COLUMNS}})
-        new_rows = incoming
-        next_id = 1
-
-    if new_rows.height > 0:
-        new_rows = (
-            new_rows.sort(DELITO_KEY_COLUMNS)
-            .with_row_index("id", offset=next_id)
-            .with_columns(pl.col("id").cast(pl.Int32))
-            .select(["id", *DELITO_KEY_COLUMNS])
+    rows = build_delitos_rows(seeds_dir)
+    cols = list(rows[0].keys())
+    existing = connection.execute(
+        text(f"SELECT {', '.join(cols)} FROM {DELITOS_TABLE}")
+    ).fetchall()
+    if [tuple(r) for r in existing] != [tuple(r[c] for c in cols) for r in rows]:
+        if truncate:
+            connection.execute(text(f"DELETE FROM {DELITOS_TABLE}"))
+        params = ", ".join(f":{c}" for c in cols)
+        connection.execute(
+            text(f"INSERT INTO {DELITOS_TABLE} ({', '.join(cols)}) VALUES ({params})"), rows
         )
-        catalog = pl.concat([catalog, new_rows])
-        catalog.write_parquet(seed_path)
-
-    return catalog
+        print(f"   Loaded {len(rows):,} {DISPLAY_NAME}")
+    return {DISPLAY_NAME: len(rows)}
 
 
-def load_delitos_catalog(conn: duckdb.DuckDBPyConnection, seeds_dir: Path) -> int:
+def validate_delitos_del_csv(
+    conn: duckdb.DuckDBPyConnection, distinct_delitos: pl.DataFrame
+) -> None:
     """
-    Carga en `sesnsp_delitos` las filas del seed parquet que falten.
+    Fail-fast: toda combinacion del CSV debe existir ya en el catalogo.
 
-    Idempotente y append-only: nunca borra ni modifica filas existentes
-    (estan referenciadas por FK desde los hechos).
+    Misma politica que SCIAN, geografia y los dominios en DENUE: el seed es
+    la fuente de verdad, asi que un delito nuevo de un corte anual se
+    reporta con sus valores para darlo de alta en el parquet — no se
+    auto-inventa un id, porque los ids son append-only y millones de hechos
+    los referencian por FK.
 
-    Returns:
-        Numero de filas insertadas.
+    Args:
+        conn: Conexion DuckDB a Silver.
+        distinct_delitos: Combinaciones distintas leidas del CSV del corte.
+
+    Raises:
+        ValueError: Nombrando las combinaciones que faltan en el catalogo.
     """
-    seed_path = seeds_dir / SEED_DELITOS_FILE
-    if not seed_path.exists():
-        raise FileNotFoundError(f"Seed de delitos SESNSP no encontrado: {seed_path}")
+    claves = distinct_delitos.select(DELITO_KEY_COLUMNS).unique()  # noqa: F841
+    on = " AND ".join(f"k.{c} = d.{c}" for c in DELITO_KEY_COLUMNS)
+    faltantes = conn.execute(
+        f"SELECT {', '.join('k.' + c for c in DELITO_KEY_COLUMNS)} FROM claves k "
+        f"LEFT JOIN {DELITOS_TABLE} d ON {on} "
+        f"WHERE d.{DELITO_KEY_COLUMNS[0]} IS NULL LIMIT 10"
+    ).fetchall()
+    if faltantes:
+        raise ValueError(
+            f"❌ delitos fuera del catalogo {DELITOS_TABLE}: {faltantes} "
+            f"(agregar a data/seeds/{SEED_DELITOS_FILE} con id nuevo al final, "
+            f"y correr `make db-migrate`)."
+        )
 
-    before = conn.execute("SELECT COUNT(*) FROM sesnsp_delitos").fetchone()[0]
-    conn.execute(
-        f"""
-        INSERT INTO sesnsp_delitos
-        SELECT s.* FROM '{seed_path}' s
-        ANTI JOIN sesnsp_delitos d ON s.id = d.id
-        """
-    )
-    after = conn.execute("SELECT COUNT(*) FROM sesnsp_delitos").fetchone()[0]
-    return after - before
 
-
-def sync_municipios_from_seed(conn: duckdb.DuckDBPyConnection, seeds_dir: Path) -> int:
+def validate_municipios_del_csv(
+    conn: duckdb.DuckDBPyConnection, distinct_municipios: pl.DataFrame
+) -> None:
     """
-    Inserta en `denue_municipios` las filas del seed geografico que falten.
+    Fail-fast: todo municipio del CSV debe existir ya en `denue_municipios`.
 
-    Necesario en Silvers creados antes de agregar los municipios sinteticos
-    del SESNSP (998/999) al seed. Idempotente: solo agrega, jamas borra.
+    Incluye los municipios sinteticos del SESNSP (cve_mun 998 "NO
+    ESPECIFICADO" y 999 "OTROS MUNICIPIOS"), que viven en
+    `seed_municipios.parquet` como filas normales del catalogo geografico
+    para que la FK compuesta se satisfaga fisicamente.
 
-    Returns:
-        Numero de municipios insertados.
+    Raises:
+        ValueError: Nombrando los (cve_ent, cve_mun) que faltan.
     """
-    seed_path = seeds_dir / "seed_municipios.parquet"
-    if not seed_path.exists():
-        raise FileNotFoundError(f"Seed de municipios no encontrado: {seed_path}")
-
-    before = conn.execute("SELECT COUNT(*) FROM denue_municipios").fetchone()[0]
-    conn.execute(
-        f"""
-        INSERT INTO denue_municipios
-        SELECT s.* FROM '{seed_path}' s
-        ANTI JOIN denue_municipios m
-            ON s.cve_ent = m.cve_ent AND s.cve_mun = m.cve_mun
-        """
-    )
-    after = conn.execute("SELECT COUNT(*) FROM denue_municipios").fetchone()[0]
-    return after - before
+    claves = distinct_municipios.select(["cve_ent", "cve_mun"]).unique()  # noqa: F841
+    faltantes = conn.execute(
+        "SELECT k.cve_ent, k.cve_mun FROM claves k "
+        "LEFT JOIN denue_municipios m "
+        "  ON k.cve_ent = m.cve_ent AND k.cve_mun = m.cve_mun "
+        "WHERE m.cve_ent IS NULL LIMIT 10"
+    ).fetchall()
+    if faltantes:
+        raise ValueError(
+            f"❌ municipio fuera del catalogo denue_municipios: {faltantes} "
+            "(agregar a data/seeds/seed_municipios.parquet y correr `make db-migrate`)."
+        )
