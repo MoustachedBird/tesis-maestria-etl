@@ -1117,11 +1117,6 @@ make eval-masked-clee-chain                        # dos saltos
 make db-status
 ```
 
-> El `--force` conserva sus semánticas por sección: `--only clee-radio --force`
-> resetea SOLO `clee_propagado_radio` (+ su KB cache) y re-resuelve; igual para
-> `clee-h3` con su track. En `extract` significa re-descargar; en `load`,
-> cargar aunque Gold esté al día.
-
 > Nota de costo: con el default "todo ON", `make transform` corre la
 > propagación CLEE **radio y H3** (la H3 es un track de comparación). Son
 > horas cada una; si solo necesitas producción, pasa
@@ -1129,6 +1124,50 @@ make db-status
 
 > `caffeinate -dims` es obligatorio en todo lo que incluya propagación CLEE
 > o un `--force` global (ver "Regla de corridas largas" arriba).
+
+### Qué hace `--force` en cada sección (leer ANTES de pasarlo)
+
+`--force` NO significa lo mismo en todas partes: es incremental-off en
+unas y **destructivo** en otras. Tabla canónica:
+
+| Sección | Qué hace `--force` | Costo / riesgo |
+|---|---|---|
+| `extract` | Re-descarga TODOS los archivos (ignora lo ya bajado) | Horas de scraping a INEGI |
+| `ingest` | **`DELETE FROM establecimientos`** (`processor.py:138`) y re-procesa los ~943 archivos sobre tabla vacía | ☠️ Borra los ~77M de filas **incluidas ambas columnas `clee_propagado_*`**. Territorio de ~27.5h |
+| `normalize-dates` | Re-normaliza `fecha_alta` en todos los periodos (no solo pendientes) | Minutos-horas |
+| `h3-cells` | Recalcula `h3_cell_9`/`h3_cell_5` en TODAS las filas con coords válidas (no solo `IS NULL`) | Ver receta de índice abajo |
+| `clee-radio` | Resetea a NULL **solo** `clee_propagado_radio` (+ su KB cache) y re-resuelve | ~1 noche; no toca la columna H3 |
+| `clee-h3` | Idem para `clee_propagado_h3` (+ su KB cache) | ~1 noche; no toca la columna radio |
+| `sesnsp` | Re-procesa el CSV consolidado | Minutos |
+| `load` | Carga a Gold aunque esté al día | Minutos |
+
+**Regla práctica**: si no quieres vaciar la tabla de hechos, **nunca**
+pases `--force` con `ingest` activo. Usa `--only` para acotar a qué
+secciones aplica:
+
+```bash
+# Force SIN re-ingestar (refresca fechas + celdas H3 + SESNSP sobre el Silver actual):
+caffeinate -dims make transform ARGS="--only normalize-dates --only h3-cells --only sesnsp --force"
+
+# Transform completo SIN propagación CLEE, en force (OJO: incluye ingest -> borra la tabla):
+caffeinate -dims make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3 --force"
+
+# Re-resolver UNA sola propagación (la otra columna queda intacta):
+caffeinate -dims make transform ARGS="--only clee-radio --force"
+caffeinate -dims make transform ARGS="--only clee-h3 --force"
+```
+
+**Excepción de índices — `h3-cells --force`**: `h3_backfill.py` es el
+único stage de escritura masiva que **no** usa `suspended_indexes()`
+(sí lo hacen `ingest` en `processor.py:426` y la resolución CLEE en
+`clee_resolver.py:623`, que se gestionan solos). Para un recompute
+completo, soltar el índice a mano vale un orden de magnitud:
+
+```bash
+duckdb data/silver/mipymes.duckdb "DROP INDEX ix_estab_h3_9"
+caffeinate -dims make transform ARGS="--only h3-cells --force"
+duckdb data/silver/mipymes.duckdb "CREATE INDEX ix_estab_h3_9 ON establecimientos(h3_cell_9)"
+```
 
 ---
 
