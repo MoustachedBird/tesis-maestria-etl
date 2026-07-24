@@ -357,8 +357,9 @@ Dos observaciones clave:
 
 1. **Re-resolución completa** (requisito, no opcional): las columnas
    `clee_propagado_*` actuales se generaron con el orden legado.
-   `make clee-resolution-radio ARGS="--force"` (y el equivalente H3),
-   después `make build-entidades`. Bonus esperado: el force debería ser
+   `make transform ARGS="--only clee-radio --force"` (y el equivalente
+   `--only clee-h3 --force`), después `make build-entidades`. Bonus
+   esperado: el force debería ser
    más rápido — con nearest-first la primera referencia agota ~99.9%
    del pending y las demás casi no procesan filas.
 2. **Repetir el protocolo con target `11_2022`** (referencias a ambos

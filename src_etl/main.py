@@ -1,3 +1,4 @@
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -16,44 +17,160 @@ BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 
 
 # ---------------------------------------------------------------------------
+# SECTION SELECTION (--only allowlist mode)
+# ---------------------------------------------------------------------------
+class Section(StrEnum):
+    """Selectable ETL sections for the ``--only`` allowlist flag.
+
+    Atomic tokens map 1:1 to a step; ``denue`` and ``clee`` are group aliases
+    that expand to several atomic sections. ``load`` only applies to the
+    ``pipeline`` command (transform/extract ignore it).
+    """
+
+    ingest = "ingest"
+    normalize_dates = "normalize-dates"
+    h3_cells = "h3-cells"
+    clee_radio = "clee-radio"
+    clee_h3 = "clee-h3"
+    sesnsp = "sesnsp"
+    load = "load"
+    denue = "denue"  # group -> all DENUE sub-steps
+    clee = "clee"  # group -> clee-radio + clee-h3
+
+
+# Atomic sections each group alias expands to.
+_DENUE_ATOMIC: tuple[Section, ...] = (
+    Section.ingest,
+    Section.normalize_dates,
+    Section.h3_cells,
+    Section.clee_radio,
+    Section.clee_h3,
+)
+_SECTION_GROUPS: dict[Section, tuple[Section, ...]] = {
+    Section.denue: _DENUE_ATOMIC,
+    Section.clee: (Section.clee_radio, Section.clee_h3),
+}
+
+
+def _expand_only(only: list[Section] | None) -> set[Section] | None:
+    """Expand an ``--only`` selection into the set of ATOMIC sections to run.
+
+    Returns None when nothing was passed, so callers keep the default
+    subtractive mode (everything ON, opt out with ``--no-*``).
+    """
+    if not only:
+        return None
+    atomic: set[Section] = set()
+    for sec in only:
+        atomic.update(_SECTION_GROUPS.get(sec, (sec,)))
+    return atomic
+
+
+# ---------------------------------------------------------------------------
+# SHARED STEP HELPERS (reused by extract / transform / pipeline)
+# ---------------------------------------------------------------------------
+def _run_denue_extract(*, headless: bool, output: Path | None, force: bool) -> None:
+    """Download the DENUE Bronze layer via Selenium into `output` (or BRONZE_DIR)."""
+    denue_output = output or BRONZE_DIR
+    console.print("[bold green]Starting DENUE Extractor[/bold green]")
+    console.print(f"   Output: {denue_output}")
+    console.print(f"   Headless: {headless}")
+    DenueExtractor(output_dir=denue_output, headless=headless, force=force).download_all()
+
+
+def _run_sesnsp_extract(*, force: bool) -> None:
+    """Download the SESNSP crime CSV (CKAN) into data/bronze/sesnsp/."""
+    from src_etl.extractors.sesnsp import SesnspExtractor
+
+    sesnsp_output = DATA_ROOT / "bronze" / "sesnsp"
+    console.print("[bold green]Starting SESNSP Extractor[/bold green]")
+    console.print(f"   Output: {sesnsp_output}")
+    SesnspExtractor(output_dir=sesnsp_output, force=force).download_all()
+
+
+def _run_denue_transform(
+    *,
+    ingest: bool,
+    normalize_dates: bool,
+    h3_cells: bool,
+    clee_resolution_radio: bool,
+    clee_resolution_h3: bool,
+    force: bool,
+) -> bool:
+    """Run the enabled DENUE Bronze->Silver sub-steps in order; return True on success."""
+    from src_etl.transformers.denue import DenuePipelineOrchestrator
+
+    transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
+    success = True
+
+    if ingest:
+        console.print("[bold blue]   Running: ingest[/bold blue]")
+        success = transformer.run_transform_stage(force=force)
+    if normalize_dates and success:
+        console.print("[bold blue]   Running: normalize-dates[/bold blue]")
+        success = transformer.run_normalize_dates_stage(force=force)
+    if h3_cells and success:
+        console.print("[bold blue]   Running: h3-cells[/bold blue]")
+        success = transformer.run_h3_cells_stage(force=force)
+    if clee_resolution_radio and success:
+        console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
+        success = transformer.run_clee_resolution_stage(force=force)
+    if clee_resolution_h3 and success:
+        console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
+        success = transformer.run_clee_resolution_h3_stage(force=force)
+    return success
+
+
+def _run_sesnsp_transform(*, force: bool) -> bool:
+    """Run the SESNSP CSV -> Silver transform; return True on success."""
+    from src_etl.transformers.sesnsp import SesnspProcessor
+
+    processor = SesnspProcessor(data_root=DATA_ROOT)
+    return processor.run(force=force)
+
+
+# ---------------------------------------------------------------------------
 # EXTRACT
 # ---------------------------------------------------------------------------
 @app.command()
 def extract(
-    source: str = typer.Option("denue", "--source", "-s", help="Data source to extract"),
+    denue: bool = typer.Option(
+        True, "--denue/--no-denue", help="Extract DENUE (INEGI, Selenium scraping)"
+    ),
+    sesnsp: bool = typer.Option(
+        True, "--sesnsp/--no-sesnsp", help="Extract SESNSP crime data (datos.gob.mx, CKAN API)"
+    ),
+    only: list[Section] = typer.Option(
+        None,
+        "--only",
+        help="Run ONLY these sources (repeatable: denue, sesnsp); overrides --no-* defaults",
+    ),
     headless: bool = typer.Option(True, help="Run browser in headless mode (denue only)"),
-    output: Path = typer.Option(None, help="Output directory for downloaded files"),
+    output: Path = typer.Option(None, help="Output directory override (denue only)"),
     force: bool = typer.Option(False, "--force", help="Re-download all files"),
 ):
     """
-    STEP 1: Extract raw data from source.
+    STEP 1: Extract raw data (Bronze).
 
-    Sources: denue (INEGI, Selenium scraping) | sesnsp (datos.gob.mx, CKAN API).
+    Runs EVERY source by default -- DENUE (INEGI, Selenium) and SESNSP
+    (datos.gob.mx, CKAN). Opt out with --no-denue / --no-sesnsp, or allowlist
+    with --only (e.g. --only sesnsp); with no flags a single `make extract`
+    fetches both.
     """
-    if source not in ("denue", "sesnsp"):
-        console.print(f"[bold red]Unknown source: {source}. Available: denue, sesnsp[/bold red]")
-        raise typer.Exit(code=1)
+    selected = _expand_only(only)
+    if selected is not None:
+        # groups are already expanded to atomic sections; any DENUE sub-step selects the source
+        denue = bool(selected & set(_DENUE_ATOMIC))
+        sesnsp = Section.sesnsp in selected
 
     if force:
         console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
-    if source == "sesnsp":
-        from src_etl.extractors.sesnsp import SesnspExtractor
+    if denue:
+        _run_denue_extract(headless=headless, output=output, force=force)
 
-        output = output or (DATA_ROOT / "bronze" / "sesnsp")
-        console.print("[bold green]Starting SESNSP Extractor[/bold green]")
-        console.print(f"   Output: {output}")
-        extractor = SesnspExtractor(output_dir=output, force=force)
-        extractor.download_all()
-        return
-
-    output = output or BRONZE_DIR
-    console.print("[bold green]Starting DENUE Extractor[/bold green]")
-    console.print(f"   Output: {output}")
-    console.print(f"   Headless: {headless}")
-
-    downloader = DenueExtractor(output_dir=output, headless=headless, force=force)
-    downloader.download_all()
+    if sesnsp:
+        _run_sesnsp_extract(force=force)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +178,9 @@ def extract(
 # ---------------------------------------------------------------------------
 @app.command()
 def transform(
-    source: str = typer.Option("denue", "--source", "-s", help="Data source to transform"),
+    denue: bool = typer.Option(
+        True, "--denue/--no-denue", help="Run the DENUE Bronze->Silver pipeline"
+    ),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
     normalize_dates: bool = typer.Option(
         True,
@@ -73,92 +192,91 @@ def transform(
         "--h3-cells/--no-h3-cells",
         help="Backfill H3 cells (h3_cell_9/h3_cell_5) from coordinates",
     ),
-    clee_resolution: bool = typer.Option(
+    clee_resolution_radio: bool = typer.Option(
         True,
-        "--clee-resolution/--no-clee-resolution",
+        "--clee-resolution-radio/--no-clee-resolution-radio",
         help="Run CLEE resolution (radio/BallTree -> clee_propagado_radio)",
     ),
     clee_resolution_h3: bool = typer.Option(
-        False,
+        True,
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking -> clee_propagado_h3), comparison track",
+    ),
+    sesnsp: bool = typer.Option(
+        True,
+        "--sesnsp/--no-sesnsp",
+        help="Run the SESNSP transform (CSV -> sesnsp_incidencia_municipal)",
+    ),
+    only: list[Section] = typer.Option(
+        None,
+        "--only",
+        help=(
+            "Run ONLY these sections (repeatable): ingest, normalize-dates, h3-cells, "
+            "clee-radio, clee-h3, sesnsp (+ groups denue, clee). Overrides --no-* defaults."
+        ),
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
     STEP 2: Transform raw data (Bronze -> Silver).
 
-    Cleans, normalizes, and loads data into the Silver DuckDB warehouse.
-    DENUE sub-steps: ingest -> normalize-dates -> h3-cells -> clee-resolution
-    [-> clee-resolution-h3]. Control each with --ingest, --normalize-dates,
-    --h3-cells, --clee-resolution and --clee-resolution-h3 flags.
-    SESNSP (--source sesnsp): CSV consolidado -> sesnsp_incidencia_municipal.
+    Runs EVERY section by default so a single `make transform` populates the
+    whole Silver warehouse. Opt out of any section with a --no-* flag, or
+    allowlist with --only (e.g. --only clee-radio --only sesnsp); nothing needs
+    to be passed for the full run.
+
+    DENUE sub-steps (ordered): ingest -> normalize-dates -> h3-cells ->
+    clee-resolution-radio -> clee-resolution-h3, each gated by its flag
+    (--no-denue skips the whole DENUE block).
+    SESNSP: CSV consolidado -> sesnsp_incidencia_municipal (--no-sesnsp skips).
     """
-    if source not in ("denue", "sesnsp"):
-        console.print(f"[bold red]Unknown source: {source}. Available: denue, sesnsp[/bold red]")
-        raise typer.Exit(code=1)
+    selected = _expand_only(only)
+    if selected is not None:
+        ingest = Section.ingest in selected
+        normalize_dates = Section.normalize_dates in selected
+        h3_cells = Section.h3_cells in selected
+        clee_resolution_radio = Section.clee_radio in selected
+        clee_resolution_h3 = Section.clee_h3 in selected
+        sesnsp = Section.sesnsp in selected
+        denue = ingest or normalize_dates or h3_cells or clee_resolution_radio or clee_resolution_h3
 
-    if source == "sesnsp":
-        console.print("[bold blue]Starting SESNSP Transform[/bold blue]")
-        if force:
-            console.print("[bold orange3]   FORCE MODE: Reprocessing current cut[/bold orange3]")
+    if force:
+        console.print("[bold orange3]   FORCE MODE: Reprocessing all data[/bold orange3]")
+
+    overall_ok = True
+
+    if denue:
+        console.print("[bold blue]== DENUE Transform ==[/bold blue]")
         try:
-            from src_etl.transformers.sesnsp import SesnspProcessor
+            overall_ok = (
+                _run_denue_transform(
+                    ingest=ingest,
+                    normalize_dates=normalize_dates,
+                    h3_cells=h3_cells,
+                    clee_resolution_radio=clee_resolution_radio,
+                    clee_resolution_h3=clee_resolution_h3,
+                    force=force,
+                )
+                and overall_ok
+            )
+        except Exception as e:
+            console.print(f"[bold red]DENUE transform failed: {escape(str(e))}[/bold red]")
+            raise typer.Exit(code=1)
 
-            processor = SesnspProcessor(data_root=DATA_ROOT)
-            if processor.run(force=force):
-                console.print("[bold green]SESNSP transform completed successfully.[/bold green]")
-            else:
+    if sesnsp:
+        console.print("[bold blue]== SESNSP Transform ==[/bold blue]")
+        try:
+            if not _run_sesnsp_transform(force=force):
                 console.print("[bold yellow]SESNSP transform failed. Check logs.[/bold yellow]")
-                raise typer.Exit(code=1)
-        except typer.Exit:
-            raise
+                overall_ok = False
         except Exception as e:
             console.print(f"[bold red]SESNSP transform failed: {escape(str(e))}[/bold red]")
             raise typer.Exit(code=1)
-        return
 
-    console.print("[bold blue]Starting DENUE Transform[/bold blue]")
-
-    if force:
-        console.print("[bold orange3]   FORCE MODE: Reprocessing all files[/bold orange3]")
-
-    try:
-        from src_etl.transformers.denue import DenuePipelineOrchestrator
-
-        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
-        success = True
-
-        if ingest:
-            console.print("[bold blue]   Running: ingest[/bold blue]")
-            success = transformer.run_transform_stage(force=force)
-
-        if normalize_dates and success:
-            console.print("[bold blue]   Running: normalize-dates[/bold blue]")
-            success = transformer.run_normalize_dates_stage(force=force)
-
-        if h3_cells and success:
-            console.print("[bold blue]   Running: h3-cells[/bold blue]")
-            success = transformer.run_h3_cells_stage(force=force)
-
-        if clee_resolution and success:
-            console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
-            success = transformer.run_clee_resolution_stage(force=force)
-
-        if clee_resolution_h3 and success:
-            console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
-            success = transformer.run_clee_resolution_h3_stage(force=force)
-
-        if success:
-            console.print("[bold green]Transform completed successfully.[/bold green]")
-        else:
-            console.print("[bold yellow]Transform completed with errors. Check logs.[/bold yellow]")
-            raise typer.Exit(code=1)
-
-    except typer.Exit:
-        raise
-    except Exception as e:
-        console.print(f"[bold red]Transform failed: {escape(str(e))}[/bold red]")
+    if overall_ok:
+        console.print("[bold green]Transform completed successfully.[/bold green]")
+    else:
+        console.print("[bold yellow]Transform completed with errors. Check logs.[/bold yellow]")
         raise typer.Exit(code=1)
 
 
@@ -167,7 +285,6 @@ def transform(
 # ---------------------------------------------------------------------------
 @app.command()
 def load(
-    source: str = typer.Option("denue", "--source", "-s", help="Data source to load"),
     force: bool = typer.Option(
         False, "--force", "-f", help="Force load even if Gold is up-to-date"
     ),
@@ -177,11 +294,7 @@ def load(
 
     Promotes the Silver DuckDB warehouse to Gold for production use.
     """
-    if source != "denue":
-        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
-        raise typer.Exit(code=1)
-
-    console.print("[bold cyan]Starting DENUE Loader[/bold cyan]")
+    console.print("[bold cyan]Starting Loader[/bold cyan]")
 
     try:
         from src_etl.transformers.denue import DenuePipelineOrchestrator
@@ -207,32 +320,112 @@ def load(
 # ---------------------------------------------------------------------------
 @app.command()
 def pipeline(
-    source: str = typer.Option("denue", "--source", "-s", help="Data source"),
+    run_extract: bool = typer.Option(
+        False,
+        "--extract/--no-extract",
+        help="Run extract (DENUE Selenium + SESNSP) before transform; OFF by default",
+    ),
+    denue: bool = typer.Option(True, "--denue/--no-denue", help="Include the DENUE source"),
+    ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
+    normalize_dates: bool = typer.Option(
+        True, "--normalize-dates/--no-normalize-dates", help="Normalize fecha_alta dates"
+    ),
+    h3_cells: bool = typer.Option(
+        True, "--h3-cells/--no-h3-cells", help="Backfill H3 cells from coordinates"
+    ),
+    clee_resolution_radio: bool = typer.Option(
+        True,
+        "--clee-resolution-radio/--no-clee-resolution-radio",
+        help="Run CLEE resolution (radio/BallTree)",
+    ),
+    clee_resolution_h3: bool = typer.Option(
+        True,
+        "--clee-resolution-h3/--no-clee-resolution-h3",
+        help="Run CLEE resolution (H3 blocking), comparison track",
+    ),
+    sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
+    load_gold: bool = typer.Option(
+        True, "--load/--no-load", help="Load Silver -> Gold at the end"
+    ),
+    only: list[Section] = typer.Option(
+        None,
+        "--only",
+        help=(
+            "Run ONLY these sections (repeatable): ingest, normalize-dates, h3-cells, "
+            "clee-radio, clee-h3, sesnsp, load (+ groups denue, clee). Overrides --no-*."
+        ),
+    ),
+    headless: bool = typer.Option(True, help="Run browser in headless mode (denue extract only)"),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
-    Run full pipeline: Extract -> Transform -> Load.
+    Run the full pipeline globally: [Extract ->] Transform -> Load.
 
-    Executes the complete ETL chain with tracking in metadata.duckdb.
+    Like `transform`, this runs EVERY section by default -- DENUE (all
+    sub-steps incl. CLEE) + SESNSP -> Silver, then Load Silver -> Gold. Opt out
+    of any section with a --no-* flag, or allowlist with --only (the `load`
+    token also applies here). Extract is OFF by default (it re-scrapes INEGI);
+    enable it with --extract.
     """
-    if source != "denue":
-        console.print(f"[bold red]Unknown source: {source}. Available: denue[/bold red]")
-        raise typer.Exit(code=1)
+    selected = _expand_only(only)
+    if selected is not None:
+        ingest = Section.ingest in selected
+        normalize_dates = Section.normalize_dates in selected
+        h3_cells = Section.h3_cells in selected
+        clee_resolution_radio = Section.clee_radio in selected
+        clee_resolution_h3 = Section.clee_h3 in selected
+        sesnsp = Section.sesnsp in selected
+        load_gold = Section.load in selected
+        denue = ingest or normalize_dates or h3_cells or clee_resolution_radio or clee_resolution_h3
 
-    console.print("[bold cyan]Starting Full Pipeline (DENUE)[/bold cyan]")
+    console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
     console.print("=" * 60)
+    if force:
+        console.print("[bold orange3]   FORCE MODE: Reprocessing all data[/bold orange3]")
+
+    overall_ok = True
 
     try:
         from src_etl.transformers.denue import DenuePipelineOrchestrator
 
-        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
-        success = transformer.run_full_pipeline(force=force)
+        if run_extract:
+            console.print("[bold cyan]== Extract ==[/bold cyan]")
+            if denue:
+                _run_denue_extract(headless=headless, output=None, force=force)
+            if sesnsp:
+                _run_sesnsp_extract(force=force)
+
+        if denue:
+            console.print("[bold blue]== DENUE Transform ==[/bold blue]")
+            overall_ok = (
+                _run_denue_transform(
+                    ingest=ingest,
+                    normalize_dates=normalize_dates,
+                    h3_cells=h3_cells,
+                    clee_resolution_radio=clee_resolution_radio,
+                    clee_resolution_h3=clee_resolution_h3,
+                    force=force,
+                )
+                and overall_ok
+            )
+
+        if sesnsp:
+            console.print("[bold blue]== SESNSP Transform ==[/bold blue]")
+            if not _run_sesnsp_transform(force=force):
+                console.print("[bold yellow]SESNSP transform failed. Check logs.[/bold yellow]")
+                overall_ok = False
+
+        if load_gold:
+            console.print("[bold cyan]== Load Silver -> Gold ==[/bold cyan]")
+            transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
+            if not transformer.run_load_stage(force=force):
+                console.print("[bold yellow]Load stage failed. Check logs.[/bold yellow]")
+                overall_ok = False
 
         console.print("=" * 60)
-        if success:
+        if overall_ok:
             console.print("[bold green]Pipeline completed successfully![/bold green]")
-
-            status = transformer.get_pipeline_status()
+            status = DenuePipelineOrchestrator(data_root=DATA_ROOT).get_pipeline_status()
             console.print("\n[bold]Pipeline Summary:[/bold]")
             console.print(f"  Silver: {status['silver_db']}")
             console.print(f"  Gold: {status['gold_db']}")
@@ -281,10 +474,7 @@ def build_entidades():
 # RETRY (placeholder)
 # ---------------------------------------------------------------------------
 @app.command()
-def retry(
-    source: str = typer.Option("denue", "--source", "-s", help="Data source to retry"),
-    output: Path = typer.Option(BRONZE_DIR, help="Output directory"),
-):
+def retry():
     """
     Retry failed extractions based on metadata history.
     """

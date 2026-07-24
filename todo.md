@@ -739,11 +739,11 @@ Decisión del usuario: relaciones FÍSICAS por id, no joins por string
       recreado; `clee_propagado_radio` y `h3_cell_9/5` intactos (76.7M);
       catálogos 39/45/3/8 con descripción; `SILVER_READ_QUERY` resuelve
       labels OK.
-- [ ] (Opcional, limpieza) **Eliminar `scripts/reorganize_domain_ids.py`
-      + target `reorganize-domain-ids` del Makefile**: era ONE-TIME y ya
-      se aplicó al Silver real — nunca volverá a usarse (bases nuevas
-      nacen relacionales vía writer/migraciones; el script queda en el
-      historial de git si se necesitara consultar). Borrar también
+- [x] (Limpieza) **Eliminado `scripts/reorganize_domain_ids.py` + target
+      `reorganize-domain-ids` del Makefile**: era ONE-TIME y ya se aplicó
+      al Silver real — nunca volverá a usarse (bases nuevas nacen
+      relacionales vía writer/migraciones; el script queda en el historial
+      de git si se necesitara consultar). Borrar también
       `data/etl_reorganize_ids.log` cuando estorbe.
 - [ ] `make load` para propagar el esquema nuevo a Gold. Nota: el archivo
       .duckdb del Silver no encoge tras el rebuild (bloques se

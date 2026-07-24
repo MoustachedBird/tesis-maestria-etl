@@ -1,4 +1,4 @@
-.PHONY: help setup extract transform load clee-resolution-radio clee-resolution-h3 h3-backfill reorganize-domain-ids pipeline clean db-migrate db-downgrade db-reset test
+.PHONY: help setup extract transform load pipeline build-entidades clean db-migrate db-downgrade db-reset test
 .DEFAULT_GOAL := help
 
 # Variables
@@ -24,35 +24,22 @@ api: ## Run FastAPI dev server
 
 # ─── ETL Pipeline ────────────────────────────────────────────────────────────
 
-extract: ## Extract data from source (Bronze)
+# Comandos globales: sin ARGS corren TODO; aisla secciones con flags --no-* (ver AGENTS.md).
+
+extract: ## Extract ALL sources (DENUE + SESNSP -> Bronze); ARGS="--no-denue|--no-sesnsp|--force"
 	$(PYTHON) -m src_etl.main extract $(ARGS)
 
-transform: ## Transform raw data (Bronze -> Silver)
+transform: ## Transform ALL sections (Bronze -> Silver); aisla con ARGS="--no-* ..."
 	$(PYTHON) -m src_etl.main transform $(ARGS)
 
-extract-sesnsp: ## Extract SESNSP incidencia delictiva municipal (datos.gob.mx -> Bronze)
-	$(PYTHON) -m src_etl.main extract --source sesnsp $(ARGS)
+load: ## Load Silver -> Gold; ARGS="--force"
+	$(PYTHON) -m src_etl.main load $(ARGS)
 
-transform-sesnsp: ## Transform SESNSP CSV (Bronze -> Silver sesnsp_incidencia_municipal)
-	$(PYTHON) -m src_etl.main transform --source sesnsp $(ARGS)
+pipeline: ## Full pipeline global (Transform -> Load; --extract para incluir descarga)
+	$(PYTHON) -m src_etl.main pipeline $(ARGS)
 
 build-entidades: ## Build entidades_economicas dimension (run AFTER CLEE resolution)
 	$(PYTHON) -m src_etl.main build-entidades
-
-load: ## Load Silver -> Gold
-	$(PYTHON) -m src_etl.main load $(ARGS)
-
-clee-resolution-radio: ## Run CLEE Resolution (radio/BallTree -> clee_propagado_radio)
-	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-h3-cells --clee-resolution $(ARGS)
-
-clee-resolution-h3: ## Run CLEE Resolution (H3 blocking -> clee_propagado_h3)
-	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-h3-cells --no-clee-resolution --clee-resolution-h3 $(ARGS)
-
-h3-backfill: ## Backfill H3 cells (h3_cell_9/h3_cell_5) in Silver
-	$(PYTHON) -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells $(ARGS)
-
-reorganize-domain-ids: ## ONE-TIME: rebuild establecimientos con FKs por id (correr tras db-migrate)
-	$(PYTHON) scripts/reorganize_domain_ids.py
 
 eval-masked-clee-extract: ## Fase 7: extrae muestra de Silver (read-only) a data/eval/
 	$(PYTHON) scripts/evaluate_masked_clee.py extract $(ARGS)
@@ -65,9 +52,6 @@ eval-masked-clee-chain: ## Fase 7: experimento dos saltos (target via intermedio
 
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry
-
-pipeline: ## Full pipeline (Extract -> Transform -> Load)
-	$(PYTHON) -m src_etl.main pipeline $(ARGS)
 
 pipeline-steps: extract transform load ## Pipeline step by step
 	@echo "Pipeline completed"

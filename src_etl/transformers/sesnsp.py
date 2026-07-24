@@ -289,7 +289,7 @@ class SesnspProcessor:
         if csv_path is None:
             logger.warning(
                 f"⚠️ No hay CSV de SESNSP en {self.bronze_dir}. "
-                "Corre primero: extract --source sesnsp"
+                'Corre primero: make extract (o make extract ARGS="--only sesnsp")'
             )
             return False
 

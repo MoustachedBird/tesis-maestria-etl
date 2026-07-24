@@ -62,7 +62,7 @@ normalize-dates, resolución CLEE, build-entidades, load) se lanza con
 
 ```bash
 caffeinate -dims make transform ARGS="..."
-caffeinate -dims make clee-resolution-radio ARGS="..."
+caffeinate -dims make pipeline ARGS="..."
 ```
 
 Razón: las corridas duran horas/días y un reposo a medio camino las
@@ -141,7 +141,7 @@ en `make db-migrate` con el archivo y los valores ofensores.
 
 ## Normalize-Dates Step
 
-The transform pipeline has 4 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution**.
+The DENUE transform pipeline has 5 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution-radio -> clee-resolution-h3** (see "Comando único global" below for how they combine with SESNSP in one `make transform`).
 
 The `normalize-dates` step parses `fecha_alta_str` (raw string from INEGI) into `fecha_alta_date` (DATE type, format `YYYY-MM-01`) directly in the Silver DuckDB via SQL UPDATE, one period at a time.
 
@@ -168,13 +168,15 @@ Plus 1 NULL row. Output format is always `DATE YYYY-MM-01`.
 ### CLI Usage
 
 ```bash
-# Run only normalize-dates (skip ingest and clee-resolution)
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-clee-resolution
+# Run only normalize-dates (skip everything else)
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-h3-cells \
+    --no-clee-resolution-radio --no-clee-resolution-h3 --no-sesnsp
 
 # Force re-normalize all periods
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-clee-resolution --force
+uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-h3-cells \
+    --no-clee-resolution-radio --no-clee-resolution-h3 --no-sesnsp --force
 
-# Full transform (ingest + normalize-dates + clee-resolution, all on by default)
+# Full transform (DENUE + SESNSP, todo prendido por default)
 uv run python -m src_etl.main transform
 ```
 
@@ -311,19 +313,17 @@ Defined in `clee_resolution_config.py` with full docstrings:
 
 ```bash
 # h3-cells stage only (incremental: rows with NULL h3_cell_9)
-make h3-backfill
-# equivalent:
-uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --no-clee-resolution --h3-cells
+make transform ARGS="--only h3-cells"
 
 # Recompute ALL rows with valid coords (drop ix_estab_h3_9 first, see above)
-make h3-backfill ARGS="--force"
+make transform ARGS="--only h3-cells --force"
 ```
 
 ---
 
 ## CLEE Resolution Step (Entity Resolution)
 
-The transform pipeline has 4 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution**. This section documents the CLEE resolution stage in detail.
+The DENUE transform pipeline has 5 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution-radio -> clee-resolution-h3**. This section documents the CLEE resolution stage in detail.
 
 ### Purpose
 
@@ -553,11 +553,14 @@ method: force resets ONLY that method's column; the KB cache is split per
 method (`kb_cache/radio/` vs `kb_cache/h3/`); NEW_* synthetic IDs from the
 H3 method carry a distinct prefix suffix so they never collide with radio's.
 
+Aísla la sección CLEE apagando el resto (ver "Comando único global"):
+
 ```bash
-make clee-resolution-radio                   # radio/BallTree -> clee_propagado_radio
-make clee-resolution-h3                      # H3 blocking   -> clee_propagado_h3 (default OFF in transform)
-make clee-resolution-radio ARGS="--force"    # reset ONLY clee_propagado_radio (+ its KB cache) and re-resolve
-make clee-resolution-h3 ARGS="--force"       # reset ONLY clee_propagado_h3 (+ its KB cache) and re-resolve
+make transform ARGS="--only clee-radio"           # radio/BallTree -> clee_propagado_radio
+make transform ARGS="--only clee-h3"              # H3 blocking -> clee_propagado_h3
+make transform ARGS="--only clee"                 # ambas propagaciones
+make transform ARGS="--only clee-radio --force"   # reset ONLY radio (+ su KB cache) y re-resolver
+make transform ARGS="--only clee-h3 --force"      # reset ONLY h3 (+ su KB cache) y re-resolver
 ```
 
 `--force` is per-method: it NULLs only the active method's column and clears
@@ -597,16 +600,16 @@ heartbeat every `PROGRESS_LOG_INTERVAL` rows all land in the right file.
 ### CLI Usage
 
 ```bash
-# Run only CLEE resolution (skip ingest and normalize-dates)
-uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution
+# Run only CLEE resolution radio (skip everything else)
+uv run python -m src_etl.main transform --only clee-radio
 
 # Force re-resolve all periods (resets clee_propagado_radio to NULL first)
-uv run python -m src_etl.main transform --no-ingest --no-normalize-dates --clee-resolution --force
+uv run python -m src_etl.main transform --only clee-radio --force
 
 # Or via Makefile
-make clee-resolution-radio
+make transform ARGS="--only clee-radio"
 
-# Full transform (ingest + normalize-dates + clee-resolution, all on by default)
+# Full transform (DENUE completo + SESNSP, todo prendido por default)
 uv run python -m src_etl.main transform
 ```
 
@@ -678,11 +681,14 @@ crimen por municipio.
 
 ### CLI / Makefile
 
+SESNSP se aísla con `--only sesnsp` sobre el comando global (ya NO hay targets
+`extract-sesnsp` / `transform-sesnsp`; ver "Comando único global"):
+
 ```bash
-make extract-sesnsp                    # CKAN discovery + descarga a data/bronze/sesnsp/
-make transform-sesnsp                  # CSV mas reciente -> Silver (catalogo + hechos)
-make transform-sesnsp ARGS="--force"   # reprocesar el corte ya cargado
-# equivalentes: uv run python -m src_etl.main extract|transform --source sesnsp
+make extract   ARGS="--only sesnsp"           # CKAN discovery + descarga a data/bronze/sesnsp/
+make transform ARGS="--only sesnsp"           # CSV mas reciente -> Silver (catalogo + hechos)
+make transform ARGS="--only sesnsp --force"   # reprocesar el corte ya cargado
+# make extract / make transform SIN flags ya incluyen SESNSP.
 ```
 
 `make load` no necesita nada especial: copia el archivo Silver completo a
@@ -915,19 +921,19 @@ uv run pytest -vv                          # Verbose
 ## Makefile Targets
 
 ```bash
-# ETL Pipeline
-make extract                     # Extract data from INEGI (Bronze)
+# ETL Pipeline (comandos GLOBALES: sin ARGS corren todo; aisla con --only / --no-*)
+make extract                     # Extract TODAS las fuentes (DENUE + SESNSP -> Bronze)
 make extract ARGS="--force"      # Force re-download all files
-make extract-sesnsp              # Extract SESNSP crime data (datos.gob.mx -> Bronze)
-make transform-sesnsp            # Transform SESNSP CSV -> Silver
-make transform                   # Transform raw data (Bronze -> Silver)
-make transform-force             # Force reprocess all
+make extract ARGS="--only sesnsp"  # Solo SESNSP (o --only denue para solo DENUE)
+make transform                   # Transform TODAS las secciones (DENUE + SESNSP -> Silver)
+make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3"  # sin propagacion CLEE
+make transform ARGS="--only sesnsp"                    # Solo SESNSP
+make transform ARGS="--only clee-radio"                # Solo una seccion (allowlist)
+make transform ARGS="--force"                          # Force reprocess all
 make load                        # Load Silver -> Gold
-make h3-backfill                 # Backfill h3_cell_9/h3_cell_5 in Silver (incremental)
-make clee-resolution-radio       # CLEE Resolution radio/BallTree -> clee_propagado_radio
-make clee-resolution-h3          # CLEE Resolution H3 blocking -> clee_propagado_h3
-make pipeline                    # Full: Extract -> Transform -> Load
-make pipeline-force              # Full pipeline with force mode
+make pipeline                    # Full global: Transform -> Load (--extract incluye descarga)
+make pipeline ARGS="--force"     # Full pipeline con force
+# Aislar secciones: --only <token> (ver "Comando único global" para el recetario)
 
 # Database
 make db-migrate                  # Run pending Alembic migrations
@@ -945,6 +951,74 @@ make test-unit / test-integration / test-db / test-fast
 make test-cov                    # Tests with coverage report
 make lint / lint-fix / format    # Ruff linting and formatting
 ```
+
+### Comando único global (extract / transform / load / pipeline)
+
+`extract`, `transform`, `load` y `pipeline` son **comandos globales**: sin
+argumentos corren **todas** las fuentes y secciones. No hay que especificar
+la fuente ni correr comandos por separado; el default es "hazlo todo" y cada
+sección se **desactiva** con su flag `--no-*` (vía `ARGS="..."`). Ya no existe
+`--source` **ni** targets tipo `extract-sesnsp` / `clee-resolution-radio`:
+**todo se hace con el comando global + flags**.
+
+- `make extract` → DENUE **+** SESNSP (Bronze).
+- `make transform` → DENUE (`ingest → normalize-dates → h3-cells →
+  clee-resolution-radio → clee-resolution-h3`) **+** SESNSP
+  (`sesnsp_incidencia_municipal`), todo en una sola corrida.
+- `make pipeline` → Transform global **+** Load (agrega `--extract` para
+  incluir la descarga; extract va OFF por default porque re-scrapea INEGI).
+
+Hay **dos modos** para elegir secciones (se pasan por `ARGS="..."`):
+
+- **Substractivo — `--no-*`** (default ON): corre todo y apaga lo que listes.
+- **Allowlist — `--only`** (repetible): corre SOLO lo que listes; el resto
+  arranca OFF. Ideal para aislar una sección sin escribir la cadena larga de
+  `--no-*`. `--only` gana sobre los `--no-*`. Tokens inválidos → error con la
+  lista de válidos (validado por Enum).
+
+| Sección | Flag opt-out (`--no-*`) | Token `--only` |
+|---------|-------------------------|----------------|
+| bloque DENUE completo | `--no-denue` | `denue` (grupo) |
+| ingest de CSVs a Silver | `--no-ingest` | `ingest` |
+| normalización `fecha_alta` | `--no-normalize-dates` | `normalize-dates` |
+| backfill de celdas H3 | `--no-h3-cells` | `h3-cells` |
+| propagación CLEE radio/BallTree | `--no-clee-resolution-radio` | `clee-radio` |
+| propagación CLEE H3 (comparación) | `--no-clee-resolution-h3` | `clee-h3` |
+| ambas propagaciones CLEE | — | `clee` (grupo) |
+| transform SESNSP | `--no-sesnsp` | `sesnsp` |
+| load Silver→Gold (solo `pipeline`) | `--no-load` | `load` |
+
+**Recetario** con `--only` (reemplaza a los targets que se eliminaron):
+
+```bash
+# Solo SESNSP (antes extract-sesnsp / transform-sesnsp):
+make extract   ARGS="--only sesnsp"
+make transform ARGS="--only sesnsp"
+
+# Poblar Silver SIN propagar CLEE (radio ni h3), incluye SESNSP:
+caffeinate -dims make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3"
+
+# Solo CLEE radio (antes clee-resolution-radio); +" --force" para re-resolver:
+caffeinate -dims make transform ARGS="--only clee-radio"
+
+# Solo CLEE H3 (antes clee-resolution-h3):
+caffeinate -dims make transform ARGS="--only clee-h3"
+
+# Ambas propagaciones CLEE:
+caffeinate -dims make transform ARGS="--only clee"
+
+# Solo backfill H3 cells (antes h3-backfill):
+make transform ARGS="--only h3-cells"
+```
+
+> El `--force` conserva sus semánticas por sección: `--only clee-radio --force`
+> resetea SOLO `clee_propagado_radio` (+ su KB cache) y re-resuelve; igual para
+> `clee-h3` con su track.
+
+> Nota de costo: con el default "todo ON", `make transform` corre la
+> propagación CLEE **radio y H3** (la H3 es un track de comparación). Son
+> horas cada una; si solo necesitas producción, pasa
+> `--no-clee-resolution-h3`.
 
 ---
 
