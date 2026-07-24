@@ -1,180 +1,86 @@
-"""Tests for seed loader validation functions."""
+"""Cada loader siembra su tabla desde el parquet, via el camino central.
+
+La logica de carga/validacion vive en `loaders/seeds.py` (probada en
+test_seeds.py); aqui se verifica que cada loader apunta a la tabla y el
+archivo correctos y que la siembra es idempotente y append-only sobre el
+esquema real del modelo.
+"""
 
 import duckdb
-import polars as pl
 import pytest
+from sqlalchemy import create_engine
 
-from src_etl.loaders import geography, scian
+from src_etl.db.base import Base
+from src_etl.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
+from src_etl.loaders import dominios, estratos, geography, scian
 
 
-def _write_geography_seeds(tmp_path):
-    """Escribe los 3 seeds parquet minimos de geografia en tmp_path."""
-    pl.DataFrame({"cve_ent": ["01"], "entidad": ["Aguascalientes"]}).write_parquet(
-        tmp_path / "seed_entidades.parquet"
-    )
-    pl.DataFrame(
-        {"cve_ent": ["01"], "cve_mun": ["001"], "municipio": ["Aguascalientes"]}
-    ).write_parquet(tmp_path / "seed_municipios.parquet")
-    pl.DataFrame(
-        {
-            "cve_ent": ["01"],
-            "cve_mun": ["001"],
-            "cve_loc": ["0001"],
-            "localidad": ["Aguascalientes"],
-        }
-    ).write_parquet(tmp_path / "seed_localidades.parquet")
+def _db_with_tables(tmp_path, *table_names) -> duckdb.DuckDBPyConnection:
+    """Crea las tablas dadas con el esquema del modelo (como la migracion)."""
+    path = tmp_path / "seeds.duckdb"
+    engine = create_engine(f"duckdb:///{path}")
+    Base.metadata.create_all(engine, tables=[Base.metadata.tables[n] for n in table_names])
+    engine.dispose()
+    return duckdb.connect(str(path))
 
 
 @pytest.mark.unit
-class TestGeographyValidateSeeds:
-    """Test geography.validate_seeds()."""
+class TestSiembraCadaCatalogo:
+    """load_seeds nativo puebla la tabla desde el parquet del repo."""
 
-    def test_valid_seeds_pass(self, tmp_path):
-        # Create valid seed files
-        pl.DataFrame({"cve_ent": ["01"], "entidad": ["Aguascalientes"]}).write_parquet(
-            tmp_path / "seed_entidades.parquet"
+    def test_geografia(self, tmp_path):
+        conn = _db_with_tables(
+            tmp_path, "denue_entidades", "denue_municipios", "denue_localidades"
         )
-        pl.DataFrame(
-            {"cve_ent": ["01"], "cve_mun": ["001"], "municipio": ["Aguascalientes"]}
-        ).write_parquet(tmp_path / "seed_municipios.parquet")
-        pl.DataFrame(
-            {
-                "cve_ent": ["01"],
-                "cve_mun": ["001"],
-                "cve_loc": ["0001"],
-                "localidad": ["Aguascalientes"],
-            }
-        ).write_parquet(tmp_path / "seed_localidades.parquet")
+        stats = geography.load_seeds(conn)
+        assert stats["denue_entidades"] == 32
+        assert conn.execute("SELECT COUNT(*) FROM denue_entidades").fetchone()[0] == 32
 
-        assert geography.validate_seeds(tmp_path) is True
+    def test_scian_deriva_jerarquia(self, tmp_path):
+        conn = _db_with_tables(tmp_path, "denue_actividades_economicas")
+        scian.load_seeds(conn)
+        row = conn.execute(
+            "SELECT sector, subsector, rama FROM denue_actividades_economicas "
+            "WHERE codigo_act = '461110'"
+        ).fetchone()
+        assert row == ("46", "461", "4611")
 
-    def test_missing_file_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="Missing seed file"):
-            geography.validate_seeds(tmp_path)
-
-    def test_empty_file_raises(self, tmp_path):
-        pl.DataFrame({"cve_ent": [], "entidad": []}).write_parquet(
-            tmp_path / "seed_entidades.parquet"
+    def test_dominios(self, tmp_path):
+        conn = _db_with_tables(
+            tmp_path,
+            "denue_tipos_vialidad",
+            "denue_tipos_asentamiento",
+            "denue_tipos_unidad_economica",
         )
-        with pytest.raises(ValueError, match="is empty"):
-            geography.validate_seeds(tmp_path)
+        stats = dominios.load_seeds(conn)
+        assert stats["denue_tipos_asentamiento"] == 45
 
-    def test_wrong_columns_raises(self, tmp_path):
-        # Missing 'entidad' column
-        pl.DataFrame({"cve_ent": ["01"], "wrong_col": ["x"]}).write_parquet(
-            tmp_path / "seed_entidades.parquet"
-        )
-        with pytest.raises(ValueError, match="missing columns"):
-            geography.validate_seeds(tmp_path)
+    def test_estratos(self, tmp_path):
+        conn = _db_with_tables(tmp_path, "denue_estratos_personal")
+        stats = estratos.load_seeds(conn)
+        assert stats["denue_estratos_personal"] == 8
 
 
 @pytest.mark.unit
-class TestScianValidateSeeds:
-    """Test scian.validate_seeds()."""
+class TestIdempotenteYAppendOnly:
+    """Re-sembrar no duplica ni borra; una fila referenciada sobrevive."""
 
-    def test_valid_seeds_pass(self, tmp_path):
-        pl.DataFrame({"codigo_act": ["111110"], "nombre_act": ["Cultivo de soya"]}).write_parquet(
-            tmp_path / "seed_actividades.parquet"
+    def test_reseed_no_duplica(self, tmp_path):
+        conn = _db_with_tables(
+            tmp_path, "denue_entidades", "denue_municipios", "denue_localidades"
         )
+        geography.load_seeds(conn)
+        geography.load_seeds(conn)  # segunda vez
+        assert conn.execute("SELECT COUNT(*) FROM denue_entidades").fetchone()[0] == 32
 
-        assert scian.validate_seeds(tmp_path) is True
-
-    def test_missing_file_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="Missing seed file"):
-            scian.validate_seeds(tmp_path)
-
-    def test_empty_file_raises(self, tmp_path):
-        pl.DataFrame({"codigo_act": [], "nombre_act": []}).write_parquet(
-            tmp_path / "seed_actividades.parquet"
+    def test_no_dropea_catalogo_referenciado(self, tmp_path):
+        conn = _db_with_tables(
+            tmp_path, "denue_entidades", "denue_municipios", "denue_localidades"
         )
-        with pytest.raises(ValueError, match="is empty"):
-            scian.validate_seeds(tmp_path)
-
-    def test_wrong_columns_raises(self, tmp_path):
-        pl.DataFrame({"codigo_act": ["111110"], "bad_col": ["x"]}).write_parquet(
-            tmp_path / "seed_actividades.parquet"
-        )
-        with pytest.raises(ValueError, match="missing columns"):
-            scian.validate_seeds(tmp_path)
-
-
-@pytest.mark.unit
-class TestGeographyLoadSeeds:
-    """load_seeds() debe ser idempotente y jamas dropear los catalogos."""
-
-    def test_force_does_not_drop_fk_referenced_catalog(self, tmp_path):
-        """Regresion: sesnsp_incidencia_municipal referencia denue_entidades/
-        denue_municipios con FK; el bootstrap force debe re-sembrar sin DROP."""
-        _write_geography_seeds(tmp_path)
-        conn = duckdb.connect()
-        geography.load_seeds(conn, tmp_path, force=False)
-
+        geography.load_seeds(conn)
         conn.execute(
             "CREATE TABLE fact_ref (cve_ent VARCHAR REFERENCES denue_entidades(cve_ent))"
         )
         conn.execute("INSERT INTO fact_ref VALUES ('01')")
-
-        geography.load_seeds(conn, tmp_path, force=True)
-
+        geography.load_seeds(conn)  # no debe dropear ni truncar
         assert conn.execute("SELECT COUNT(*) FROM fact_ref").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM denue_entidades").fetchone()[0] == 1
-
-    def test_load_seeds_idempotent(self, tmp_path):
-        _write_geography_seeds(tmp_path)
-        conn = duckdb.connect()
-
-        geography.load_seeds(conn, tmp_path)
-        geography.load_seeds(conn, tmp_path, force=True)
-
-        for table in ("denue_entidades", "denue_municipios", "denue_localidades"):
-            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
-
-    def test_load_seeds_inserts_only_missing_rows(self, tmp_path):
-        _write_geography_seeds(tmp_path)
-        conn = duckdb.connect()
-        geography.load_seeds(conn, tmp_path)
-
-        pl.DataFrame(
-            {"cve_ent": ["01", "02"], "entidad": ["Aguascalientes", "Baja California"]}
-        ).write_parquet(tmp_path / "seed_entidades.parquet")
-        geography.load_seeds(conn, tmp_path)
-
-        rows = conn.execute("SELECT cve_ent FROM denue_entidades ORDER BY cve_ent").fetchall()
-        assert [r[0] for r in rows] == ["01", "02"]
-
-
-@pytest.mark.unit
-class TestGeographyConstants:
-    """Test geography module constants."""
-
-    def test_seed_mappings_order(self):
-        """FK order: entidades -> municipios -> localidades."""
-        tables = [table for _, table, _ in geography.SEED_MAPPINGS]
-        assert tables == [
-            "denue_entidades",
-            "denue_municipios",
-            "denue_localidades",
-        ]
-
-    def test_expected_columns_defined(self):
-        for file_name, _, _ in geography.SEED_MAPPINGS:
-            assert file_name in geography.EXPECTED_COLUMNS
-
-    def test_ddl_defined_for_all_tables(self):
-        for _, table, _ in geography.SEED_MAPPINGS:
-            assert table in geography.TABLE_DDL
-
-
-@pytest.mark.unit
-class TestScianConstants:
-    """Test SCIAN module constants."""
-
-    def test_table_name(self):
-        assert scian.TABLE_NAME == "denue_actividades_economicas"
-
-    def test_expected_columns(self):
-        assert "codigo_act" in scian.EXPECTED_COLUMNS
-        assert "nombre_act" in scian.EXPECTED_COLUMNS
-
-    def test_ddl_contains_primary_key(self):
-        assert "PRIMARY KEY" in scian.TABLE_DDL

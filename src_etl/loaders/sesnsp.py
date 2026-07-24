@@ -29,7 +29,8 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from src_etl.loaders.seed_validation import validate_seed
+from src_etl.loaders import seeds
+from src_etl.loaders.seeds import read_seed, seed_sqlalchemy
 
 SESNSP_DELITOS_DDL = """
 CREATE TABLE IF NOT EXISTS sesnsp_delitos (
@@ -70,9 +71,6 @@ SEED_DELITOS_FILE = "seed_sesnsp_delitos.parquet"
 DELITOS_TABLE = "sesnsp_delitos"
 """Tabla del catalogo (poblada desde el seed en la migracion base SESNSP)."""
 
-DISPLAY_NAME = "sesnsp_delitos"
-"""Nombre para los stats de siembra."""
-
 DELITO_KEY_COLUMNS = ["bien_juridico", "tipo", "subtipo", "modalidad"]
 """Clave natural del catalogo de delitos, en orden jerarquico SESNSP."""
 
@@ -85,54 +83,22 @@ def ensure_tables(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 def delitos_seed_path(seeds_dir: Path | None = None) -> Path:
-    """Ruta del seed del catalogo; falla claro si no esta versionado."""
-    if seeds_dir is None:
-        from src_etl.core.config import get_settings
-
-        seeds_dir = Path(get_settings().SEEDS_DIR)
-    path = seeds_dir / SEED_DELITOS_FILE
-    if not path.exists():
-        raise FileNotFoundError(f"Seed requerido no encontrado: {path}")
-    return path
+    """Ruta del seed del catalogo (falla claro si no esta versionado)."""
+    return seeds.seed_path(SEED_DELITOS_FILE, seeds_dir)
 
 
 def build_delitos_rows(seeds_dir: Path | None = None) -> list[dict]:
     """Filas del catalogo leidas del seed parquet, ya validadas."""
-    path = delitos_seed_path(seeds_dir)
-    return validate_seed(pl.read_parquet(path), DELITOS_TABLE, str(path)).to_dicts()
+    return read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir).to_dicts()
 
 
 def load_seeds_sqlalchemy(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
-    """
-    Siembra `sesnsp_delitos` desde el parquet (entry point de la migracion).
-
-    Args:
-        connection: SQLAlchemy connection.
-        seeds_dir: Directorio de seeds (default: settings.SEEDS_DIR).
-        truncate: Si True, vacia la tabla antes de sembrar cuando su
-            contenido difiere del parquet.
-
-    Returns:
-        dict: display_name -> numero de filas del catalogo.
-    """
-    from sqlalchemy import text
-
-    rows = build_delitos_rows(seeds_dir)
-    cols = list(rows[0].keys())
-    existing = connection.execute(
-        text(f"SELECT {', '.join(cols)} FROM {DELITOS_TABLE}")
-    ).fetchall()
-    if [tuple(r) for r in existing] != [tuple(r[c] for c in cols) for r in rows]:
-        if truncate:
-            connection.execute(text(f"DELETE FROM {DELITOS_TABLE}"))
-        params = ", ".join(f":{c}" for c in cols)
-        connection.execute(
-            text(f"INSERT INTO {DELITOS_TABLE} ({', '.join(cols)}) VALUES ({params})"), rows
-        )
-        print(f"   Loaded {len(rows):,} {DISPLAY_NAME}")
-    return {DISPLAY_NAME: len(rows)}
+    """Siembra `sesnsp_delitos` desde el parquet (entry point de la migracion)."""
+    df = read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir)
+    seed_sqlalchemy(connection, DELITOS_TABLE, df, truncate=truncate)
+    return {DELITOS_TABLE: df.height}
 
 
 def validate_delitos_del_csv(

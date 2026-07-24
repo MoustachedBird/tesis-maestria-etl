@@ -9,9 +9,10 @@ INSERT OR IGNORE de la siembra.
 import polars as pl
 import pytest
 
-from src_etl.loaders.dominios import TABLES, build_rows, seed_path
+from src_etl.loaders import dominios
+from src_etl.loaders.dominios import TABLES, build_rows
 from src_etl.loaders.estratos import build_rows as build_estrato_rows
-from src_etl.loaders.seed_validation import validate_seed
+from src_etl.loaders.seeds import validate_seed
 
 TABLA = "denue_tipos_asentamiento"
 
@@ -19,7 +20,7 @@ TABLA = "denue_tipos_asentamiento"
 @pytest.fixture()
 def seed() -> pl.DataFrame:
     """Seed real del repo (fuente de verdad del catalogo)."""
-    return pl.read_parquet(seed_path(TABLA))
+    return pl.read_parquet(dominios.seed_path(TABLA))
 
 
 @pytest.mark.unit
@@ -34,7 +35,7 @@ class TestSeedsDelRepoSonValidos:
 
     def test_todos_los_catalogos_de_dominio_tienen_seed(self):
         for table, *_ in TABLES:
-            assert seed_path(table).exists()
+            assert dominios.seed_path(table).exists()
 
 
 @pytest.mark.unit
