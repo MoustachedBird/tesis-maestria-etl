@@ -990,9 +990,9 @@ Data Flow:
 ```
 data/bronze/denue/{period}/*.zip      # Raw downloads
 data/bronze/sesnsp/*.csv              # SESNSP crime CSV (one file per monthly cut)
-data/silver/denue.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5, sesnsp_*)
+data/silver/mipymes.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5, sesnsp_*)
 data/silver/kb_cache/{radio|h3}/      # Per-method KB cache (parquet, regenerable)
-data/gold/denue.duckdb                # Gold DuckDB warehouse (production)
+data/gold/mipymes.duckdb                # Gold DuckDB warehouse (production)
 ```
 
 ### Logging Layer
@@ -1189,8 +1189,8 @@ makes bulk writes ~1000x slower, measured).
 
 ```bash
 DATABASE_BACKEND=duckdb          # or postgresql
-SILVER_DUCKDB_PATH=data/silver/denue.duckdb
-GOLD_DUCKDB_PATH=data/gold/denue.duckdb
+SILVER_DUCKDB_PATH=data/silver/mipymes.duckdb
+GOLD_DUCKDB_PATH=data/gold/mipymes.duckdb
 DUCKDB_THREADS=8
 DUCKDB_MEMORY_LIMIT=16GB
 ```
@@ -1263,8 +1263,8 @@ GET /api/v1/redoc        # ReDoc
 ```bash
 # Database
 DATABASE_BACKEND=duckdb
-SILVER_DUCKDB_PATH=data/silver/denue.duckdb
-GOLD_DUCKDB_PATH=data/gold/denue.duckdb
+SILVER_DUCKDB_PATH=data/silver/mipymes.duckdb
+GOLD_DUCKDB_PATH=data/gold/mipymes.duckdb
 DUCKDB_THREADS=8
 DUCKDB_MEMORY_LIMIT=16GB
 METADATA_DUCKDB_PATH=data/metadata.duckdb
@@ -1272,7 +1272,7 @@ METADATA_DUCKDB_PATH=data/metadata.duckdb
 # PostgreSQL (when DATABASE_BACKEND=postgresql)
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
-POSTGRES_DB=denue
+POSTGRES_DB=mipymes
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=your_password
 
@@ -1294,7 +1294,7 @@ SESNSP_RESOURCE_NAME=Incidencia delictiva municipal
 # SESNSP_DOWNLOAD_URL=            # override manual, salta el descubrimiento CKAN
 
 # Testing
-TEST_DB_PATH=data/denue_warehouse_most_recent.db
+TEST_DB_PATH=data/mipymes_warehouse_most_recent.db
 ```
 
 ---

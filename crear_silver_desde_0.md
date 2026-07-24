@@ -13,8 +13,8 @@ desde INEGI.
 Si existe una base previa, respáldala renombrando en vez de borrar:
 
 ```bash
-mv data/silver/denue.duckdb data/silver/denue_backup_$(date +%Y%m%d).duckdb
-mv data/silver/denue.duckdb.wal data/silver/denue_backup_$(date +%Y%m%d).duckdb.wal 2>/dev/null
+mv data/silver/mipymes.duckdb data/silver/mipymes_backup_$(date +%Y%m%d).duckdb
+mv data/silver/mipymes.duckdb.wal data/silver/mipymes_backup_$(date +%Y%m%d).duckdb.wal 2>/dev/null
 ```
 
 ## Secuencia

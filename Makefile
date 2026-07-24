@@ -3,8 +3,8 @@
 
 # Variables
 PYTHON := uv run python
-SILVER_DB := data/silver/denue.duckdb
-GOLD_DB := data/gold/denue.duckdb
+SILVER_DB := data/silver/mipymes.duckdb
+GOLD_DB := data/gold/mipymes.duckdb
 METADATA_DB := data/metadata.duckdb
 ALEMBIC := uv run alembic
 

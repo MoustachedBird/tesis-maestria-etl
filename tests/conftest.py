@@ -6,7 +6,7 @@ This module provides test fixtures using a HYBRID approach:
 - Integration tests use REAL production DuckDB data (realistic)
 
 Environment Variables:
-    TEST_DB_PATH: Path to production DuckDB (default: data/denue_warehouse_most_recent.db)
+    TEST_DB_PATH: Path to production DuckDB (default: data/mipymes_warehouse_most_recent.db)
 """
 
 import os
@@ -46,7 +46,7 @@ def get_test_db_path() -> str:
     Returns:
         Path to production DuckDB file
     """
-    return os.getenv("TEST_DB_PATH", "data/denue_warehouse_most_recent.db")
+    return os.getenv("TEST_DB_PATH", "data/mipymes_warehouse_most_recent.db")
 
 
 # ============================================================================

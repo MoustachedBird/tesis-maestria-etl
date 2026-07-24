@@ -100,7 +100,7 @@ class Settings(BaseSettings):
             if silver_dir is None:
                 data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
                 silver_dir = data_dir / "silver"
-            return silver_dir / "denue.duckdb"
+            return silver_dir / "mipymes.duckdb"
         return Path(v) if not isinstance(v, Path) else v
 
     @field_validator("GOLD_DUCKDB_PATH", mode="before")
@@ -112,7 +112,7 @@ class Settings(BaseSettings):
             if gold_dir is None:
                 data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
                 gold_dir = data_dir / "gold"
-            return gold_dir / "denue.duckdb"
+            return gold_dir / "mipymes.duckdb"
         return Path(v) if not isinstance(v, Path) else v
 
     # -------------------------------------------------------------------------

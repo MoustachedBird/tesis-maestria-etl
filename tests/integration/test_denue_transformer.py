@@ -34,8 +34,8 @@ def temp_transformer(tmp_path):
         shutil.copy2(seed_file, seeds_dir / seed_file.name)
 
     metadata_db = data_root / "metadata.duckdb"
-    silver_db = data_root / "silver" / "denue.duckdb"
-    gold_db = data_root / "gold" / "denue.duckdb"
+    silver_db = data_root / "silver" / "mipymes.duckdb"
+    gold_db = data_root / "gold" / "mipymes.duckdb"
 
     transformer = DenuePipelineOrchestrator(
         data_root=data_root,
