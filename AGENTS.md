@@ -918,39 +918,108 @@ uv run pytest -vv                          # Verbose
 
 ---
 
-## Makefile Targets
+## Makefile Targets — inventario completo
 
-```bash
-# ETL Pipeline (comandos GLOBALES: sin ARGS corren todo; aisla con --only / --no-*)
-make extract                     # Extract TODAS las fuentes (DENUE + SESNSP -> Bronze)
-make extract ARGS="--force"      # Force re-download all files
-make extract ARGS="--only sesnsp"  # Solo SESNSP (o --only denue para solo DENUE)
-make transform                   # Transform TODAS las secciones (DENUE + SESNSP -> Silver)
-make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3"  # sin propagacion CLEE
-make transform ARGS="--only sesnsp"                    # Solo SESNSP
-make transform ARGS="--only clee-radio"                # Solo una seccion (allowlist)
-make transform ARGS="--force"                          # Force reprocess all
-make load                        # Load Silver -> Gold
-make pipeline                    # Full global: Transform -> Load (--extract incluye descarga)
-make pipeline ARGS="--force"     # Full pipeline con force
-# Aislar secciones: --only <token> (ver "Comando único global" para el recetario)
+**Todos** los targets del `Makefile`, qué corren por debajo y si aceptan
+`ARGS`. Solo los marcados con ✅ reenvían `ARGS="..."` al CLI; en el resto
+`ARGS` se ignora en silencio (si necesitas flags ahí, invoca el módulo
+directo con `uv run python -m src_etl.main ...`).
 
-# Database
-make db-migrate                  # Run pending Alembic migrations
-make db-downgrade                # Rollback last migration
-make db-reset                    # Full reset (destructive, asks confirmation)
-make db-status                   # Migration status + index health
+### ETL (comandos globales — sin `ARGS` corren TODO)
 
-# Metadata
-make metadata-query              # Query recent job runs
-make metadata-stats              # Show pipeline statistics
+| Target | Equivale a | `ARGS` | Notas |
+|---|---|---|---|
+| `make extract` | `main extract` | ✅ | DENUE (Selenium) + SESNSP (CKAN) → Bronze |
+| `make transform` | `main transform` | ✅ | 5 sub-pasos DENUE + SESNSP → Silver |
+| `make load` | `main load` | ✅ | Silver → Gold (solo acepta `--force`) |
+| `make pipeline` | `main pipeline` | ✅ | `[Extract →] Transform → Load` |
+| `make pipeline-steps` | `extract transform load` | ❌ | Encadena los 3 targets sin flags |
+| `make pipeline-full` | `setup extract transform load` | ❌ | Igual + `uv sync` primero |
+| `make retry` | `main retry` | ❌ | **Placeholder**: hoy solo imprime un aviso |
+| `make validate` | — | ❌ | **Placeholder** ("coming soon") |
 
-# Testing
-make test                        # All tests
-make test-unit / test-integration / test-db / test-fast
-make test-cov                    # Tests with coverage report
-make lint / lint-fix / format    # Ruff linting and formatting
-```
+### Dimensión N3 y evaluación Fase 7
+
+| Target | Equivale a | `ARGS` | Notas |
+|---|---|---|---|
+| `make build-entidades` | `main build-entidades` | ❌ | Correr DESPUÉS de la resolución CLEE |
+| `make eval-masked-clee-extract` | `scripts/evaluate_masked_clee.py extract` | ✅ | Silver read-only → parquets en `data/eval/` |
+| `make eval-masked-clee` | `… evaluate` | ✅ | Default `--ref-order nearest` (producción) |
+| `make eval-masked-clee-chain` | `… chain` | ✅ | Experimento de dos saltos |
+
+### Base de datos y migraciones
+
+| Target | Qué hace |
+|---|---|
+| `make db-migrate` | `alembic upgrade head` |
+| `make db-downgrade` | `alembic downgrade -1` |
+| `make db-reset` | **Destructivo**: `downgrade base` + `upgrade head` (pide confirmación interactiva) |
+| `make db-status` | `alembic current --verbose` + historial + salud de índices (presentes/faltantes) |
+
+### Metadata, logs y limpieza
+
+| Target | Qué hace |
+|---|---|
+| `make metadata-query` | Últimos 5 job runs de `data/metadata.duckdb` (JSON) |
+| `make metadata-stats` | `DenueTransformer.get_pipeline_status()` (JSON) |
+| `make logs` | Contenido de `logs/downloads/latest/` + últimas 20 líneas de `app.log` |
+| `make clean` | Borra `__pycache__/` y `*.pyc` |
+| `make clean-logs` | Borra `logs/downloads/run_*` con más de 7 días |
+
+### Tests, calidad y entorno
+
+| Target | Qué hace |
+|---|---|
+| `make test` | `pytest` completo |
+| `make test-unit` / `test-integration` / `test-db` | `pytest -m unit` / `-m integration` / `-m db` |
+| `make test-fast` | `pytest -m "unit and not slow"` |
+| `make test-verbose` | `pytest -vv` |
+| `make test-cov` | Coverage HTML+term → `htmlcov/index.html` |
+| `make lint` / `lint-fix` / `format` | `ruff check` / `check --fix` / `format` sobre `src_etl src_metadata src_api tests` |
+| `make setup` / `make dev` | `uv sync` (dev = setup + mensaje) |
+| `make api` | `fastapi dev src_api/main.py` |
+| `make help` | Lista autogenerada de targets (default goal) |
+
+### Inventario de flags del CLI (`uv run python -m src_etl.main <cmd>`)
+
+Todo lo que va dentro de `ARGS="..."`. Los booleanos son flags de Typer
+(`--x/--no-x`); la columna Default dice cómo arranca **sin** pasar nada.
+
+| Comando | Flag | Default | Efecto |
+|---|---|---|---|
+| `extract` | `--denue/--no-denue` | ON | Descarga DENUE (Selenium, INEGI) |
+| | `--sesnsp/--no-sesnsp` | ON | Descarga SESNSP (CKAN) |
+| | `--only <token>` (repetible) | — | Allowlist; aquí solo aplican `denue` y `sesnsp` |
+| | `--headless/--no-headless` | ON | Navegador headless (solo DENUE) |
+| | `--output PATH` | `data/bronze/denue` | Override de destino (solo DENUE) |
+| | `--force` | OFF | Re-descarga TODOS los archivos |
+| `transform` | `--denue/--no-denue` | ON | Bloque DENUE completo |
+| | `--ingest/--no-ingest` | ON | CSVs crudos → Silver |
+| | `--normalize-dates/--no-normalize-dates` | ON | Normaliza `fecha_alta` |
+| | `--h3-cells/--no-h3-cells` | ON | Backfill `h3_cell_9`/`h3_cell_5` |
+| | `--clee-resolution-radio/--no-…` | ON | Propagación radio/BallTree |
+| | `--clee-resolution-h3/--no-…` | ON | Propagación H3 (track de comparación) |
+| | `--sesnsp/--no-sesnsp` | ON | Transform SESNSP |
+| | `--only <token>` (repetible) | — | Allowlist (gana sobre los `--no-*`) |
+| | `--force` / `-f` | OFF | Reprocesa todo (semántica por sección, ver abajo) |
+| `load` | `--force` / `-f` | OFF | Carga aunque Gold esté al día |
+| `pipeline` | `--extract/--no-extract` | **OFF** | Incluye la descarga (re-scrapea INEGI) |
+| | *(mismos flags de sección que `transform`)* | ON | `--denue --ingest --normalize-dates --h3-cells --clee-resolution-radio --clee-resolution-h3 --sesnsp` |
+| | `--load/--no-load` | ON | Load Silver → Gold al final |
+| | `--only <token>` (repetible) | — | Aquí el token `load` SÍ aplica |
+| | `--headless/--no-headless` | ON | Solo si `--extract` |
+| | `--force` / `-f` | OFF | Reprocesa todo |
+| `build-entidades` | *(sin flags)* | — | Rebuild completo de `entidades_economicas` |
+| `retry` | *(sin flags)* | — | Placeholder |
+
+### Flags del script de evaluación (`scripts/evaluate_masked_clee.py`)
+
+| Subcomando | Flag | Default | Efecto |
+|---|---|---|---|
+| `extract` | `--target-period YYYY-MM-DD` | `2021-05-01` | Periodo objetivo a enmascarar |
+| | `--state <cve_ent>` (repetible) | CDMX/Jalisco/Zacatecas | Muestra territorial |
+| `evaluate` | `--ref-order nearest\|newest` | `nearest` | `nearest` = producción; `newest` = orden legado |
+| `chain` | `--intermediate YYYY-MM-DD` | `2021-11-01` | Periodo intermedio del salto (debe estar en la muestra) |
 
 ### Comando único global (extract / transform / load / pipeline)
 
@@ -988,6 +1057,11 @@ Hay **dos modos** para elegir secciones (se pasan por `ARGS="..."`):
 | transform SESNSP | `--no-sesnsp` | `sesnsp` |
 | load Silver→Gold (solo `pipeline`) | `--no-load` | `load` |
 
+Qué tokens acepta cada comando: `transform` los atómicos DENUE + `sesnsp`
++ grupos; `pipeline` esos **y** `load`; `extract` solo distingue fuente
+(`denue` / `sesnsp` — cualquier token atómico de DENUE selecciona la
+fuente completa, y `--only load` en extract/transform no corre nada).
+
 **Recetario** con `--only` (reemplaza a los targets que se eliminaron):
 
 ```bash
@@ -1011,14 +1085,50 @@ caffeinate -dims make transform ARGS="--only clee"
 make transform ARGS="--only h3-cells"
 ```
 
+**Combinaciones frecuentes** (fin a fin):
+
+```bash
+# Rebuild TOTAL desde cero (descarga incluida), una sola orden:
+caffeinate -dims make pipeline ARGS="--extract --force"
+
+# Rebuild de Silver+Gold SIN volver a scrapear INEGI (default de pipeline):
+caffeinate -dims make pipeline ARGS="--force"
+
+# Silver completo pero SIN el track de comparación H3 (ahorra ~14h):
+caffeinate -dims make transform ARGS="--no-clee-resolution-h3"
+
+# Re-resolver CLEE radio y reconstruir lo que depende de esa columna:
+caffeinate -dims make transform ARGS="--only clee-radio --force"
+make build-entidades && make load
+
+# Solo promover Silver -> Gold dentro del comando global:
+make pipeline ARGS="--only load"          # equivalente a `make load`
+
+# Preparar Silver para análisis sin tocar CLEE (ingest + fechas + H3):
+make transform ARGS="--only ingest --only normalize-dates --only h3-cells"
+
+# Ciclo de evaluación Fase 7 completo (no toca Silver en escritura):
+make eval-masked-clee-extract
+make eval-masked-clee                              # nearest (producción)
+make eval-masked-clee ARGS="--ref-order newest"    # orden legado, comparación
+make eval-masked-clee-chain                        # dos saltos
+
+# Antes de cualquier corrida larga: verificar esquema e índices
+make db-status
+```
+
 > El `--force` conserva sus semánticas por sección: `--only clee-radio --force`
 > resetea SOLO `clee_propagado_radio` (+ su KB cache) y re-resuelve; igual para
-> `clee-h3` con su track.
+> `clee-h3` con su track. En `extract` significa re-descargar; en `load`,
+> cargar aunque Gold esté al día.
 
 > Nota de costo: con el default "todo ON", `make transform` corre la
 > propagación CLEE **radio y H3** (la H3 es un track de comparación). Son
 > horas cada una; si solo necesitas producción, pasa
 > `--no-clee-resolution-h3`.
+
+> `caffeinate -dims` es obligatorio en todo lo que incluya propagación CLEE
+> o un `--force` global (ver "Regla de corridas largas" arriba).
 
 ---
 
@@ -1565,3 +1675,6 @@ make metadata-stats              # Pipeline statistics
 make db-status                   # Migration status
 duckdb data/metadata.duckdb "SHOW TABLES"
 ```
+
+> Inventario COMPLETO de targets, flags y combinaciones:
+> "Makefile Targets — inventario completo" + "Comando único global".
