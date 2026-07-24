@@ -226,8 +226,12 @@ class SesnspProcessor:
         new_delitos = 0
 
         # 2. Hechos: rebuild completo (cada corte revisa cifras historicas).
+        # TRY_CAST (no CAST): un mes vacio ya llega como NULL de read_csv, pero
+        # si un corte pusiera un token no numerico en un mes futuro (p. ej.
+        # "ND"), CAST abortaria el INSERT entero; TRY_CAST lo vuelve NULL y el
+        # WHERE carpetas IS NOT NULL lo filtra, sin tumbar el corte completo.
         month_casts = ", ".join(
-            f'CAST("{name}" AS INTEGER) AS "{name}"' for name, _ in MONTH_COLUMNS
+            f'TRY_CAST("{name}" AS INTEGER) AS "{name}"' for name, _ in MONTH_COLUMNS
         )
         month_names = ", ".join(f'"{name}"' for name, _ in MONTH_COLUMNS)
         month_map_values = ", ".join(f"('{name}', {num})" for name, num in MONTH_COLUMNS)
