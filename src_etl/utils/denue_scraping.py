@@ -92,15 +92,15 @@ def scrape_denue_table(
         rows = table.find("tbody").find_all("tr")
         print(f"  ... Processing {len(rows)} rows from INEGI website")
 
-        # Get existing successful downloads from metadata (only for normal mode)
+        # Get existing successful downloads from metadata (only for normal mode).
+        # Cruza TODOS los runs: el run en curso todavia no tiene tareas
+        # cuando se raspa la tabla, asi que filtrar por el (como se hacia
+        # antes) dejaba el set vacio y mandaba cada archivo ya descargado a
+        # la rama de "sync desde disco", que crea un registro SUCCESS nuevo
+        # por corrida -- 943 registros para 484 archivos reales.
         existing_urls = set()
         if not force:
-            existing_tasks = tracker.get_tasks_by_run(run_id) if run_id else []
-            existing_urls = {
-                task["source_url"]
-                for task in existing_tasks
-                if task["status"] == TaskStatus.SUCCESS.value
-            }
+            existing_urls = tracker.get_successful_download_urls()
 
         counts = {"skipped": 0, "synced": 0, "new": 0, "forced": 0}
 

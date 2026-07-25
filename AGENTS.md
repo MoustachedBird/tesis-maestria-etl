@@ -87,6 +87,38 @@ archivo — reanudar incremental (SIN `--force`, que dropearía la tabla) y
 verificar en metadata que los pendientes no tengan SUCCESS viejos que el
 incremental saltaría.
 
+### Respaldo automático antes de escribir (2026-07-25)
+
+**Cada comando que modifica el warehouse deja primero un respaldo
+rotativo** (`src_etl/utils/backup.py`, enganchado en ingest,
+normalize-dates, h3-cells, ambas resoluciones CLEE, sesnsp, load y
+build-entidades). No hay paso manual que recordar.
+
+- Un archivo por base: `data/silver/mipymes.backup.duckdb`. Cada comando
+  **sobreescribe** el anterior — es "el estado justo antes de esta
+  corrida", no un historial.
+- **Uno por comando, no por etapa**: `make transform` corre varias etapas
+  y el respaldo se hace una sola vez, antes de la primera escritura, para
+  que revertir devuelva al estado previo al comando completo.
+- En APFS es un **clon copy-on-write**: medido sobre el Silver real de
+  52GB → **0.07s y 0 bytes** de disco (crece solo conforme los archivos
+  divergen). Fuera de APFS cae a copia normal.
+- **Nunca pisa un respaldo bueno con una base ilegible**: antes de copiar
+  verifica que la fuente abra: si no, conserva el respaldo previo —
+  justo el caso en que se necesita.
+- Se apaga con `WAREHOUSE_BACKUP_ENABLED=false` (`.env`).
+
+Revertir una corrida fallida:
+
+```bash
+mv data/silver/mipymes.backup.duckdb data/silver/mipymes.duckdb
+```
+
+**Por qué existe (incidente 2026-07-24):** un OOM a media carga dejó filas
+parciales y corrompió el índice ART; el reintento incremental remató la
+base y la única salida fue reconstruir ~8h desde Bronze. Con respaldo, esa
+recuperación es mover un archivo.
+
 ### Reglas operativas (de las auditorías 2026-07-17)
 
 - **Conexiones**: toda conexión nueva a Silver/Gold usa

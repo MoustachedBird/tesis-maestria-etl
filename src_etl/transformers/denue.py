@@ -18,6 +18,7 @@ from src_etl.transformers.clee_resolver import CLEEResolver
 from src_etl.transformers.date_normalizer import DateNormalizer
 from src_etl.transformers.h3_backfill import H3CellBackfiller
 from src_etl.transformers.processor import BronzeToSilverProcessor
+from src_etl.utils.backup import backup_warehouse
 from src_metadata.tracker import MetadataTracker
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting TRANSFORM stage (Bronze -> Silver)")
         logger.info(f"   Mode: {'FORCE (reprocess all)' if force else 'INCREMENTAL'}")
+        backup_warehouse(self.silver_db_path, stage="ingest")
 
         try:
             success = self.transformer.run(force=force)
@@ -160,6 +162,7 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting NORMALIZE-DATES stage (Silver DuckDB)")
         logger.info(f"   Mode: {'FORCE (re-normalize all)' if force else 'INCREMENTAL'}")
+        backup_warehouse(self.silver_db_path, stage="normalize-dates")
 
         try:
             success = self.date_normalizer.run(force=force)
@@ -192,6 +195,7 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting H3-CELLS stage (Silver DuckDB)")
         logger.info(f"   Mode: {'FORCE (recompute all)' if force else 'INCREMENTAL'}")
+        backup_warehouse(self.silver_db_path, stage="h3-cells")
 
         try:
             success = self.h3_backfiller.run(force=force)
@@ -223,6 +227,7 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> clee_propagado_radio)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
+        backup_warehouse(self.silver_db_path, stage="clee-radio")
 
         try:
             success = self.clee_resolver.run(force=force)
@@ -255,6 +260,7 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> clee_propagado_h3)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
+        backup_warehouse(self.silver_db_path, stage="clee-h3")
 
         try:
             success = self.clee_resolver_h3.run(force=force)
@@ -283,6 +289,7 @@ class DenuePipelineOrchestrator:
             True if successful, False otherwise
         """
         logger.info("Starting LOAD stage (Silver -> Gold)")
+        backup_warehouse(self.gold_db_path, stage="load")
 
         try:
             success = self.loader.run(force=force)

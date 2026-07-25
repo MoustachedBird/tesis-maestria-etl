@@ -119,6 +119,58 @@ def test_get_pending_process_tasks(temp_tracker):
     assert len(pending) >= 0  # May be 0 if query logic differs
 
 
+def _complete_download(tracker, run_id: str, url: str, path: str, period: str = "2024_11"):
+    """Registra una descarga exitosa y devuelve su task_id."""
+    task_id = tracker.create_task(
+        run_id=run_id,
+        task_name=f"dl_{period}",
+        source_url=url,
+        target_path=path,
+        period=period,
+    )
+    tracker.start_task(task_id)
+    tracker.complete_task(task_id=task_id, status=TaskStatus.SUCCESS, actual_size_bytes=1000)
+    return task_id
+
+
+def test_get_successful_download_urls_crosses_runs(temp_tracker):
+    """Las URLs exitosas se ven desde CUALQUIER run, no solo el actual.
+
+    Regresion: el scraper filtraba por el run en curso (vacio al momento
+    de raspar la tabla), asi que nunca se saltaba lo ya descargado y
+    re-registraba cada archivo de disco en cada corrida.
+    """
+    run_viejo = temp_tracker.create_run("test_downloader", "DOWNLOAD")
+    _complete_download(temp_tracker, run_viejo, "http://x/a.zip", "/bronze/2024_11/a.zip")
+
+    run_nuevo = temp_tracker.create_run("test_downloader", "DOWNLOAD")
+
+    assert "http://x/a.zip" in temp_tracker.get_successful_download_urls(), (
+        "una descarga exitosa de un run anterior debe contar como existente"
+    )
+    assert temp_tracker.get_tasks_by_run(run_nuevo) == [], "el run nuevo aun no tiene tareas"
+
+
+def test_pending_process_tasks_dedupes_repeated_downloads(temp_tracker):
+    """Un ZIP con varios registros SUCCESS se procesa UNA sola vez.
+
+    Regresion: 943 tareas de ingest para 484 archivos reales en disco
+    (cada extract re-sincronizaba desde disco), duplicando el tiempo del
+    ingest en cada rebuild con --force.
+    """
+    path = "/bronze/2024_11/a.zip"
+    for _ in range(3):
+        run_id = temp_tracker.create_run("test_downloader", "DOWNLOAD")
+        _complete_download(temp_tracker, run_id, "http://x/a.zip", path)
+
+    for include_failed in (False, True):
+        paths = [
+            p["source_path"]
+            for p in temp_tracker.get_pending_process_tasks(include_failed=include_failed)
+        ]
+        assert paths.count(path) == 1, f"duplicados con include_failed={include_failed}: {paths}"
+
+
 def test_process_metrics(temp_tracker):
     """Test getting process metrics."""
     metrics = temp_tracker.get_process_metrics()

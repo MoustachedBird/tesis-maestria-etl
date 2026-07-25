@@ -457,6 +457,27 @@ class MetadataTracker:
                 return [dict(zip(columns, row)) for row in results]
             return []
 
+    def get_successful_download_urls(self) -> set[str]:
+        """
+        Get the source URLs of every download that ever succeeded.
+
+        Cruza TODOS los runs a proposito: el scraper la usa para saltarse
+        lo ya descargado, y filtrar por el run en curso (que al momento
+        del scrape esta vacio) hacia que cada corrida re-registrara desde
+        disco los cientos de archivos ya presentes.
+
+        Returns:
+            Set of source_url strings with at least one SUCCESS task
+        """
+        with self._get_connection() as conn:
+            results = conn.execute(
+                """
+                SELECT DISTINCT source_url FROM download_tasks
+                WHERE status = 'SUCCESS' AND source_url IS NOT NULL
+            """
+            ).fetchall()
+            return {row[0] for row in results}
+
     def get_failed_tasks(
         self, run_id: str | None = None, retryable_only: bool = True
     ) -> list[dict[str, Any]]:

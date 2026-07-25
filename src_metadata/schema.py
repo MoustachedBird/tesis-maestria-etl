@@ -363,6 +363,10 @@ QUERIES = {
         GROUP BY period
         ORDER BY period DESC
     """,
+    # El QUALIFY deduplica por target_path: un mismo ZIP puede tener varios
+    # registros SUCCESS en download_tasks (cada extract que lo re-sincroniza
+    # desde disco crea uno) y sin el, el ingest lo leeria y limpiaria una vez
+    # por registro.
     "get_pending_process_tasks": """
         SELECT
             dt.target_path as source_path,
@@ -376,6 +380,9 @@ QUERIES = {
         ) pt ON dt.target_path = pt.source_path AND pt.rn = 1
         WHERE dt.status = 'SUCCESS'
           AND pt.source_path IS NULL
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY dt.target_path ORDER BY dt.created_at DESC
+        ) = 1
         ORDER BY dt.period DESC, dt.created_at DESC
     """,
     "get_pending_process_tasks_with_failed": """
@@ -391,6 +398,9 @@ QUERIES = {
         ) pt ON dt.target_path = pt.source_path AND pt.rn = 1
         WHERE dt.status = 'SUCCESS'
           AND (pt.source_path IS NULL OR pt.status = 'FAILED')
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY dt.target_path ORDER BY dt.created_at DESC
+        ) = 1
         ORDER BY dt.period DESC, dt.created_at DESC
     """,
     "get_process_task_by_path": """

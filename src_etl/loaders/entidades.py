@@ -31,6 +31,7 @@ import duckdb
 
 from src_etl.core.config import settings
 from src_etl.core.logging import get_stage_logger
+from src_etl.utils.backup import backup_warehouse
 from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
@@ -181,6 +182,7 @@ class EntidadesDimensionBuilder:
         )
         self.tracker.start_process_task(task_id)
         logger.info(f"📦 Construyendo dimension {TABLE_NAME}...")
+        backup_warehouse(self.warehouse_path, stage="build-entidades")
 
         conn = connect_configured(self.warehouse_path)
         try:

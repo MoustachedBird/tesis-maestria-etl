@@ -35,6 +35,7 @@ from src_etl.loaders.sesnsp import (
     validate_delitos_del_csv,
     validate_municipios_del_csv,
 )
+from src_etl.utils.backup import backup_warehouse
 from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
@@ -296,6 +297,10 @@ class SesnspProcessor:
         if not force and self._already_processed(csv_path):
             logger.info(f"✨ Corte ya procesado: {csv_path.name}. Nada por transformar.")
             return True
+
+        # Respaldo antes de escribir (no-op si otra etapa del mismo comando
+        # ya lo hizo): esta etapa hace DELETE + INSERT de la tabla completa.
+        backup_warehouse(self.warehouse_path, stage="sesnsp")
 
         run_id = self.tracker.create_run(
             job_name=self.JOB_NAME,

@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     DUCKDB_THREADS: int = 8
     DUCKDB_MEMORY_LIMIT: str = "16GB"
 
+    # Respaldo rotativo del warehouse antes de cada comando que lo modifica
+    # (ver utils/backup.py). En APFS es un clon copy-on-write: instantaneo
+    # y sin costo de espacio, por eso viene encendido por default.
+    WAREHOUSE_BACKUP_ENABLED: bool = True
+
     # PostgreSQL Configuration
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
