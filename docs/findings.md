@@ -579,3 +579,369 @@ entrada anterior y no cambia.
   estadístico de negocios de acceso restringido, y es la vía por la que
   existirían variables financieras enlazables (el análogo del cruce
   SIRENE-Diane del caso francés). Vale documentar qué se puede solicitar.
+
+---
+
+## 2026-10-06 — Los `falso_match` no eran un problema de nombres: la cascada elegía al primer candidato, no al mejor (95.90% → 97.72%)
+
+**Pregunta de origen**: si se agregara una tercera columna
+`clee_propagado_llm` con un adjudicador semántico (un LLM que lee los dos
+nombres y decide si son el mismo negocio), ¿cuánto del error corregiría?
+La respuesta resultó ser "casi nada, porque el problema es otro".
+
+**Método**: sobre `data/eval/fase7_masked_clee/results_nearest.parquet` se
+toman las 37,601 filas con `categoria == "falso_match"` y se reconstruye
+el **triple** completo de cada error:
+
+- **T** — la fila objetivo real, de `target.parquet` (corte `05_2021`).
+- **K** — el registro *impostor* del que heredó el CLEE equivocado: se
+  busca `clee_propagado_radio` en `ref_<resolved_by_ref>.parquet`.
+- **C** — el registro *correcto*: se busca `clee_verdadero` en **esa
+  misma** referencia.
+
+Reconstruir **C** es lo que destapó el hallazgo; la primera pasada solo
+había mirado el par (T, K) y llevaba a una conclusión equivocada.
+
+### Los tres registros no viven en el mismo corte — y eso importa
+
+T es de **mayo 2021**. K y C son de la referencia que resolvió la fila,
+que en el 99.9% de los casos es **noviembre 2021** (37,580 de 37,601):
+nearest-first prueba primero la referencia a 6 meses y ahí se agota
+prácticamente todo el pendiente.
+
+| Referencia que resolvió | Filas | Distancia temporal |
+|---|---:|---|
+| 2021-11 | 37,580 | 6 meses |
+| 2024-11 | 13 | 3.5 años |
+| 2022-11 | 4 | 1.5 años |
+| 2023-11 | 3 | 2.5 años |
+| 2025-05 | 1 | 4 años |
+
+Así que la comparación es entre cortes distintos (mayo → noviembre de
+2021), como corresponde al diseño. **Pero K y C son del mismo corte**: el
+impostor y el registro correcto estaban los dos en noviembre 2021, a
+metros uno del otro. Eso convierte el error en un problema de *elección
+entre candidatos simultáneos*, no de deriva temporal.
+
+### El hallazgo: el registro correcto estaba disponible, con nombre idéntico
+
+| Medición sobre los 37,601 `falso_match` | Valor |
+|---|---|
+| El CLEE verdadero existía en la **misma** referencia que resolvió la fila | **37,561 (99.9%)** |
+| Mediana de `token_sort_ratio(T, C)` | **100** |
+| Filas con `ratio(T, C) >= 95` | **100%** |
+
+Es decir: en prácticamente todos los casos la cascada tenía enfrente al
+registro correcto, con el nombre **exactamente igual**, y aun así se
+quedó con otro. Ejemplos del par (T, C) — nótese que son idénticos:
+
+```
+T = C : 'CONSULTORIO DENTAL'
+T = C : 'CLINICA SANTA SOFIA'
+T = C : 'CONSULTA DE OFTALMOLOGIA'
+T = C : 'CONSULTORIO DE GASTROENTEROLOGIA'
+T = C : 'INNOVARE'
+```
+
+### La causa: `break` en el primer match, sin comparar scores
+
+`src_etl/utils/entity_resolution.py:215-221`, dentro del loop de vecinos:
+
+```python
+if is_match:
+    if strategy in ("NAME_MATCH", "RAZON_MATCH"):
+        best_clee = kb_clees[n_idx]
+        break              # <-- el PRIMERO que pasa el umbral gana
+    if best_clee is None:  # <-- y el primer COMBINED se conserva
+        best_clee = kb_clees[n_idx]
+```
+
+Los vecinos llegan ordenados **por distancia ascendente**, y la cascada
+devuelve en el primero que supera el umbral (`> 80` razón social, `> 75`
+nombre comercial). No hay comparación de scores. Entonces un vecino a 3 m
+con ratio 81 gana sobre el registro verdadero a 10 m con ratio 100,
+simplemente porque se evaluó antes. El comentario del código
+("un match directo lo reemplaza") describe la precedencia entre
+estrategias, no un argmax.
+
+### Cuánto arregla elegir el mejor en vez del primero
+
+Contrastando, para cada `falso_match`, el score del impostor que ganó
+contra el score del registro correcto que estaba disponible:
+
+| Resultado si la cascada hiciera `argmax(score)` | Filas | % |
+|---|---:|---:|
+| El correcto puntea **más alto** → se arregla | 25,487 | 67.9% |
+| **Empate** de score → lo decide el desempate | 12,074 | 32.1% |
+| El impostor puntea más alto → no se arregla | **0** | **0.0%** |
+
+**En ninguna de las 37,561 filas el impostor gana legítimamente por
+score.** De ahí salió una predicción de 98.64% de precisión, que resultó
+optimista — ver la sección siguiente con el resultado medido.
+
+### Resultado medido: `argmax` implementado y evaluado (mismo día)
+
+Implementación: `_best_candidate()` en `entity_resolution.py` (helper
+único que reemplaza el loop duplicado en `_match_chunk` y
+`_run_matching_sequential`), y `calculate_match_score()` ahora devuelve un
+tercer elemento `score` con tiers que replican la precedencia previa de
+los paths (`RAZON_TIER` 2000 > `NAME_TIER` 1000 > combinado ≤ 600).
+Baseline preservado en
+`data/eval/fase7_masked_clee/baseline_firstmatch_2026-07-21/`.
+
+| Métrica | Primer match (baseline) | `argmax` | Δ |
+|---|---|---|---|
+| **Precision / recall / F1** | 95.90% | **97.72%** | **+1.82 pts** |
+| `falso_match` | 37,601 | 20,619 | −16,982 |
+| `falso_nuevo` | 262 | 262 | 0 |
+| `match_espurio` | 363 | 363 | 0 |
+| `nuevo_correcto` | 152 | 152 | 0 |
+
+Que `falso_nuevo`, `match_espurio` y `nuevo_correcto` queden **idénticos**
+es la prueba de control del cambio: `argmax` altera contra *quién*
+matchea una fila, nunca *si* matchea. Igual que el hallazgo de
+nearest-first en 2026-07-21, todo el delta son falsos match convertidos en
+correctos.
+
+Transición fila por fila contra el baseline:
+
+| Transición | Filas |
+|---|---:|
+| `falso_match` → `correcto` | **16,984** |
+| `falso_match` → `falso_match` | 20,617 |
+| `correcto` → `falso_match` (**regresión**) | **2** |
+
+**La predicción de 98.64% estaba mal, y el porqué importa.** Se calculó
+comparando al registro correcto contra el impostor *del baseline*. Pero
+bajo `argmax` el ganador puede ser **otro** registro equivocado que
+empata con el correcto: la condición para que un `falso_match` sobreviva
+al argmax es, casi por definición, que exista un empate. Verificado
+llamando al scorer de producción sobre los 20,579 sobrevivientes con
+ambos registros localizables:
+
+| Por qué sobrevive al `argmax` | Filas | % |
+|---|---:|---:|
+| **Empate exacto de score** | **20,527** | **99.7%** |
+| El correcto puntea más alto pero no era candidato | 50 | 0.2% |
+| El impostor gana por el tier de razón social | 1 | 0.0% |
+| El impostor puntea más alto | 1 | 0.0% |
+
+Las 50 filas donde el correcto puntea más alto y aun así perdió no son un
+fallo del argmax: el registro correcto **no estaba en el conjunto de
+candidatos** (fuera del radio de 500 m o del disco H3). Eso apunta a
+generación de candidatos, no a la elección entre ellos.
+
+Lección metodológica: una predicción derivada de un contrafactual
+("¿qué pasaría si…?") sobre el resultado de *otro* algoritmo no es una
+predicción del algoritmo nuevo, porque el nuevo cambia el conjunto de
+comparación. El número medido (97.72%) es el que vale; la banda de
+empates real es **20,527, no 12,074**, y es la que hay que atacar.
+
+### Las 2 regresiones: ruido de sufijo legal en la razón social
+
+Ambas tienen el mismo mecanismo, y conviene documentarlo porque es un
+defecto de datos que el argmax dejó a la vista:
+
+```
+T         nom='CARRETERA DE COAHUILA Y SAN LUIS'
+          raz='CARRETERAS DE COAHUILA Y SAN LUIS S.A.P.I. DE C.V. SA DE CV'
+correcto  nom='CARRETERA DE COAHUILA Y SAN LUIS'   <- nombre IDENTICO
+          raz='CARRETERAS DE COAHUILA Y SAN LUIS SAPI DE CV'
+          -> NAME_MATCH  score=1100
+asignado  nom='OPERADORADE CARRETERAS DE COAHUILA Y SAN LUIS'
+          raz='OPERADORA DE CARRETERAS DE COAHUILA Y SAN LUIS SA DE CV'
+          -> RAZON_MATCH score=2082   <- gana por tier
+```
+
+La razón social del target trae el **sufijo legal duplicado**
+(`S.A.P.I. DE C.V. SA DE CV`), así que sus tokens incluyen `SA` y `CV`
+dos veces. Eso hace que la razón del impostor (`... SA DE CV`) puntee más
+alto que la del correcto (`... SAPI DE CV`, donde `S.A.P.I.` con puntos
+es un token distinto de `SAPI`), y Path A —el tier más alto— se lo lleva.
+La otra regresión es idéntica: `S DE RL DE CV SA DE CV` en el target.
+
+Son 2 filas de 882,321 previamente correctas (0.0002%) contra 16,984
+arregladas, así que el cambio es netamente positivo. Pero señala un
+pendiente real: **normalizar sufijos de forma legal**
+(`SA DE CV`, `S DE RL DE CV`, `SAPI DE CV`, con y sin puntos) antes de
+comparar razón social.
+
+### Los empates: nombre y distancia están agotados
+
+Pregunta natural: si el nombre empata, ¿desempata la distancia? Medido
+sobre los 12,074 empates estimados antes de implementar el argmax (la
+banda real medida después resultó ser de 20,527, pero la composición no
+cambia: son el mismo fenómeno de gemelos), contrastando dónde está el
+correcto respecto del impostor:
+
+| Posición del registro correcto | Filas | % |
+|---|---:|---:|
+| A la **misma** distancia que el impostor | 11,989 | 99.3% |
+| Más lejos que el impostor | 85 | 0.7% |
+| Más cerca que el impostor | **0** | **0.0%** |
+
+**La distancia no desempata ni una sola fila**, y en 85 casos apuntaría
+al registro equivocado. De los 11,989 con nombre y distancia empatados,
+el **97.8%** tiene el nombre del impostor *literalmente idéntico* al del
+correcto. Las únicas señales que a veces difieren: teléfono (27.6%) y CP
+(0.8%).
+
+```
+T   = 'CLINICA ONCOLOGICA'   [Consultorios de medicina especializada]
+imp = 'CLINICA ONCOLOGICA'   d=0.0m  tel=3338849530
+cor = 'CLINICA ONCOLOGICA'   d=0.0m  tel=3338482100
+
+T   = 'SMILE'                [Consultorios dentales del sector privado]
+imp = 'SMILE'                d=0.0m  tel=None
+cor = 'SMILE'                d=0.0m  tel=None
+
+T   = 'ESCUELA SECUNDARIA TECNICA 163 ADOLFO LOPEZ MATEOS'
+imp = 'ESCUELA SECUNDARIA TECNICA 163 ADOLFO LOPEZ MATEOS'  d=428.6m
+cor = 'ESCUELA SECUNDARIA TECNICA 163 ADOLFO LOPEZ MATEOS'  d=428.6m
+```
+
+Son tres registros con el mismo nombre, el mismo giro y las mismas
+coordenadas. **Ninguna cantidad de inteligencia extrae información que no
+está en el registro**: cualquier método —umbral, score ponderado o
+modelo de lenguaje— está adivinando en estas filas.
+
+Y hay una lectura más incómoda: varios de estos pares parecen ser **el
+mismo establecimiento cargando dos CLEE distintos en la referencia**
+(`CLINICA ONCOLOGICA` a 0 m con dos teléfonos; `NUCLEO MEDICO SIN
+NOMBRE` duplicado a 0 m). Eso enlaza con la entrada 2026-10-05: el CLEE
+oficial no es estable entre ediciones. Si el par es el mismo negocio con
+dos claves, **cuál de las dos es "la correcta" es un artefacto de
+etiquetado, no un hecho del mundo**, y el `falso_match` que cuenta el
+evaluador es en parte espurio.
+
+Implicación para la tesis: en estas filas lo que importa no es acertar
+*qué clave* gana, sino que el mapeo sea **biyectivo y consistente** — un
+candidato reclamado por un solo target. Con asignación 1:1 los conteos de
+supervivencia y mortalidad (la unidad de análisis) salen bien aunque la
+identidad individual quede intercambiada entre dos gemelos.
+
+**Costo**: quitar el `break` obliga a evaluar todos los vecinos de cada
+target en vez de cortar temprano. Sobre 82.9M filas eso es tiempo real y
+hay que medirlo antes de prometer la re-resolución completa (hoy son
+~17h por columna). Mitigación obvia: conservar el corte temprano solo
+ante un score perfecto (ratio 100 + gate 100), que es el caso mayoritario.
+
+### Anatomía de los impostores (secundario, ya no es la causa)
+
+La primera pasada clasificó los pares (T, K) por qué distingue al
+impostor del objetivo. Se conserva porque describe *qué tipo de vecino*
+se cuela, pero **no** es el diagnóstico: en todos estos casos el registro
+correcto también estaba disponible.
+
+| Qué diferencia al impostor | Filas | % |
+|---|---:|---:|
+| `SIN NOMBRE` / nombre ausente | 11,598 | 30.8% |
+| Nombre idéntico al objetivo | 9,227 | 24.5% |
+| Un nombre contiene al otro | 4,947 | 13.2% |
+| Una palabra distinta | 4,826 | 12.8% |
+| Ortografía / morfología | 2,650 | 7.0% |
+| Clave o número (CCT, folio) | 2,277 | 6.1% |
+| Sin solape de tokens | 2,076 | 5.5% |
+
+Clasificación sobre `nom_estab` normalizado (mayúsculas, puntuación a
+espacio) y tokenizado sin stopwords ni tokens de ≤2 caracteres;
+`ortografia` = el mejor `fuzz.ratio` entre los tokens exclusivos de cada
+lado es ≥ 75 (misma palabra mal escrita); `palabra distinta` = ese ratio
+es < 75 y ambos lados aportan un token alfabético de ≥ 5 caracteres.
+Reparto sectorial de `palabra distinta` (SCIAN 2 dígitos): 46 comercio al
+por menor 2,700 (56%), 62 salud 593, 61 educación 477, 72
+alimentos/cafeterías 252, 93 administración pública 237, 52 financiero
+186, 81 otros servicios 145, 43 comercio al por mayor 136.
+
+Cinco ejemplos reales del tipo "una palabra distinta", que es el que
+parecía justificar una capa semántica:
+
+```
+# 1. Misma unidad médica, especialidad distinta — SCIAN idéntico
+T: CONSULTORIO MEDICO UNIDAD MEDICA PRADOS PROVIDENCIA
+K: CONSULTORIO DENTAL UNIDAD MEDICA PRADOS PROVIDENCIA
+   act 621211 en ambos · ratio=90 · dist=0m · CP 44670 · 14/039
+
+# 2. La similitud de caracteres apunta al revés del significado
+T: UNIDAD MEDICA INDEPENDENCIA CONSULTORIO MEDICO EN GINECOLOGIA
+K: UNIDAD MEDICA INDEPENDENCIA CONSULTORIO MEDICO EN GENETICA
+   ratio=92 · fuzz.ratio(GINECOLOGIA, GENETICA)≈60 · dist=0m · 14/039
+
+# 3. Dos turnos de la misma escuela: mismo CCT y mismo teléfono
+T: ESCUELA SECUNDARIA JAIME TORRES BODET TURNO VESPERTINO 14DES0032L
+K: ESCUELA SECUNDARIA JAIME TORRES BODET TURNO MATUTINO  14DES0032L
+   act 611132 en ambos · ratio=84 · dist=0m · tel 3213872747 idéntico
+
+# 4. Dependencias municipales con domicilio y conmutador compartidos
+T: ASEO PÚBLICO    DELEGACION MUNICIPAL DE CAPILLA DE GUADALUPE
+K: OBRAS PUBLICAS  DELEGACION MUNICIPAL DE CAPILLA DE GUADALUPE
+   act 931210 · ratio=86 · dist=0m · tel 3787121260 idéntico · 14/093
+   (el mismo K se quedó también con REGISTRO CIVIL y EGRESOS)
+
+# 5. Dos personas morales del mismo grupo financiero, mismo piso
+T: PENSIONES BBVA BANCOMER, S.A. DE C.V., GRUPO FINANCIERO BBVA BANCOMER
+K: SEGUROS   BBVA BANCOMER, S.A. DE C.V., GRUPO FINANCIERO BBVA BANCOMER
+   act 524110 · ratio=89 · dist=0m · CP 06600 · 09/015
+```
+
+El caso 4 es el más instructivo: como el teléfono es exacto, **Path C
+también dispara** (nombre parcial + teléfono = 2 señales). Agregar señales
+deterministas no ayuda si la elección entre candidatos sigue siendo "el
+primero que pase".
+
+### Implicación: el orden de los pendientes
+
+1. ~~**`argmax` sobre los candidatos**~~ **hecho** (`_best_candidate` en
+   `entity_resolution.py`): 95.90% → **97.72%** medido. Pendiente derivado:
+   medir el costo en tiempo del loop sin `break` antes de comprometer la
+   re-resolución de Silver.
+2. **Asignación 1:1 para los 20,527 empates**, que es el pendiente #5 de
+   `docs/clee_propagation.md` (las 6.3M colisiones intra-periodo). Los dos
+   problemas son el mismo visto desde dos lados — si un candidato solo
+   puede ser reclamado por un target, el empate se resuelve globalmente en
+   vez de por fila. **No es un problema de señal sino de estructura**: ya
+   se midió que nombre y distancia están agotados ahí, así que la única
+   salida es la restricción de biyección, no una señal mejor. Ahora es el
+   **99.7% del error restante**, así que es el único pendiente que mueve
+   la aguja de forma material.
+3. **Normalizar sufijos de forma legal** en razón social antes de
+   comparar (`SA DE CV`, `S DE RL DE CV`, `SAPI DE CV`, con y sin puntos).
+   Lo motivan las 2 regresiones documentadas arriba; es chico en volumen
+   pero es higiene de datos y elimina un modo de falla conocido.
+4. **Ponderación IDF del nombre**, útil sobre todo para los empates:
+   `CONSULTORIO`, `UNIDAD MEDICA`, `DELEGACION MUNICIPAL` y `GRUPO
+   FINANCIERO` son altísima frecuencia en este corpus y `DENTAL`,
+   `EGRESOS`, `PENSIONES` son los discriminantes raros.
+5. **Adjudicación semántica (LLM)**: queda al final y con alcance mucho
+   menor del que parecía. No es que no sirva — el caso 2 muestra pares
+   donde la similitud de caracteres contradice al significado — pero su
+   techo se recalcula sobre el error que sobreviva a 1-4, no sobre los
+   37,601 originales.
+
+**La columna `clee_propagado_llm` no se descarta, se posterga**: con el
+error medido en 2.28% en vez de 4.10%, y con el 99.7% de ese resto siendo
+empates que el texto no puede resolver, la banda que valdría la pena
+mandar a un modelo es mucho más chica de lo que parecía al inicio.
+
+### Pendientes
+
+- **Medir el costo en tiempo** del loop sin `break` sobre un corte
+  completo antes de comprometer una re-resolución de ~17h por columna. El
+  corte temprano al techo (`PERFECT_RAZON_SCORE` / `PERFECT_NAME_SCORE`)
+  debería absorber buena parte, pero no está medido.
+- **Re-resolver Silver** con `argmax` (ambas columnas) y re-correr
+  `make propagation-stats`. Ojo con la trampa del respaldo: no lanzar dos
+  `--force` seguidos. Pendiente derivado: `make build-entidades`.
+- Las **50 filas donde el correcto puntea más alto pero no era candidato**
+  apuntan a generación de candidatos (radio de 500 m / disco H3), no a la
+  cascada. Vale aislar si son mudanzas de más de 500 m o un defecto del
+  blocking.
+- Revisar si `assign_new_clees` sufre el mismo sesgo de orden. (Los
+  `match_espurio` y `falso_nuevo` ya se confirmaron idénticos con
+  `argmax`, así que el sesgo no los afecta por esta vía.)
+- Repetir la reconstrucción del triple (T, K, C) sobre
+  `results_chain.parquet` **con argmax**: el experimento encadenado puede
+  tener otra anatomía, porque ahí la referencia intermedia ya viene con
+  error.
+- Promover a `scripts/` los scripts de esta entrada si se van a citar en
+  la tesis; hoy la lógica está documentada arriba pero no versionada.

@@ -335,6 +335,56 @@ def passes_activity_gate(t_act: str, kb_act: str) -> bool:
     return score > ACTIVITY_GATE_THRESH
 
 
+# ---------------------------------------------------------------------------
+# Tiers de score para comparar candidatos entre si (argmax).
+#
+# NO son calibracion -- no van a .env. Son la codificacion numerica de la
+# precedencia que la cascada ya tenia implicita en el orden de sus paths
+# (A > B > C). Separarlos por 1000 garantiza que ningun score de un tier
+# inferior pueda superar a uno de un tier superior, sea cual sea el ratio.
+# ---------------------------------------------------------------------------
+RAZON_TIER = 2000.0
+"""Base del score para un match por razon social (Path A).
+
+Path A es la evidencia mas fuerte de la cascada: la razon social es el
+nombre legal y coincide mucho menos por casualidad que el comercial. Al
+ser el tier mas alto, cualquier RAZON_MATCH le gana a cualquier
+NAME_MATCH, replicando el `return` temprano de Path A sobre Path B.
+"""
+
+NAME_TIER = 1000.0
+"""Base del score para un match por nombre comercial (Path B).
+
+Queda por encima de COMBINED (que no suma mas de 600) y por debajo de
+RAZON. Reproduce que Path B gane a Path C pero pierda contra Path A.
+"""
+
+COMBINED_SIGNAL_WEIGHT = 100.0
+"""Peso de cada senal debil en el score de un match combinado (Path C).
+
+Con 5 senales posibles el techo de Path C es 5*100 + 100 (ratio parcial)
+= 600, estrictamente menor que NAME_TIER. Dentro del tier, mas senales
+siempre le gana a menos senales.
+"""
+
+PERFECT_RAZON_SCORE = RAZON_TIER + 100.0
+"""Score maximo alcanzable: razon social identica (ratio 100).
+
+Nada puede superarlo, asi que el loop de candidatos puede cortar en seco
+al encontrarlo sin cambiar el resultado del argmax (ver `_best_candidate`
+en entity_resolution.py). Es la salida temprana que compensa el costo de
+haber eliminado el `break` al primer match.
+"""
+
+PERFECT_NAME_SCORE = NAME_TIER + 100.0
+"""Score maximo alcanzable cuando el target NO tiene razon social usable.
+
+Si `len(t_raz) <= 2`, Path A no puede disparar contra ningun candidato,
+asi que el techo real del target baja a este valor y el corte temprano
+aplica igual. Cubre el caso mayoritario del DENUE: razon social vacia.
+"""
+
+
 def calculate_match_score(
     t_name: str,
     t_raz: str,
@@ -350,7 +400,7 @@ def calculate_match_score(
     kb_email: str,
     kb_www: str,
     kb_cp: str,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, float]:
     """
     Calcula el match siguiendo una cascada jerarquica con umbrales calibrables.
 
@@ -367,6 +417,13 @@ def calculate_match_score(
 
     Los umbrales se importan desde clee_resolution_config.py para facilitar
     calibracion futura.
+
+    El tercer elemento del retorno es un score comparable ENTRE candidatos,
+    para que el loop que llama pueda quedarse con el mejor en vez de con el
+    primero (ver `_best_candidate` en entity_resolution.py). El score NO
+    altera la cascada: los tiers replican la precedencia que ya existia por
+    el orden de los `return` (Path A > Path B > Path C), de modo que un par
+    dado se clasifica hoy exactamente igual que antes del cambio.
 
     Args:
         t_name: Nombre comercial del registro objetivo
@@ -385,20 +442,23 @@ def calculate_match_score(
         kb_cp: Codigo postal del candidato KB
 
     Returns:
-        Tupla (es_match: bool, estrategia: str)
+        Tupla (es_match: bool, estrategia: str, score: float)
         Estrategias posibles: "RAZON_MATCH", "NAME_MATCH", "COMBINED_MATCH",
                               "DIFF_ACTIVITY", "NONE"
+        El score solo es significativo cuando es_match es True; en los no-match
+        es 0.0 y no debe usarse para ordenar nada.
     """
 
     # === GATE OBLIGATORIO: ACTIVIDAD ECONOMICA (SCIAN) ===
     # Un negocio no puede ser el mismo si su giro cambio drasticamente.
     if not passes_activity_gate(t_act, kb_act):
-        return False, "DIFF_ACTIVITY"
+        return False, "DIFF_ACTIVITY", 0.0
 
     # === PATH A: MATCH DIRECTO POR RAZON SOCIAL ===
     if len(t_raz) > 2 and kb_razon and len(kb_razon) > 2:
-        if fuzz.token_sort_ratio(t_raz, kb_razon) > LEGAL_NAME_MATCH_THRESH:
-            return True, "RAZON_MATCH"
+        razon_ratio = fuzz.token_sort_ratio(t_raz, kb_razon)
+        if razon_ratio > LEGAL_NAME_MATCH_THRESH:
+            return True, "RAZON_MATCH", RAZON_TIER + razon_ratio
 
     # === PATH B: MATCH DIRECTO POR NOMBRE COMERCIAL ===
     # El ratio se calcula una sola vez y se reutiliza como senal parcial
@@ -408,7 +468,7 @@ def calculate_match_score(
     if len(t_name) > 2 and kb_name and len(kb_name) > 2:
         name_ratio = fuzz.token_sort_ratio(t_name, kb_name)
         if name_ratio > BUSINESS_NAME_MATCH_THRESH:
-            return True, "NAME_MATCH"
+            return True, "NAME_MATCH", NAME_TIER + name_ratio
 
     # === PATH C: MATCH COMBINADO (senales debiles acumuladas) ===
     # Contamos cuantas senales coinciden. Si alcanzamos MIN_COMBINED_SIGNALS,
@@ -436,6 +496,8 @@ def calculate_match_score(
         signals += 1
 
     if signals >= MIN_COMBINED_SIGNALS:
-        return True, "COMBINED_MATCH"
+        # Mas senales siempre gana; el ratio parcial desempata dentro del tier.
+        combined = signals * COMBINED_SIGNAL_WEIGHT + (name_ratio or 0)
+        return True, "COMBINED_MATCH", combined
 
-    return False, "NONE"
+    return False, "NONE", 0.0

@@ -35,6 +35,8 @@ from src_etl.utils.clee_resolution_config import (
     MATCH_WORKERS,
 )
 from src_etl.utils.matching import (
+    PERFECT_NAME_SCORE,
+    PERFECT_RAZON_SCORE,
     calculate_match_score,
     find_h3_neighbors,
     find_spatial_neighbors,
@@ -151,6 +153,99 @@ def _init_worker() -> None:
     pass
 
 
+def _best_candidate(
+    neighbors: np.ndarray,
+    t_name: str,
+    t_raz: str,
+    t_act: str,
+    t_tel: str,
+    t_email: str,
+    t_web: str,
+    t_cp: str,
+    kb_clees: list[str],
+    kb_names: list[str],
+    kb_razones: list[str],
+    kb_acts: list[str],
+    kb_tels: list[str],
+    kb_emails: list[str],
+    kb_wwws: list[str],
+    kb_cps: list[str],
+) -> str | None:
+    """
+    Elige el MEJOR candidato de la KB para una fila target, no el primero.
+
+    Evalua la cascada contra todos los vecinos espaciales y se queda con el
+    de score mas alto. Corazon de la correccion de 2026-10-06
+    (`docs/findings.md`): el loop anterior hacia `break` en el primer
+    candidato que pasaba el umbral de nombre y, como los vecinos llegan
+    ordenados por distancia ascendente, un vecino a 3 m con ratio 81 le
+    ganaba al registro verdadero a 10 m con ratio 100. Se midio sobre la
+    muestra de Fase 7 que en 0 de 37,561 falso_match el impostor ganaba
+    legitimamente por score.
+
+    Dos invariantes que el codigo debe preservar:
+
+    1. **Empates se resuelven por cercania.** La comparacion es `>` estricto
+       y los vecinos vienen ordenados por distancia, asi que ante scores
+       iguales se conserva el primero = el mas cercano. Es el comportamiento
+       previo, deliberadamente intacto: los empates son gemelos reales
+       (mismo nombre, misma coordenada) donde el nombre y la distancia no
+       aportan informacion y hace falta asignacion 1:1, no otro umbral.
+    2. **El corte temprano es lossless.** Se rompe el loop solo al alcanzar
+       el techo teorico del target, que nada posterior puede superar; como
+       los empates conservan al primero, cortar ahi da identico resultado
+       que escanear todo. Recupera parte del costo de haber quitado el
+       `break` original.
+
+    Args:
+        neighbors: Indices de la KB dentro de SPATIAL_RADIUS_M, ordenados
+            por distancia ascendente (los produce find_spatial_neighbors /
+            find_h3_neighbors).
+        t_name, t_raz, t_act, t_tel, t_email, t_web, t_cp: Campos de
+            matching de la fila target (mismo orden que
+            TARGET_MATCH_COLUMNS).
+        kb_clees: CLEEs de la KB, indexable por los valores de `neighbors`.
+        kb_names, kb_razones, kb_acts, kb_tels, kb_emails, kb_wwws, kb_cps:
+            Campos de matching de la KB, misma indexacion.
+
+    Returns:
+        El CLEE del mejor candidato, o None si ninguno hace match.
+    """
+    # Si el target no trae razon social usable, Path A no puede disparar
+    # contra NINGUN candidato y el techo real baja un tier. Es el caso
+    # mayoritario en DENUE (razon social vacia), donde mas rinde el corte.
+    ceiling = PERFECT_RAZON_SCORE if len(t_raz) > 2 else PERFECT_NAME_SCORE
+
+    best_clee: str | None = None
+    best_score = 0.0
+
+    for n_idx in neighbors:
+        is_match, _, score = calculate_match_score(
+            t_name,
+            t_raz,
+            t_act,
+            t_tel,
+            t_email,
+            t_web,
+            t_cp,
+            kb_names[n_idx],
+            kb_razones[n_idx],
+            kb_acts[n_idx],
+            kb_tels[n_idx],
+            kb_emails[n_idx],
+            kb_wwws[n_idx],
+            kb_cps[n_idx],
+        )
+
+        if is_match and score > best_score:
+            best_score = score
+            best_clee = kb_clees[n_idx]
+            if best_score >= ceiling:
+                break
+
+    return best_clee
+
+
 def _match_chunk(
     chunk_data: tuple[int, tuple[list[str], ...], list[np.ndarray]],
 ) -> tuple[int, list[str | None]]:
@@ -190,12 +285,9 @@ def _match_chunk(
             results.append(None)
             continue
 
-        # Vecinos ordenados por distancia: el primer COMBINED es el mas
-        # cercano y se conserva; un match directo (mas fuerte) lo reemplaza.
-        best_clee = None
-
-        for n_idx in neighbors:
-            is_match, strategy = calculate_match_score(
+        results.append(
+            _best_candidate(
+                neighbors,
                 t_names[idx],
                 t_razones[idx],
                 t_acts[idx],
@@ -203,23 +295,16 @@ def _match_chunk(
                 t_emails[idx],
                 t_webs[idx],
                 t_cps[idx],
-                kb_names[n_idx],
-                kb_razones[n_idx],
-                kb_acts[n_idx],
-                kb_tels[n_idx],
-                kb_emails[n_idx],
-                kb_wwws[n_idx],
-                kb_cps[n_idx],
+                kb_clees,
+                kb_names,
+                kb_razones,
+                kb_acts,
+                kb_tels,
+                kb_emails,
+                kb_wwws,
+                kb_cps,
             )
-
-            if is_match:
-                if strategy in ("NAME_MATCH", "RAZON_MATCH"):
-                    best_clee = kb_clees[n_idx]
-                    break
-                if best_clee is None:
-                    best_clee = kb_clees[n_idx]
-
-        results.append(best_clee)
+        )
 
     return (chunk_id, results)
 
@@ -347,32 +432,24 @@ def _run_matching_sequential(
             results.append(None)
             continue
 
-        best_clee = None
-
-        for n_idx in neighbors:
-            is_match, strategy = calculate_match_score(
-                t_names[idx],
-                t_razones[idx],
-                t_acts[idx],
-                t_tels[idx],
-                t_emails[idx],
-                t_webs[idx],
-                t_cps[idx],
-                _shared_kb_names[n_idx],
-                _shared_kb_razones[n_idx],
-                _shared_kb_acts[n_idx],
-                _shared_kb_tels[n_idx],
-                _shared_kb_emails[n_idx],
-                _shared_kb_wwws[n_idx],
-                _shared_kb_cps[n_idx],
-            )
-
-            if is_match:
-                if strategy in ("NAME_MATCH", "RAZON_MATCH"):
-                    best_clee = _shared_kb_clee_ids[n_idx]
-                    break
-                if best_clee is None:
-                    best_clee = _shared_kb_clee_ids[n_idx]
+        best_clee = _best_candidate(
+            neighbors,
+            t_names[idx],
+            t_razones[idx],
+            t_acts[idx],
+            t_tels[idx],
+            t_emails[idx],
+            t_webs[idx],
+            t_cps[idx],
+            _shared_kb_clee_ids,
+            _shared_kb_names,
+            _shared_kb_razones,
+            _shared_kb_acts,
+            _shared_kb_tels,
+            _shared_kb_emails,
+            _shared_kb_wwws,
+            _shared_kb_cps,
+        )
 
         results.append(best_clee)
         if best_clee:
