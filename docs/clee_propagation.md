@@ -337,6 +337,43 @@ Dos observaciones clave:
   restantes casi no procesan filas (de ahí que el `--force` deba correr
   además más rápido).
 
+## Cobertura sobre el Silver real — línea base 2026-07-30
+
+Fase 7 mide *precisión* sobre una muestra con ground truth. La otra mitad
+de la pregunta ("¿cuánto se propagó de verdad?") se mide sobre las 82.9M
+filas reales con `scripts/clee_propagation_stats.py`
+(`make propagation-stats`, read-only, ~15 s). Tablas completas por corte
+en `docs/findings.md` (entrada 2026-07-30); resumen:
+
+| Métrica (tras re-correr ambos métodos con nearest-first) | Valor |
+|---|---|
+| **Éxito de propagación** (filas sin CLEE oficial que quedaron con CLEE real) | **81.09%** (25,456,020 / 31,392,164) |
+| Identidades resultantes | 10,450,524 (9,579,860 reales + 870,664 `NEW_*`) |
+| Identidades que cubren 2+ cortes | 85.52% (promedio 7.33 cortes) |
+| Colisiones intra-periodo (error duro) | 6,321,095 filas excedentes (20.1% de las propagadas) |
+| Acuerdo radio vs H3 | 95.78% semántico (4.1% con CLEE real distinto) |
+
+Tres lecturas que no se ven en la precisión de Fase 7:
+
+1. **El 18.91% sin vincular lo explica UN corte**: 79% de las identidades
+   sintéticas nacen en 2019-04 (25% de sus filas no matchean ni contra
+   2019-11, a 7 meses) y se heredan hacia atrás, dejando a los cortes
+   viejos en ~73.5% mientras 2020-11 llega a 99.21%. No es un hueco de
+   datos (todos los campos de matching están completos) ni un fenómeno
+   local (uniforme en los 32 estados): apunta a una discontinuidad del
+   corte 2019-04 en la fuente. Ver `docs/findings.md` 2026-07-30.
+2. **Las colisiones son la deuda pendiente**: el `clee` oficial tiene 0
+   identidades repetidas dentro de un corte y las columnas propagadas
+   tienen 6.3M filas excedentes — la cascada es greedy, no impone
+   matching 1:1.
+3. **Radio y H3 no coinciden fila a fila a escala real** (sí en los tests
+   sintéticos): mismos totales, distinta asignación en 3.4M filas.
+
+Comparación con el estado anterior (orden legado newest-first), el dato
+que ya no se puede recalcular porque las columnas se reescribieron:
+precision 71.3% → 95.9% (Fase 7) e identidades `NEW_*` nacidas 933,577 →
+870,664 (−6.7%): nearest-first además de asignar mejor, fragmenta menos.
+
 ## Cambios
 
 ### Implementados (2026-07-21)
@@ -355,13 +392,11 @@ Dos observaciones clave:
 
 ### Sugeridos / pendientes
 
-1. **Re-resolución completa** (requisito, no opcional): las columnas
-   `clee_propagado_*` actuales se generaron con el orden legado.
-   `make transform ARGS="--only clee-radio --force"` (y el equivalente
-   `--only clee-h3 --force`), después `make build-entidades`. Bonus
-   esperado: el force debería ser
-   más rápido — con nearest-first la primera referencia agota ~99.9%
-   del pending y las demás casi no procesan filas.
+1. ~~**Re-resolución completa**~~ **hecha**: radio (2026-07-25 10:38 →
+   2026-07-26 03:19, ~16h41m) y H3 (2026-07-26 → 2026-07-27 04:56).
+   Ambas columnas quedaron con nearest-first; cobertura medida arriba.
+   Pendiente derivado: `make build-entidades` (la dimensión
+   `entidades_economicas` se construyó con los valores legados).
 2. **Repetir el protocolo con target `11_2022`** (referencias a ambos
    lados) para medir sensibilidad del hallazgo a la posición del target
    — contemplado en el protocolo original, no corrido.
@@ -374,3 +409,14 @@ Dos observaciones clave:
    podar particiones enteras fuera del disco k=1 del target — diseñada
    en `clee_resolution_config.py` (docstring de `H3_PARTITION_RES`),
    no implementada.
+
+### Abiertos por la medición de cobertura (2026-07-30)
+
+5. **Colisiones intra-periodo (6.3M filas)**: la cascada asigna el mismo
+   CLEE de referencia a varias filas del mismo corte. Explorar matching
+   mutuo (el candidato también tiene que preferir al target) o asignación
+   óptima por bloque H3. Es el error más grande medible sin ground truth.
+6. **Divergencia radio vs H3 en datos reales** (3.4M filas con CLEE real
+   distinto, desde el primer target): reproducir sobre un corte completo
+   y aislar si son empates de score resueltos por orden de candidatos o
+   una diferencia real en el conjunto de vecinos.

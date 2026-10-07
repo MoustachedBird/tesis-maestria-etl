@@ -197,6 +197,16 @@ me dice nada"):
       tie-break, así que para paridad estricta hay que re-correr **los
       dos** métodos con `--force` (radio Y h3); si solo se re-corre radio
       quedará un residuo de diferencias en coords idénticas (empates).
+      **CERRADO 2026-07-30**: ambos métodos re-corridos con `--force` y
+      código actual (radio 2026-07-25/26, h3 2026-07-26/27). Medido con
+      `make propagation-stats`: acuerdo semántico **95.78%** (vs 92.0%
+      antes) pero **3,398,748 filas (4.1%) siguen con CLEE real
+      distinto**, y la divergencia ya está presente en el PRIMER target
+      (2020-11: 6.7%). O sea: la causa no era solo el código viejo — hay
+      una diferencia real de asignación entre generadores de candidatos
+      que los tests sintéticos (1,500 filas / 800 end-to-end) no capturan.
+      Ver `docs/findings.md` 2026-07-30 y la Fase 8 al final de este
+      archivo.
 - [x] **Review de código de propagación (2026-07-19)** — lógica core
       verificada sana; bugs corregidos y mejoras aplicadas (174 tests en
       verde):
@@ -845,3 +855,48 @@ con evolución del crimen. Detalle completo en AGENTS.md sección SESNSP.
 - El plan anterior de este archivo (reestructuración a monolito modular en
   `app/`) fue reemplazado por decisión del usuario el 2026-07-16; recuperable
   del historial de la conversación si se retoma.
+
+## Fase 8 — (2026-07-30) Cobertura medida sobre el Silver real
+
+Con ambos métodos ya re-corridos con nearest-first, la pregunta pasa de
+"¿qué orden es mejor?" (resuelta en Fase 7) a "¿cuánto se propagó de
+verdad y qué tan sano quedó?".
+
+- [x] **Script de cobertura** `scripts/clee_propagation_stats.py`
+      (`make propagation-stats`, 12 tests unitarios en
+      `tests/unit/test_propagation_stats.py`): tasa de vinculación por
+      corte, `NEW_*` nacidos, longitud de cadenas, colisiones
+      intra-periodo y acuerdo entre métodos. Read-only, ~15 s sobre 82.9M
+      filas; acepta `.duckdb` o un `.parquet` de respaldo (para comparar
+      estados pasados del warehouse).
+- [x] **Línea base documentada** (`docs/findings.md`, entrada
+      2026-07-30): **81.09%** de éxito de propagación (25,456,020 /
+      31,392,164 filas sin CLEE oficial), 10,450,524 identidades
+      (9,579,860 reales + 870,664 sintéticas), 85.52% cubren 2+ cortes.
+      Histórico preservado ANTES de que se perdiera: newest-first daba
+      71.3% de precisión (Fase 7) y 933,577 `NEW_*` nacidos vs 870,664
+      ahora (−6.7% de fragmentación). El estado por fila de las columnas
+      legadas ya no es recuperable (se reescribieron; el respaldo
+      `establecimientos_backup.parquet` las tiene en NULL).
+- [ ] **Colisiones intra-periodo: 6,321,095 filas excedentes (20.1% de
+      las propagadas)** — el `clee` oficial tiene 0 en 9.58M identidades,
+      así que es error de la cascada: es greedy y no impone matching 1:1
+      (varias filas del target heredan el mismo CLEE de referencia).
+      Explorar matching mutuo o asignación óptima dentro del bloque H3.
+      Es el error más grande medible sin ground truth.
+- [ ] **Aislar la divergencia radio vs h3** (3,398,748 filas con CLEE
+      real distinto, presente ya en el primer target): comparar los
+      vecinos generados por ambos métodos sobre un corte real completo
+      (no muestra sintética) y determinar si son empates de score
+      resueltos por orden de candidatos o conjuntos de vecinos distintos.
+- [ ] **Investigar la discontinuidad del corte 2019-04**: aporta 688,160
+      de los 870,664 `NEW_*` nacidos (79%) y es lo único que separa a la
+      serie 2015-2018 (~73.5%) del ~97-99% del resto. Descartado hueco de
+      datos (campos de matching al 100%) y causa local (uniforme en los
+      32 estados). Prueba directa pendiente: cruzar 2019-04 con 2019-11
+      por nombre+municipio y ver la distribución de distancias — si hay
+      cola >500 m, el pre-filtro espacial descarta el match antes de la
+      cascada y habría que tratar ese corte aparte.
+- [ ] **Reconstruir `entidades_economicas`** (`make build-entidades`): la
+      dimensión N3 se construyó con los valores legados de
+      `clee_propagado_radio`.

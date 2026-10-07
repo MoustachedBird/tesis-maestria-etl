@@ -50,6 +50,9 @@ eval-masked-clee: ## Fase 7: evalua cascada con CLEE enmascarado (default neares
 eval-masked-clee-chain: ## Fase 7: experimento dos saltos (target via intermedio resuelto probabilisticamente)
 	$(PYTHON) scripts/evaluate_masked_clee.py chain $(ARGS)
 
+propagation-stats: ## Cobertura/salud de clee_propagado_* sobre Silver (read-only); ARGS="--db ... --column ..."
+	$(PYTHON) scripts/clee_propagation_stats.py $(ARGS)
+
 retry: ## Retry failed extractions
 	$(PYTHON) -m src_etl.main retry
 

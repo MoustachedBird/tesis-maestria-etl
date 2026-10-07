@@ -169,3 +169,413 @@ precisión solo por probar primero la referencia temporalmente más
 cercana; y la propagación transitiva (identidades `NEW_*` heredadas
 hacia atrás) es viable: cuesta ~0.15 pts por salto en vez de los ~31 pts
 que cuesta saltar 4 años de distancia temporal.
+
+---
+
+## 2026-07-30 — Línea base de cobertura de la propagación (post re-resolución nearest-first)
+
+**Método**: `scripts/clee_propagation_stats.py` (`make propagation-stats`),
+lectura read-only del Silver real tras terminar las dos re-corridas con
+`--force` y nearest-first: radio (2026-07-25 10:38 → 2026-07-26 03:19) y
+H3 (2026-07-26 → 2026-07-27 04:56). Mide **cobertura** sobre las 82.9M
+filas reales; complementa la **precisión** de Fase 7, que se mide contra
+ground truth sobre una muestra.
+
+### El número: 81.09% de éxito de propagación
+
+De las **31,392,164** filas de los 11 cortes SIN CLEE oficial
+(2015-01 … 2020-11), **25,456,020 (81.09%)** terminaron con un CLEE real
+de INEGI y 5,936,144 (18.91%) con identidad sintética `NEW_*`.
+H3 da 81.09% (25,454,867) — mismo agregado, distinto detalle (ver abajo).
+
+| Corte | Filas | Vinculadas | Sintéticas | `NEW_*` nacidos | Filas en colisión | % éxito |
+|---|---|---|---|---|---|---|
+| 2015-01 | 2,683,667 | 1,966,948 | 716,719 | 30,080 | 685,630 | 73.29% |
+| 2016-01 | 2,736,201 | 2,006,727 | 729,474 | 15,687 | 685,124 | 73.34% |
+| 2016-10 | 2,734,953 | 2,004,416 | 730,537 | 12,887 | 666,734 | 73.29% |
+| 2017-03 | 2,726,730 | 2,004,329 | 722,401 | 7,163 | 649,539 | 73.51% |
+| 2017-11 | 2,729,456 | 2,005,946 | 723,510 | 3,236 | 629,179 | 73.49% |
+| 2018-03 | 2,731,413 | 2,007,215 | 724,198 | 6,336 | 610,781 | 73.49% |
+| 2018-11 | 2,736,090 | 2,012,091 | 723,999 | 18,868 | 568,072 | 73.54% |
+| 2019-04 | 2,763,135 | 2,045,458 | 717,677 | 688,160 | 516,852 | 74.03% |
+| 2019-11 | 3,143,215 | 3,063,609 | 79,606 | 41,319 | 535,788 | 97.47% |
+| 2020-04 | 3,183,180 | 3,140,730 | 42,450 | 21,355 | 448,820 | 98.67% |
+| 2020-11 | 3,224,124 | 3,198,551 | 25,573 | 25,573 | 324,576 | 99.21% |
+
+Los 9 cortes con CLEE oficial (2021-05 … 2026-05, 51.5M filas) están al
+100% por construcción (Fase 1 determinística) y no entran en la métrica.
+
+### El escalón 2019-11 (97.5%) → 2019-04 (74.0%): un corte manda sobre todo lo demás
+
+El corte 2019-04 aporta **688,160 de los 870,664 `NEW_*` nacidos** (79%):
+una de cada cuatro de sus filas no encontró pareja en NINGUNA referencia
+futura, empezando por 2019-11 que está a 7 meses. Esa masa de identidades
+sintéticas se hereda hacia atrás y es la razón de que todos los cortes
+2015-2018 se estacionen en ~73.5%. Sin ese corte, la propagación estaría
+en ~97-99% en toda la serie.
+
+Descartado que sea un hueco de datos: en 2019-04 `nom_estab`,
+`codigo_act`, `cve_ent` y `h3_cell_9` están al 100%, y `raz_social`
+(27.9%) y `telefono` (44.4%) están *mejor* que en sus vecinos. Descartado
+también que sea local: la tasa de sintéticas es uniforme en los 32
+estados (21.3% a 33.0%, contra 2-7% en 2019-11).
+
+Que sea uniforme y nacional apunta a una discontinuidad del propio corte
+(cambio de universo, re-geocodificación o metodología de INEGI entre
+04/2019 y 11/2019 — el universo crece +380K filas hacia 2019-11), no a
+mortalidad empresarial ni a fallas de la cascada. **Queda abierto**: la
+prueba directa es cruzar 2019-04 con 2019-11 por nombre+municipio y ver
+la distribución de distancias (si hay una cola >500 m, la cascada nunca
+tuvo oportunidad porque el pre-filtro espacial la descarta antes).
+
+### Identidades y cadenas
+
+- **10,450,524 identidades**: 9,579,860 reales (exactamente las mismas
+  que trae el `clee` oficial — la propagación reusa identidades, no
+  inventa) + 870,664 sintéticas.
+- **85.52% cubren 2+ cortes**, promedio **7.33 cortes por identidad** (el
+  `clee` oficial solo alcanza 5.38 porque existe desde 2021): la
+  propagación agrega ~2 años de historia por negocio, que es justo lo que
+  necesita el análisis de supervivencia.
+
+### Colisiones intra-periodo: el error que sí se puede medir sin ground truth
+
+Un establecimiento aparece UNA vez por corte, así que una identidad
+repetida dentro del mismo corte es error duro. Comprobado que la fuente
+no lo trae: el `clee` oficial tiene **0 colisiones** en 9.58M identidades
+(`make propagation-stats ARGS="--column clee --no-agreement"`).
+
+| Columna | Identidades con colisión | Filas excedentes |
+|---|---|---|
+| `clee` (oficial) | 0 | 0 |
+| `clee_propagado_radio` | 595,419 (5.70%) | 6,321,095 |
+| `clee_propagado_h3` | 606,137 (5.80%) | 6,391,400 |
+
+**6.32M filas excedentes = 20.1% de las filas propagadas**: la cascada es
+greedy y no impone matching 1:1, así que varias filas del target pueden
+heredar el mismo CLEE de referencia. Aparece desde el primer target
+(2020-11: 324,576) y crece hacia atrás. Es el candidato natural a
+siguiente mejora (matching mutuo/asignación óptima por bloque) y una
+métrica de calidad reportable en la tesis sin ground truth.
+
+### Radio vs H3 NO son idénticos sobre datos reales
+
+La paridad verificada en tests (1,500 filas sintéticas, 800 end-to-end)
+no se sostiene a escala: acuerdo semántico **95.78%**, con **3,398,748
+filas (4.1%) con CLEE real DISTINTO** y 97,747 real-vs-sintética. La
+divergencia arranca en el primer target (2020-11: 6.7% de sus filas) y
+crece hacia atrás (2015-01: 13.9%), consistente con amplificación por la
+ventana deslizante. Los agregados coinciden (mismo total de `NEW_*`
+nacidos, mismas 10,450,524 identidades), así que el desacuerdo es
+*a quién* se asigna cada fila, no *cuántas* se resuelven — el mismo
+patrón que producen los empates resueltos por orden de candidatos.
+Pendiente: aislar el caso concreto (comparar vecinos de un target
+completo, no de una muestra sintética).
+
+### Antes vs después (dato histórico, para no perderlo)
+
+El estado previo de las columnas (orden legado newest-first) **ya no es
+recuperable**: ambas se reescribieron con `--force` y el respaldo
+`data/silver/establecimientos_backup.parquet` (2026-07-23) tiene las dos
+columnas de identidad en NULL. Lo que sí sobrevive es lo siguiente.
+
+| Métrica | Antes (newest-first) | Ahora (nearest-first) |
+|---|---|---|
+| Precision/recall (Fase 7, muestra 09/14/32, target 05_2021) | **71.3%** | **95.9%** directo · **95.7%** encadenado |
+| Identidades `NEW_*` nacidas (11 cortes propagados, nacional) | **933,577** | **870,664** (−62,913, −6.7%) |
+| Cobertura por fila (% con CLEE real) | no medida | **81.09%** |
+| Colisiones intra-periodo | no medida | 6.32M filas excedentes |
+
+`NEW_*` nacidos por corte, corrida legada (log H3 del 2026-07-18/19) vs
+actual (idéntica en radio y H3, 2026-07-25/27):
+
+| Corte | Legado | Actual | Δ |
+|---|---|---|---|
+| 2020-11 | 25,475 | 25,573 | +98 |
+| 2020-04 | 22,079 | 21,355 | −724 |
+| 2019-11 | 42,029 | 41,319 | −710 |
+| 2019-04 | 690,046 | 688,160 | −1,886 |
+| 2018-11 | 38,777 | 18,868 | **−19,909** |
+| 2018-03 | 19,949 | 6,336 | **−13,613** |
+| 2017-11 | 12,399 | 3,236 | **−9,163** |
+| 2017-03 | 13,302 | 7,163 | −6,139 |
+| 2016-10 | 18,116 | 12,887 | −5,229 |
+| 2016-01 | 18,970 | 15,687 | −3,283 |
+| 2015-01 | 32,435 | 30,080 | −2,355 |
+
+Nearest-first no solo asigna mejor (los +24.6 pts de precisión de Fase
+7): además **fragmenta menos** — 62,913 negocios que antes arrancaban una
+identidad sintética nueva ahora se enganchan a una cadena existente, y el
+ahorro se concentra en los cortes 2017-2018, los que más saltos de cadena
+acumulan. Lección de método: la cobertura por fila (81.09%) y las
+colisiones (6.32M) son ahora la línea base contra la que se compara
+cualquier cambio futuro de la propagación — se regeneran con
+`make propagation-stats`.
+
+---
+
+## 2026-10-05 — El CLEE oficial no es estable entre ediciones: la ausencia no mide cierre
+
+**Método**: consultas read-only sobre `data/silver/mipymes.duckdb`
+(82,896,801 filas, 20 cortes, 2015-01 … 2026-05). Identidad =
+`coalesce(clee, clee_propagado_radio)` para la serie completa, y `clee`
+puro para los 8 cortes oficiales (2021-05+), que es la prueba que aísla
+la fuente de la propagación. Sin script todavía; las consultas están
+transcritas abajo en prosa y son reproducibles en una sesión de `duckdb`.
+
+Surgió al verificar para el protocolo de tesis la afirmación de que el
+DENUE "solo registra atributos observables"; el salto de volumen entre
+2020-11 y 2021-05 llevó a medir el evento de cierre y lo que apareció es
+un problema más serio.
+
+### 1. El universo del DENUE cambia de tamaño por escalones
+
+| Corte | Filas | Corte | Filas |
+|---|---|---|---|
+| 2015-01 | 2,683,667 | 2021-05 | **5,515,863** |
+| 2019-04 | 2,763,135 | 2022-11 | 5,530,924 |
+| 2019-11 | 3,143,215 | 2024-05 | 5,564,607 |
+| 2020-11 | **3,224,124** | 2024-11 | **6,058,534** |
+
+De 2020-11 a 2021-05, seis meses, el universo crece **+2,291,739 filas
+(+71%)**. El 95.3% del aumento está en un solo estrato:
+
+| Estrato | 2020-11 | 2021-05 | Δ |
+|---|---|---|---|
+| 0 a 5 personas | 2,608,677 | 4,792,616 | **+83.7%** |
+| 6 a 10 personas | 294,393 | 353,970 | +20.2% |
+| 11 a 30 personas | 214,690 | 248,151 | +15.6% |
+| 251 y más | 12,368 | 14,083 | +13.9% |
+
+Por sector, el comercio al por menor (46) pasa de 1,138,338 a 2,229,285
+(**+95.8%**), otros servicios (81) +60%, alojamiento y alimentos (72)
++65%, industria alimentaria (31) +127%. Ninguna dinámica empresarial
+duplica el comercio al menudeo en un semestre: es ampliación de universo.
+
+**Confirmación independiente del identificador**: de las 2,645,966
+identidades que aparecen en 2021-05 y no estaban en 2020-11,
+**2,588,924 (97.8%) traen `fecha_alta_date` anterior a 2020-11**. Los
+registros mismos declaran haber ingresado al directorio antes del corte
+en el que aparecen por primera vez.
+
+### 2. La tasa aparente de desaparición es inestable por un factor de 400
+
+Identidad `coalesce(clee, clee_propagado_radio)`, pares de cortes
+consecutivos. `identidades_prev` es distinct de identidad, no filas (de
+ahí que sea menor que el conteo de filas en los cortes propagados: son
+las colisiones ya documentadas en la entrada 2026-07-30).
+
+| Par | identidades_prev | Desaparecen | % |
+|---|---|---|---|
+| 2017-11 → 2018-03 | 2,100,277 | 21,267 | 1.0 |
+| 2018-11 → 2019-04 | 2,168,018 | 42,039 | 1.9 |
+| **2019-04 → 2019-11** | 2,246,283 | **922,285** | **41.1** |
+| 2020-11 → 2021-05 | 2,899,548 | 29,651 | 1.0 |
+| **2021-05 → 2021-11** | 5,515,863 | 4,642 | **0.1** |
+| 2022-11 → 2023-11 | 5,530,924 | 307,428 | 5.6 |
+| **2024-05 → 2024-11** | 5,564,607 | **1,993,179** | **35.8** |
+| 2024-11 → 2025-05 | 6,058,534 | 320,551 | 5.3 |
+| **2025-05 → 2026-05** | 6,097,662 | **1,146,688** | **18.8** |
+
+Los dos extremos son igual de implausibles. **41.1% y 35.8% semestral**
+no es mortalidad empresarial, y **0.1%** tampoco: con ~50% de mortalidad
+a dos años (`ramirez2024nacimiento`) un semestre debería estar en el
+orden de varios puntos. Ambos extremos dicen lo mismo, que el CLEE es
+una clave de directorio y no un identificador de negocio.
+
+### 3. No es culpa de la propagación: pasa con CLEE oficial
+
+Los cortes 2021-05+ tienen CLEE oficial al 100% (Fase 1 determinística).
+Restringiendo a `clee` puro, los números no cambian en una sola unidad
+respecto a la tabla anterior: 2024-05 → 2024-11 pierde **1,993,179 CLEE
+oficiales (35.8%)** y gana 2,487,106 que no existían. Es un reencadenado
+masivo de claves dentro de la fuente, no un artefacto de
+`propagate_clees_radio`.
+
+Simétricamente, los cortes con mucha desaparición son los mismos con
+mucha aparición (2019-11: 1,366,193 altas / 922,285 bajas; 2024-11:
+2,487,106 / 1,993,179; 2026-05: 1,187,100 / 1,146,688). Las mismas
+unidades cambiando de clave.
+
+### 4. Las desapariciones no se revierten en cortes posteriores
+
+De los 1,993,179 CLEE que desaparecen en 2024-11, **solo 159,746 (8.0%)
+reaparecen en algún corte posterior**. La discontinuidad es permanente,
+no una omisión de una edición.
+
+### 5. No es un defecto de formato ni de ingesta
+
+El CLEE está bien formado a ambos lados del salto: longitud 28 en
+6,058,534 de 6,058,534 filas de 2024-11 y en 5,564,604 de 5,564,607 de
+2024-05 (3 filas con 27). Los prefijos de entidad están presentes y
+crecen de forma uniforme en los 32 estados (010: 62,017 → 71,238; 020:
+127,929 → 138,139; 050: 115,832 → 125,187). No hay truncamiento, ni
+cambio de esquema, ni estados faltantes.
+
+### 6. `fecha_alta_date` tampoco sirve como fecha de nacimiento
+
+Cuatro valores concentran el **94.1%** de las 82.9M filas, y tres de
+ellos son fechas de corte o de arranque del propio directorio:
+
+| fecha_alta_date | Filas | Qué es |
+|---|---|---|
+| 2010-07-01 | 31,479,088 | arranque del DENUE |
+| 2019-11-01 | 20,517,257 | corte 2019-11 |
+| 2014-12-01 | 19,423,254 | previo a la serie |
+| 2024-11-01 | 6,594,051 | corte 2024-11 |
+
+Es fecha de incorporación al directorio, reasignada en oleadas, no fecha
+de inicio de operaciones. Para el 38% de los registros la antigüedad
+derivada de este campo es un artefacto del registro.
+
+### Implicación para la tesis: la regla de dos ausencias no alcanza
+
+El protocolo define cierre como "no aparecer en dos cortes consecutivos
+sin reaparición posterior". Esa regla protege contra la omisión puntual
+de una edición, pero es indefensa ante lo medido aquí: en 2024-11 la
+discontinuidad abarca dos cortes y es permanente en el 92% de los casos,
+así que la regla clasificaría ~1.83M establecimientos vivos como
+cerrados, concentrados en un solo intervalo. Un modelo entrenado sobre
+eso aprende el calendario de reencadenado del INEGI, no el riesgo de
+cierre, y lo hará con un C-index engañosamente alto porque el patrón es
+muy regular.
+
+Consecuencias de diseño, en orden de urgencia:
+
+1. **El emparejamiento no puede descansar en el CLEE.** Hay que correr
+   la cascada de resolución de entidades también entre cortes oficiales
+   (hoy solo se usa para 2015-2020), o al menos sobre los pares con
+   discontinuidad masiva. La maquinaria ya existe.
+2. **Excluir o marcar los intervalos contaminados.** Los pares
+   2019-04→2019-11, 2024-05→2024-11 y 2025-05→2026-05 no son utilizables
+   como ventanas de observación del evento sin tratamiento previo.
+3. **El salto de universo de 2021-05 impide usar 2015-2020 y 2021+ como
+   una sola serie** sin acotar a un subuniverso comparable. La opción
+   limpia es restringir a los estratos y sectores cuya cobertura no
+   cambia, o arrancar la ventana de análisis en 2021-05.
+4. **La antigüedad debe medirse desde el primer corte observado**, no
+   desde `fecha_alta_date`, con un indicador de ingreso en la edición
+   inicial para capturar el truncamiento por la izquierda.
+
+### Pendientes
+
+- Confirmar contra la nota metodológica del DENUE qué cambió en 2021-05
+  (hipótesis: incorporación del universo de los Censos Económicos 2019)
+  y en 2024-11. Es la diferencia entre "la fuente cambió de universo" y
+  "la fuente reasigna claves", que tienen tratamientos distintos.
+- Medir cuánto recupera la cascada de resolución sobre el par
+  2024-05→2024-11: cuántos de los 1,993,179 "cerrados" se reencuentran
+  por nombre, actividad y cercanía. Es el análogo de Fase 7 pero entre
+  cortes oficiales, y da la cota superior del error de la regla actual.
+- Encapsular estas consultas en `scripts/` (análogo a
+  `clee_propagation_stats.py`) para que las tasas de aparición y
+  desaparición por par de cortes sean una métrica regenerable y no un
+  hallazgo de una sesión.
+- Revisar si el 0.1% de 2021-05→2021-11 indica lo contrario del problema
+  anterior, que el CLEE se arrastra sin verificar permanencia, lo que
+  subestimaría cierres reales.
+
+---
+
+## 2026-10-05 (b) — `fecha_alta` corrobora las discontinuidades, y acota la hipótesis de reencadenado
+
+Extiende la entrada anterior del 2026-10-05. Dos aportes: confirma la
+semántica del campo contra la fuente oficial, y **corrige parcialmente**
+la lectura de que las desapariciones masivas son reasignación de claves a
+los mismos establecimientos.
+
+### Semántica oficial del campo (confirmada, no inferida)
+
+El diccionario de datos que viene en el propio Bronze
+(`bronze/denue/11_2021/comercio_al_por_menor_2_de_4.zip`,
+`diccionario_de_datos/denue_diccionario_de_datos.csv`) define:
+
+> `fecha_alta` — "Fecha en la que la unidad económica se integró al
+> Directorio Estadístico Nacional de Unidades Económicas y al Registro
+> Estadístico de Negocios de México (RENEM)."
+
+El catálogo RNM del INEGI para DENUE 2023 (variable `FECHA_ALTA`,
+<https://www.inegi.org.mx/rnm/index.php/catalog/924/variable/F10/V412>)
+añade el dato que cierra cualquier duda: es **"variable de control
+predeterminada, que no es objeto de llenado por parte del informante"**.
+La asigna el sistema al incorporar la unidad; el negocio nunca declara
+cuándo se fundó.
+
+Comportamiento verificado en el Silver, consistente con esa definición:
+
+- **9,549,609 de 9,579,860 CLEE (99.68%) tienen una sola `fecha_alta` en
+  los 20 cortes** (30,215 tienen dos, 36 tienen tres). El campo se
+  arrastra, no se recalcula por edición.
+- **78,994,130 filas (95.3%) la traen anterior a su corte**, 3,901,029
+  (4.7%) igual al corte, y solo 1,641 posterior (0.002%, anomalía a
+  revisar). Que sea anterior al periodo es el comportamiento esperado.
+
+Consecuencia: para las unidades ya operando en julio de 2010 la
+antigüedad derivada del campo está truncada por la izquierda; para las
+incorporadas después es una cota inferior de existencia, y se aproxima a
+la fundación solo si el negocio entró al directorio siendo nuevo.
+
+### Las oleadas de `fecha_alta` son los mismos eventos de discontinuidad
+
+Las cuatro fechas que concentran el 94.1% de las filas (2010-07,
+2019-11, 2014-12, 2024-11) no son todas explicables por el arranque del
+directorio. La prueba directa, sobre el par 2024-05 → 2024-11:
+
+De los **2,487,106 CLEE que aparecen** en 2024-11 sin estar en 2024-05,
+**2,219,060 (89.2%) traen `fecha_alta` = 2024-11-01**. Es decir, el
+directorio los registra como incorporaciones nuevas en esa misma
+edición. Los demás se reparten entre 2019-11 (93,239), 2010-07 (89,032)
+y 2014-12 (49,769).
+
+Las dos anomalías medidas en la entrada anterior son por tanto un solo
+evento visto desde dos campos: en la edición 2024-11 el directorio da de
+baja ~2.0M claves y da de alta ~2.2M unidades como nuevas.
+
+### Corrección: el reencadenado explica como máximo una fracción
+
+La entrada anterior leyó esto como "reencadenado masivo de claves dentro
+de la fuente", sugiriendo que son los mismos establecimientos con clave
+distinta. La prueba de gemelos lo acota y no lo sostiene en esa
+magnitud.
+
+Cruzando las 1,993,179 bajas de 2024-05 contra las 2,219,060 altas
+nuevas de 2024-11 por **coincidencia exacta de `nom_estab` + `cve_ent` +
+`cve_mun` + `codigo_act`**: solo **297,105 bajas (14.9%) tienen gemelo
+exacto** entre las altas.
+
+Lectura correcta:
+
+- El 14.9% es una **cota inferior**, porque la coincidencia exacta de
+  nombre es un criterio estricto (abreviaturas, erratas, variantes de
+  "SIN NOMBRE", cambios de razón comercial). La cascada de resolución,
+  que usa similitud de nombre más cercanía espacial, encontraría más.
+- Pero está lejos de explicar el total. El grueso de las ~2.0M bajas
+  **no reaparece con el mismo nombre en el mismo municipio y la misma
+  clase de actividad**, lo que es compatible con rotación real de
+  universo (altas y bajas de unidades distintas) y no solo con un cambio
+  de clave.
+
+Es decir: la edición 2024-11 combina al menos tres cosas que hoy no se
+pueden separar — reasignación de clave a la misma unidad (≥14.9%),
+incorporación de unidades que el directorio no cubría, y cierres reales.
+**Mientras no se separen, el 35.8% de "desaparición" de ese par no es
+utilizable como tasa de cierre**, que es la conclusión operativa de la
+entrada anterior y no cambia.
+
+### Pendientes (reemplazan al segundo punto de la entrada anterior)
+
+- Correr la cascada de resolución (`propagate_clees_radio` /
+  `_h3`) sobre el par 2024-05 → 2024-11 tratando 2024-11 como target y
+  2024-05 como referencia. Da el reparto real entre "misma unidad con
+  clave nueva" y "unidad distinta", y convierte el 14.9% en una cifra
+  defendible. Es el experimento que decide si ese par se puede usar.
+- Repetir la prueba de gemelos en 2019-04 → 2019-11 y 2025-05 → 2026-05,
+  los otros dos pares con discontinuidad masiva, para ver si los tres
+  tienen la misma composición o son fenómenos distintos.
+- Revisar las 1,641 filas con `fecha_alta_date` posterior a su propio
+  corte: son imposibles por definición del campo y apuntan a un defecto
+  de parseo en la ingesta.
+- El RENEM aparece en la definición oficial del campo. Es el registro
+  estadístico de negocios de acceso restringido, y es la vía por la que
+  existirían variables financieras enlazables (el análogo del cruce
+  SIRENE-Diane del caso francés). Vale documentar qué se puede solicitar.

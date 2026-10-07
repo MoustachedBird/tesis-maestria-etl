@@ -829,6 +829,51 @@ posición) porque `propagate_clees_radio` devuelve las filas reordenadas
 
 ---
 
+## Cobertura de la propagación (`scripts/clee_propagation_stats.py`)
+
+La otra mitad de la evaluación: Fase 7 mide PRECISIÓN sobre una muestra
+con ground truth; este script mide COBERTURA y salud estructural de las
+columnas `clee_propagado_*` tal como quedaron en el warehouse real (82.9M
+filas, ~15 s, siempre READ-ONLY).
+
+```bash
+make propagation-stats                                     # radio + h3 del Silver
+make propagation-stats ARGS="--column clee --no-agreement" # baseline: colisiones de la fuente
+make propagation-stats ARGS="--db data/silver/otra.duckdb" # otra base o un .parquet de respaldo
+```
+
+Qué reporta (por corte y agregado, JSON en
+`data/eval/propagation_stats/`, log `data/etl_propagation_stats.log`):
+
+- **Tasa de vinculación** = filas de los cortes SIN CLEE oficial que
+  quedaron con un CLEE real de INEGI en vez de `NEW_*`. Es el
+  "porcentaje de éxito" de la propagación. Los cortes con CLEE oficial se
+  reportan aparte: su 100% es trivial (Fase 1 determinística) y mezclarlos
+  infla el número.
+- **`NEW_*` nacidos por corte**: una identidad sintética "nace" en el
+  corte más NUEVO en que aparece (la propagación va futuro→pasado) y de
+  ahí se hereda hacia atrás. Cruzar contra los "nuevos" del log
+  `data/etl_clee_resolution_{método}.log` valida la lectura.
+- **Cadenas**: cuántos cortes cubre cada identidad (una identidad de un
+  solo corte no aporta supervivencia).
+- **Colisiones intra-periodo**: identidades repetidas dentro del mismo
+  corte — imposibles por construcción, así que miden error duro sin
+  ground truth. Comparar siempre contra `--column clee` (la fuente tiene
+  0) para separar error del matching de ruido de origen.
+- **Acuerdo radio vs H3**: los `NEW_*` llevan prefijo y uuid distintos
+  por método, así que la comparación justa es el acuerdo *semántico*
+  (idénticas + ambas sintéticas).
+
+Flags: `--db` (`.duckdb` read-only o `.parquet` con un volcado de
+`establecimientos`), `--column` (repetible; default = columnas del
+registro `CLEEResolver.METHODS`), `--no-identity-metrics` (salta el
+GROUP BY caro por identidad), `--no-agreement`, `--out`.
+
+Línea base medida el 2026-07-30 (post nearest-first) en
+`docs/findings.md` — incluye el dato del orden legado para comparar.
+
+---
+
 ## Project Overview
 
 **Name:** `tesis-core` (v0.1.0)
@@ -978,6 +1023,7 @@ directo con `uv run python -m src_etl.main ...`).
 | `make eval-masked-clee-extract` | `scripts/evaluate_masked_clee.py extract` | ✅ | Silver read-only → parquets en `data/eval/` |
 | `make eval-masked-clee` | `… evaluate` | ✅ | Default `--ref-order nearest` (producción) |
 | `make eval-masked-clee-chain` | `… chain` | ✅ | Experimento de dos saltos |
+| `make propagation-stats` | `scripts/clee_propagation_stats.py` | ✅ | Cobertura/salud de `clee_propagado_*`; Silver read-only |
 
 ### Base de datos y migraciones
 
