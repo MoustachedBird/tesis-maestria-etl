@@ -650,24 +650,58 @@ verificación.
    ruta inexistente. Ningún test cubre `main.py`, así que habría aparecido
    como "no hay archivos que procesar" en la primera corrida real.
 
-### Fase 2 — Postgres en contenedor y esquema objetivo
+### Fase 2 — Postgres en contenedor y esquema objetivo ⚠️ CÓDIGO LISTO, VALIDACIÓN PENDIENTE (2026-10-08)
 
-- [ ] `docker-compose.yml` con el servicio `postgres` (imagen oficial, sin
-      extensiones — §4.4), volumen nombrado, `shm_size` y el tuning de §2 de
-      `docs/entorno_linux.md` en `command`.
-- [ ] Roles: `etl_rw` (dueño) y `api_ro` (`SELECT` en `gold` y `meta`).
-- [ ] Alembic multi-schema: `version_table_schema`, `include_schemas=True`,
-      creación de los tres schemas en la primera migración.
-- [ ] Traducir los modelos ORM de `db/models.py` a los schemas con
-      `__table_args__ = {"schema": "silver"}` y tipos Postgres nativos.
-- [ ] Modelos ORM para `meta.*` (reemplazan `src_metadata/schema.py`).
-- [ ] `establecimientos` particionada por `period` + helper que crea la
-      partición de un corte nuevo.
-- [ ] Reescribir las 4 migraciones existentes como un baseline único.
+- [x] `docker-compose.yml` con el servicio `postgres` (imagen oficial, sin
+      extensiones — §4.4), volumen nombrado, `shm_size`, healthcheck y el
+      tuning de §2 de `docs/entorno_linux.md` como flags desde `.env`.
+- [x] Roles: `etl_rw` (dueño) y `api_ro` (`SELECT` en `gold` y `meta`, más
+      `DEFAULT PRIVILEGES` para las tablas futuras).
+- [x] Alembic multi-schema: `include_schemas=True`, `include_name` limitado
+      a los tres schemas, `version_table_schema="meta"`, un solo engine.
+- [x] Modelos ORM en sus schemas. El schema va en el **MetaData**, no en
+      cada modelo: así las ~20 FKs escritas sin calificar se resuelven
+      solas dentro de `silver` y no hubo que reescribir ninguna.
+- [x] Modelos ORM de `meta.*` (reemplazan `src/meta/schema.py`), ahora con
+      FKs reales y `ON DELETE CASCADE`.
+- [x] Baseline único `b0000baseline` en lugar de las 4 migraciones de
+      DuckDB: crea los 3 schemas, 18 tablas, el rol de lectura y siembra.
+- [ ] **`establecimientos` particionada por `period`** — se pasa a la Fase 3,
+      donde vive el helper de staging que la usa (§2.4).
 
-**Criterio de aceptación:** `make db-up && make db-migrate` levanta la base
-vacía con 3 schemas, 13 tablas en `silver`/`gold` y 8 en `meta`;
-`make db-status` las lista. **Los `.duckdb` siguen intactos.**
+**Verificado sin servidor:** 217 passed en cada commit; las 18 tablas del
+baseline cubren exactamente el metadata (silver 12 / meta 6 / gold 0); el
+DDL compilado contra el dialecto `postgresql` sale calificado
+(`CREATE TABLE silver.establecimientos`, `REFERENCES meta.job_runs ... ON
+DELETE CASCADE`); `_safe_identifier` rechaza
+`"api_ro; DROP SCHEMA silver"`; ruff en los 44 preexistentes.
+
+**⚠️ PENDIENTE — validar en la workstation Linux:**
+
+```bash
+cp .env.example .env    # y poner los dos passwords
+make db-up              # levanta Postgres y espera el healthcheck
+make db-migrate         # aplica b0000baseline
+make db-config          # confirma que el tuning quedó aplicado
+make psql               # \dn debe listar silver, gold, meta
+```
+
+Qué puede salir mal, por probabilidad:
+
+1. **Los loaders de seeds contra Postgres.** `load_geografia`, `load_scian`,
+   `load_dominios` y `load_estratos` corren dentro de la migración y nunca
+   se han ejecutado sobre otro motor que DuckDB. Es el paso con más
+   superficie de fallo del baseline.
+2. **`shared_buffers=32GB`** no arranca si la máquina tiene menos RAM que
+   eso disponible.
+3. **Tipos sin equivalente exacto.** `Double` y `DateTime(timezone=True)`
+   compilan bien, pero solo se han verificado compilando, no ejecutando.
+
+**Tres andamios de transición** introducidos a propósito, todos marcados
+para retirarse en la Fase 4: el listener `before_create` que emite
+`CREATE SCHEMA IF NOT EXISTS`, el `SET schema='silver'` de
+`connect_configured` (el SQL crudo de los stages aún no está calificado) y
+el re-export plano de los modelos de `silver`.
 
 ### Fase 3 — Capa de acceso sin DuckDB
 
