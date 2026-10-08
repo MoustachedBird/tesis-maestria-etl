@@ -607,22 +607,48 @@ y **no hay datos que trasladar ni preparar** — ver el recuadro de §5.
 **Criterio de aceptación:** el repo clonado en la Linux construye la imagen
 del ETL.
 
-### Fase 1 — Paquete `src/shared`
+### Fase 1 — Paquete `src/shared` ✅ COMPLETA (2026-10-08)
 
 Refactor puro: **mismo motor, mismo comportamiento**, solo movimiento de
-código. Es la fase más segura y la que desbloquea todas las demás.
+código. Ejecutada en cinco commits, cada uno con la suite completa como
+verificación.
 
-- [ ] `src/shared/enums/` con `layer.py`, `jobs.py`, `sources.py`,
-      `sections.py` — patrón `str, Enum` + docstring de dominio (§2.6).
-- [ ] Mover `config.py` y `logging.py` a `src/shared/`.
-- [ ] Mover `Base` y la sesión a `src/shared/db/`.
-- [ ] Renombrar `src_etl` → `src/etl`, `src_api` → `src/api`,
-      `src_metadata` → `src/meta`; actualizar imports, `pyproject.toml`,
-      `pytest.ini`, `.coveragerc`, `Makefile`, `Dockerfile.etl`.
-- [ ] Reemplazar los enums duplicados por los de `shared`.
+- [x] `src/shared/enums/` con `layer.py`, `jobs.py`, `sources.py`,
+      `sections.py` — patrón `StrEnum` + docstring de dominio (§2.6).
+      Nuevos: `Layer`, `SourceSystem`, `TriggerType`.
+- [x] `config.py` y `logging.py` a `src/shared/` (22 imports).
+- [x] `Base`, sesión (`database.py` → `session.py`), modelos y deps a
+      `src/shared/db/`. `indexes.py` se queda en el ETL: solo lo usan
+      `clee_resolver` y `processor`.
+- [x] `src_etl` → `src/etl`, `src_api` → `src/api`, `src_metadata` →
+      `src/meta`; con `pyproject.toml`, `pytest.ini`, `.coveragerc`,
+      `Makefile` y `Dockerfile.etl`.
+- [x] Enums duplicados eliminados: una sola definición, verificada por
+      identidad de objeto (`meta.JobStatus is shared.JobStatus`).
 
-**Criterio de aceptación:** `make test` verde (217 tests), `make lint`
-limpio, y `grep -r "from src.etl" src/api/` sin resultados.
+**Criterio de aceptación — cumplido:**
+
+- `217 passed, 23 skipped` en cada commit, igual que antes de empezar.
+- `grep -r "from src.etl" src/api/` sin resultados: el acoplamiento del
+  diagnóstico 1.4 está roto; el API solo importa de `shared`.
+- `grep -r "from src.(etl|api|meta)" src/shared/` sin resultados: el
+  paquete compartido no tiene dependencias salientes.
+- Ruff: **44 errores, todos preexistentes** (32 `W293`, 10 `W291`, 2
+  `F841`). Bajó de 47 porque los 3 `UP042` eran los `(str, Enum)` que la
+  fase eliminó. Nota: el criterio original decía "`make lint` limpio", que
+  **no era alcanzable** — el repo ya tenía esos errores antes de la fase.
+  Limpiarlos es trabajo aparte, no de esta migración.
+
+**Tres bugs preexistentes o introducidos que la fase dejó a la vista:**
+
+1. `Dockerfile.etl` copiaba `src/etl`, `src/meta` y `src/api` por separado,
+   lo que habría dejado la imagen sin `src/shared`. Ahora copia `src/`.
+2. `make metadata-stats` importaba `DenueTransformer`, clase que no existe
+   (es `DenuePipelineOrchestrator`); ya fallaba en `HEAD`.
+3. `PROJECT_ROOT` de `main.py` usaba `parents[1]`, correcto en `src_etl/`
+   pero no en `src/etl/`: apuntaba a `src/` y dejaba `BRONZE_DIR` en una
+   ruta inexistente. Ningún test cubre `main.py`, así que habría aparecido
+   como "no hay archivos que procesar" en la primera corrida real.
 
 ### Fase 2 — Postgres en contenedor y esquema objetivo
 
