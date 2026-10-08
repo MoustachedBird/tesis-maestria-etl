@@ -42,7 +42,7 @@ def _tables(metadata, names):
 
 def upgrade() -> None:
     """Crea las tablas SESNSP y siembra el catalogo de delitos."""
-    from src_etl.core.config import settings
+    from src.shared.config import settings
     from src_etl.db.base import Base
     from src_etl.db.models import SesnspIncidenciaMunicipal  # noqa: F401
     from src_etl.loaders.sesnsp import load_seeds_sqlalchemy as load_delitos

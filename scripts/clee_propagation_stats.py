@@ -46,8 +46,8 @@ import typer
 # evaluate_masked_clee.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src_etl.core.config import settings  # noqa: E402
-from src_etl.core.logging import get_stage_logger  # noqa: E402
+from src.shared.config import settings  # noqa: E402
+from src.shared.logging import get_stage_logger  # noqa: E402
 from src_etl.transformers.clee_resolver import CLEEResolver  # noqa: E402
 from src_etl.utils.warehouse import connect_configured  # noqa: E402
 

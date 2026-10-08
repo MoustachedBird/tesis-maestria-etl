@@ -12,7 +12,7 @@ Uses MetadataTracker for comprehensive tracking and observability.
 import logging
 from pathlib import Path
 
-from src_etl.core.config import settings
+from src.shared.config import settings
 from src_etl.loaders.loader import SilverToGoldLoader
 from src_etl.transformers.clee_resolver import CLEEResolver
 from src_etl.transformers.date_normalizer import DateNormalizer

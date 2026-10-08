@@ -65,7 +65,7 @@ def _catalog_id(table: str, label_col: str, label: str) -> int:
     """
     import polars as pl
 
-    from src_etl.core.config import get_settings
+    from src.shared.config import get_settings
     from src_etl.loaders.dominios import SEED_FILES
 
     seeds = Path(get_settings().SEEDS_DIR)

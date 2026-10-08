@@ -3,7 +3,7 @@ from pathlib import Path
 
 import duckdb
 
-from src_etl.core.config import settings
+from src.shared.config import settings
 
 
 def connect_configured(

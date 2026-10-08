@@ -29,8 +29,8 @@ from pathlib import Path
 
 import duckdb
 
-from src_etl.core.config import settings
-from src_etl.core.logging import get_stage_logger
+from src.shared.config import settings
+from src.shared.logging import get_stage_logger
 from src_etl.utils.backup import backup_warehouse
 from src_etl.utils.warehouse import connect_configured
 from src_metadata.models import JobStatus, TaskStatus

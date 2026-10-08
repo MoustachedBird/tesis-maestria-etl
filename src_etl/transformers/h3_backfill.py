@@ -21,7 +21,7 @@ from pathlib import Path
 
 import duckdb
 
-from src_etl.core.logging import get_stage_logger
+from src.shared.logging import get_stage_logger
 from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
 from src_etl.utils.warehouse import connect_configured, load_h3_extension
 from src_metadata.models import JobStatus, TaskStatus

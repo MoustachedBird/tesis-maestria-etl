@@ -28,8 +28,8 @@ from pathlib import Path
 
 import duckdb
 
-from src_etl.core.config import settings
-from src_etl.core.logging import get_stage_logger
+from src.shared.config import settings
+from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_backup.log"))
 

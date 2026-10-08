@@ -28,8 +28,8 @@ import re
 from datetime import date
 from pathlib import Path
 
-from src_etl.core.config import settings
-from src_etl.core.logging import get_stage_logger
+from src.shared.config import settings
+from src.shared.logging import get_stage_logger
 from src_etl.loaders.sesnsp import (
     DELITO_KEY_COLUMNS,
     validate_delitos_del_csv,

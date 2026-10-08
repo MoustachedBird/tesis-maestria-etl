@@ -137,7 +137,7 @@ def default_seeds_dir() -> Path:
 
     Import lazy de la config para no acoplar el modulo en import-time.
     """
-    from src_etl.core.config import get_settings
+    from src.shared.config import get_settings
 
     return Path(get_settings().SEEDS_DIR)
 

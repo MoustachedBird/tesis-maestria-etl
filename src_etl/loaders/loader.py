@@ -10,7 +10,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from src_etl.core.config import settings
+from src.shared.config import settings
 from src_metadata.models import JobStatus, TaskStatus
 from src_metadata.tracker import MetadataTracker
 

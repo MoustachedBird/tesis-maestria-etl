@@ -17,7 +17,7 @@ from sqlalchemy import Engine
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import configuration and models
-from src_etl.core.config import get_settings
+from src.shared.config import get_settings
 
 # Import all models to ensure they're registered with Base.metadata
 from src_etl.db import models  # noqa: F401

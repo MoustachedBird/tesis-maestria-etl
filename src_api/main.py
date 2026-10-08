@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from src_etl.core.config import get_settings
+from src.shared.config import get_settings
 from src_etl.db import init_db
 from src_etl.db.dependencies import AppSettings, DbSession
 

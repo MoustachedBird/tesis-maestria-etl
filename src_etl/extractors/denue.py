@@ -10,8 +10,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
+from src.shared.logging import PipelineLogger
 from src_etl.core.download_config import DownloadConfig
-from src_etl.core.logging import PipelineLogger
 from src_etl.utils.browser import get_chrome_driver
 from src_etl.utils.denue_scraping import scrape_denue_table
 from src_etl.utils.downloader import Downloader

@@ -28,9 +28,9 @@ from urllib.parse import unquote, urlparse
 import requests
 import truststore
 
-from src_etl.core.config import settings
+from src.shared.config import settings
+from src.shared.logging import PipelineLogger
 from src_etl.core.download_config import DownloadConfig
-from src_etl.core.logging import PipelineLogger
 from src_etl.utils.downloader import Downloader
 from src_metadata.models import TaskStatus
 from src_metadata.tracker import MetadataTracker

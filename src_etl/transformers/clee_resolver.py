@@ -25,7 +25,7 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from src_etl.core.logging import get_stage_logger
+from src.shared.logging import get_stage_logger
 from src_etl.db.indexes import suspended_indexes
 from src_etl.utils.clee_resolution_config import (
     SILVER_READ_QUERY,

@@ -37,8 +37,8 @@ import typer
 # reorganize_domain_ids.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src_etl.core.config import settings  # noqa: E402
-from src_etl.core.logging import get_stage_logger  # noqa: E402
+from src.shared.config import settings  # noqa: E402
+from src.shared.logging import get_stage_logger  # noqa: E402
 from src_etl.utils.clee_resolution_config import (  # noqa: E402
     SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,

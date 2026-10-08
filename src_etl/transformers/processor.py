@@ -14,8 +14,8 @@ from typing import Any
 
 import polars as pl
 
-from src_etl.core.config import settings
-from src_etl.core.logging import get_stage_logger
+from src.shared.config import settings
+from src.shared.logging import get_stage_logger
 from src_etl.db.indexes import suspended_indexes
 from src_etl.loaders.denue import EstablecimientoWriter
 from src_etl.utils.denue_schema import (

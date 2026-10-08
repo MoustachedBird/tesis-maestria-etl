@@ -12,7 +12,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
-from src_etl.core.config import get_settings
+from src.shared.config import get_settings
 
 
 @lru_cache
