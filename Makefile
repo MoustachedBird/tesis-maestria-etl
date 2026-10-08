@@ -1,4 +1,5 @@
-.PHONY: help setup extract transform load pipeline build-entidades clean db-migrate db-downgrade db-reset test
+.PHONY: help setup extract transform load pipeline build-entidades clean test \
+	db-up db-down db-logs psql db-config db-destroy db-migrate db-downgrade db-reset db-status
 .DEFAULT_GOAL := help
 
 # Variables
@@ -92,6 +93,43 @@ logs: ## Show latest logs
 	@echo ""
 	@echo "Last 20 log entries:"
 	@tail -20 logs/downloads/latest/app.log 2>/dev/null || echo "No app.log found yet"
+
+# ─── Postgres (contenedor) ───────────────────────────────────────────────────
+
+# El servicio `etl` esta bajo el profile `manual`, asi que `up` solo levanta
+# la base y lo que sea daemon. Los limites de recursos salen del .env.
+
+db-up: ## Levanta Postgres y espera a que este listo
+	docker compose up -d postgres
+	@echo "Esperando a que Postgres acepte conexiones..."
+	@until docker compose exec -T postgres pg_isready -q 2>/dev/null; do sleep 1; done
+	@echo "Postgres listo en localhost:$${POSTGRES_PORT:-5432}"
+
+db-down: ## Detiene Postgres (conserva el volumen de datos)
+	docker compose down
+
+db-logs: ## Sigue los logs de Postgres
+	docker compose logs -f postgres
+
+psql: ## Abre una sesion psql en la base
+	docker compose exec postgres psql -U $${POSTGRES_USER:-etl_rw} -d $${POSTGRES_DB:-mipymes}
+
+db-config: ## Muestra el tuning efectivo de Postgres (lo que quedo aplicado)
+	@docker compose exec -T postgres psql -U $${POSTGRES_USER:-etl_rw} -d $${POSTGRES_DB:-mipymes} \
+		-c "SELECT name, setting, unit FROM pg_settings WHERE name IN \
+		('shared_buffers','effective_cache_size','maintenance_work_mem','work_mem', \
+		 'max_parallel_workers','max_parallel_workers_per_gather','random_page_cost', \
+		 'effective_io_concurrency','max_wal_size','max_locks_per_transaction') ORDER BY name;"
+
+db-destroy: ## BORRA el volumen de datos de Postgres (pide confirmacion)
+	@echo "ATENCION: esto borra TODOS los datos de Postgres (volumen etl-pgdata)."
+	@read -p "Escribe 'borrar' para confirmar: " ans; \
+	if [ "$$ans" = "borrar" ]; then \
+		docker compose down -v; \
+		echo "Volumen eliminado."; \
+	else \
+		echo "Cancelado."; \
+	fi
 
 # ─── Database Migrations ─────────────────────────────────────────────────────
 

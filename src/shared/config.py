@@ -51,12 +51,26 @@ class Settings(BaseSettings):
     # y sin costo de espacio, por eso viene encendido por default.
     WAREHOUSE_BACKUP_ENABLED: bool = True
 
+    # -------------------------------------------------------------------------
     # PostgreSQL Configuration
+    # -------------------------------------------------------------------------
+    # Una sola base con tres schemas (silver, gold, meta): ver
+    # arquitectura.md §2.3. Desde el contenedor del ETL el host es el nombre
+    # del servicio de compose ("postgres"); desde el host, "localhost".
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "denue"
-    POSTGRES_USER: str = "postgres"
+    POSTGRES_DB: str = "mipymes"
+
+    # Rol dueño del esquema: ETL, scheduler y Alembic.
+    POSTGRES_USER: str = "etl_rw"
     POSTGRES_PASSWORD: str = ""
+
+    # Rol de solo lectura del API: SELECT en gold y meta, nunca en silver.
+    # Es la salvaguarda estructural de §2.3.1 — con este rol,
+    # `establecimientos` sin calificar solo puede resolver al de gold, así
+    # que el API no puede confundir los dos granos de la tabla.
+    POSTGRES_RO_USER: str = "api_ro"
+    POSTGRES_RO_PASSWORD: str = ""
 
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
@@ -158,6 +172,28 @@ class Settings(BaseSettings):
 
     @computed_field
     @property
+    def DATABASE_URL_READ_ONLY(self) -> str:
+        """
+        Connection URL for the API's read-only role (`api_ro`).
+
+        Separado de DATABASE_URL a proposito: el API nunca debe conectarse
+        con el rol dueno. Con `api_ro` los GRANT solo cubren gold y meta, asi
+        que un bug en un endpoint no puede tocar silver ni confundir los dos
+        granos de `establecimientos` (arquitectura.md §2.3.1).
+
+        En backend duckdb cae al mismo URL que DATABASE_URL: el archivo no
+        tiene roles, asi que la separacion no existe y no hay nada que
+        simular.
+
+        Returns:
+            str: SQLAlchemy-compatible read-only database URL
+        """
+        if self.DATABASE_BACKEND == "postgresql":
+            return self._get_postgresql_url(read_only=True)
+        return self.DATABASE_URL
+
+    @computed_field
+    @property
     def DATABASE_URL_ASYNC(self) -> str:
         """
         Get async database URL for async SQLAlchemy (PostgreSQL only).
@@ -174,36 +210,39 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
-    def _get_postgresql_url(self, async_driver: bool = False) -> str:
+    def _get_postgresql_url(
+        self,
+        async_driver: bool = False,
+        read_only: bool = False,
+    ) -> str:
         """
         Construct PostgreSQL URL with proper driver.
 
         Args:
             async_driver: If True, use asyncpg driver instead of psycopg2
+            read_only: If True, use the api_ro role instead of the owner
 
         Returns:
             str: PostgreSQL connection URL
         """
         driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg2"
 
-        if not self.POSTGRES_USER:
-            raise ValueError("POSTGRES_USER must be set for PostgreSQL backend")
+        user = self.POSTGRES_RO_USER if read_only else self.POSTGRES_USER
+        raw_password = self.POSTGRES_RO_PASSWORD if read_only else self.POSTGRES_PASSWORD
+
+        if not user:
+            role = "POSTGRES_RO_USER" if read_only else "POSTGRES_USER"
+            raise ValueError(f"{role} must be set for PostgreSQL backend")
 
         # URL encode password if it contains special characters
         from urllib.parse import quote_plus
 
-        password = quote_plus(self.POSTGRES_PASSWORD) if self.POSTGRES_PASSWORD else ""
+        password = quote_plus(raw_password) if raw_password else ""
 
-        if password:
-            return (
-                f"{driver}://{self.POSTGRES_USER}:{password}"
-                f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
-        else:
-            return (
-                f"{driver}://{self.POSTGRES_USER}"
-                f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-            )
+        credentials = f"{user}:{password}" if password else user
+        return (
+            f"{driver}://{credentials}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
 
     def _get_duckdb_url(self) -> str:
         """

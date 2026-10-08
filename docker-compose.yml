@@ -1,21 +1,118 @@
+# ============================================================================
+# ETL Core — stack de contenedores (arquitectura.md §2.1)
+# ============================================================================
+# Un solo entorno de ejecución: la workstation Linux (48 hilos / 125 GiB,
+# inventario en docs/entorno_linux.md). Los límites de recursos vienen del
+# .env para no fijar números de una máquina en el compose.
+#
+#   docker compose up -d postgres     # levanta solo la base
+#   docker compose run --rm etl ...   # corrida manual del pipeline (profile)
+#
+# El servicio `etl` está bajo el profile `manual`: es un one-shot de CLI, no
+# un daemon, así que `docker compose up` no debe arrancarlo.
+
 services:
+  postgres:
+    image: postgres:17
+    container_name: etl-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mipymes}
+      POSTGRES_USER: ${POSTGRES_USER:-etl_rw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}
+      # Locale e índices deterministas: sin esto el orden de los VARCHAR
+      # depende del locale del host y los índices no son reproducibles.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+
+    # Tuning: valores derivados de la RAM y los núcleos de la máquina
+    # (docs/entorno_linux.md §2). Van como flags y no en un postgresql.conf
+    # montado para que una sola fuente —el .env— los controle.
+    command: >
+      postgres
+      -c shared_buffers=${PG_SHARED_BUFFERS:-32GB}
+      -c effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-90GB}
+      -c maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-16GB}
+      -c work_mem=${PG_WORK_MEM:-256MB}
+      -c max_worker_processes=${PG_MAX_WORKER_PROCESSES:-48}
+      -c max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-24}
+      -c max_parallel_workers_per_gather=${PG_MAX_PARALLEL_PER_GATHER:-8}
+      -c max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE:-8}
+      -c random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}
+      -c effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}
+      -c maintenance_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}
+      -c wal_buffers=${PG_WAL_BUFFERS:-64MB}
+      -c max_wal_size=${PG_MAX_WAL_SIZE:-16GB}
+      -c min_wal_size=${PG_MIN_WAL_SIZE:-2GB}
+      -c checkpoint_completion_target=0.9
+      -c checkpoint_timeout=15min
+      -c autovacuum_max_workers=6
+      -c autovacuum_vacuum_cost_limit=2000
+      -c default_statistics_target=200
+      -c huge_pages=try
+      -c max_locks_per_transaction=${PG_MAX_LOCKS_PER_TRANSACTION:-256}
+
+    volumes:
+      # Volumen NOMBRADO, nunca bind mount: en la Linux vive en
+      # /var/lib/docker/volumes (misma partición ext4 de 1.7 TB) y el IO es
+      # nativo. Un bind mount desde macOS pasaría por virtiofs.
+      - pgdata:/var/lib/postgresql/data
+
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    # El default de Docker son 64 MB y Postgres usa memoria compartida
+    # dinámica para las consultas paralelas: con 64 MB un plan paralelo
+    # grande falla con "could not resize shared memory segment".
+    shm_size: ${PG_SHM_SIZE:-1gb}
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPUS_POSTGRES:-32}"
+          memory: ${MEM_POSTGRES:-48g}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-etl_rw} -d ${POSTGRES_DB:-mipymes}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   etl:
-    # Build the image using the specific ETL Dockerfile
+    profiles: ["manual"]
     build:
       context: .
       dockerfile: Dockerfile.etl
     image: tesis-etl:local
-    
-    # VOLUME MAPPING (Persistence)
-    # Left: Your local folder (Host)
-    # Right: The folder inside Docker
-    volumes:
-      - ./data:/app/data
-    
-    # SHARED MEMORY SIZE
-    # Critical: Chrome crashes in Docker without increased shared memory
-    shm_size: '2gb'
-    
-    # Environment Variables
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    env_file: .env
     environment:
-      - HEADLESS=true
+      # Dentro de la red de compose la base es "postgres", no localhost.
+      POSTGRES_HOST: postgres
+      HEADLESS: "true"
+      # Acota los hilos de Polars para que no compitan con los workers de
+      # Postgres por los mismos núcleos (arquitectura.md §2.3.2).
+      POLARS_MAX_THREADS: ${POLARS_MAX_THREADS:-16}
+
+    volumes:
+      # Bronze y los seeds entran por aquí; Silver y Gold ya viven en la base.
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    # Chromium (scraping de DENUE) se cae en Docker sin memoria compartida.
+    shm_size: ${ETL_SHM_SIZE:-2gb}
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPUS_ETL:-16}"
+          memory: ${MEM_ETL:-32g}
+
+volumes:
+  pgdata:
+    name: etl-pgdata
