@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src_etl.transformers.denue import DenuePipelineOrchestrator
+from src.etl.transformers.denue import DenuePipelineOrchestrator
 
 # Path to the real seed files in the project
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

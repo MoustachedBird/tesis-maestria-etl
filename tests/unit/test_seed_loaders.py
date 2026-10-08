@@ -10,9 +10,9 @@ import duckdb
 import pytest
 from sqlalchemy import create_engine
 
+from src.etl.loaders import dominios, estratos, geography, scian
 from src.shared.db.base import Base
 from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
-from src_etl.loaders import dominios, estratos, geography, scian
 
 
 def _db_with_tables(tmp_path, *table_names) -> duckdb.DuckDBPyConnection:

@@ -46,10 +46,10 @@ import typer
 # evaluate_masked_clee.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.etl.transformers.clee_resolver import CLEEResolver  # noqa: E402
+from src.etl.utils.warehouse import connect_configured  # noqa: E402
 from src.shared.config import settings  # noqa: E402
 from src.shared.logging import get_stage_logger  # noqa: E402
-from src_etl.transformers.clee_resolver import CLEEResolver  # noqa: E402
-from src_etl.utils.warehouse import connect_configured  # noqa: E402
 
 logger = get_stage_logger(__name__, Path("./data/etl_propagation_stats.log"))
 

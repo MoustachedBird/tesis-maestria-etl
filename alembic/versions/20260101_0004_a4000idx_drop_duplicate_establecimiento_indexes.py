@@ -2,7 +2,7 @@
 
 Tres de los 16 indices de la tabla de hechos no aportaban nada y cada uno
 era un ART persistido que hay que mantener en cada escritura masiva (el
-costo que `src_etl/db/indexes.py` documenta como "ordenes de magnitud mas
+costo que `src/etl/db/indexes.py` documenta como "ordenes de magnitud mas
 lentas"):
 
   - ix_estab_clee   (clee)        duplicaba ix_establecimientos_clee

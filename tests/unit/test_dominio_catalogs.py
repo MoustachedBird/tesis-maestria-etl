@@ -16,6 +16,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from src.etl.loaders.dominios import build_rows
+from src.etl.loaders.estratos import build_rows as build_estrato_rows
+from src.etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
 from src.shared.db.base import Base
 from src.shared.db.models import (
     ActividadEconomica,
@@ -29,9 +32,6 @@ from src.shared.db.models import (
 from src.shared.db.models import (
     TipoUnidadEconomica as TipoUnidadEconomicaCat,
 )
-from src_etl.loaders.dominios import build_rows
-from src_etl.loaders.estratos import build_rows as build_estrato_rows
-from src_etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
 
 
 def _seed_id(table: str, label_col: str, label: str) -> int:
@@ -193,13 +193,13 @@ class TestIngestDomainGuard:
         """
         import duckdb
 
+        from src.etl.loaders.denue import EstablecimientoWriter
+        from src.etl.loaders.dominios import TABLES as DOM_TABLES
+        from src.etl.loaders.dominios import load_seeds as load_dominios_seeds
+        from src.etl.loaders.estratos import TABLE_NAME as EST_TABLE
+        from src.etl.loaders.estratos import load_seeds as load_estratos_seeds
         from src.shared.db.base import Base
         from src.shared.db.models import Establecimiento  # noqa: F401
-        from src_etl.loaders.denue import EstablecimientoWriter
-        from src_etl.loaders.dominios import TABLES as DOM_TABLES
-        from src_etl.loaders.dominios import load_seeds as load_dominios_seeds
-        from src_etl.loaders.estratos import TABLE_NAME as EST_TABLE
-        from src_etl.loaders.estratos import load_seeds as load_estratos_seeds
 
         db = tmp_path / "guard.duckdb"
         engine = create_engine(f"duckdb:///{db}")
@@ -261,7 +261,7 @@ class TestDomainValueAliases:
 
     def test_cleaning_maps_otro_to_canonical(self):
         """La limpieza convierte OTRO -> OTRA (ESPECIFICAR) antes de validar."""
-        from src_etl.utils.denue_schema import DOMAIN_VALUE_ALIASES as aliases
+        from src.etl.utils.denue_schema import DOMAIN_VALUE_ALIASES as aliases
 
         df = pl.DataFrame({"tipo_asent": ["OTRO", "COLONIA"]})
         out = df.with_columns(pl.col("tipo_asent").replace(aliases["tipo_asent"]))
@@ -273,8 +273,8 @@ class TestSeedParquets:
     """Los parquet de data/seeds son la fuente de verdad del catalogo."""
 
     def test_seed_files_exist_and_are_versioned(self):
-        from src_etl.loaders.dominios import TABLES, seed_path
-        from src_etl.loaders.estratos import seed_path as estrato_seed_path
+        from src.etl.loaders.dominios import TABLES, seed_path
+        from src.etl.loaders.estratos import seed_path as estrato_seed_path
 
         for table, *_ in TABLES:
             assert seed_path(table).exists()
@@ -282,7 +282,7 @@ class TestSeedParquets:
 
     def test_missing_seed_fails_loudly(self, tmp_path):
         """Sin parquet no hay dominio: debe fallar claro, no silencioso."""
-        from src_etl.loaders.dominios import seed_path
+        from src.etl.loaders.dominios import seed_path
 
         with pytest.raises(FileNotFoundError, match="Seed requerido"):
             seed_path("denue_tipos_vialidad", tmp_path)
@@ -291,7 +291,7 @@ class TestSeedParquets:
         """build_rows refleja el archivo, sin lista paralela en Python."""
         import polars as pl
 
-        from src_etl.loaders.dominios import seed_path
+        from src.etl.loaders.dominios import seed_path
 
         rows = build_rows()["denue_tipos_asentamiento"]
         assert rows == pl.read_parquet(seed_path("denue_tipos_asentamiento")).to_dicts()
@@ -308,7 +308,7 @@ class TestEntityValueNormalization:
 
     def _clean(self, df):
         """Replica el paso de normalizacion de processor._clean_raw_data."""
-        from src_etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
+        from src.etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
 
         if "entidad" in df.columns:
             df = df.with_columns(pl.col("entidad").replace(ENTITY_VALUE_NORMALIZATION))
@@ -325,7 +325,7 @@ class TestEntityValueNormalization:
 
     def test_map_is_keyed_by_value_not_column(self):
         """Sus claves son valores del dato: recorrerlo por columna no aplica."""
-        from src_etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
+        from src.etl.utils.denue_schema import ENTITY_VALUE_NORMALIZATION
 
         assert "DISTRITO FEDERAL" in ENTITY_VALUE_NORMALIZATION
         assert all(isinstance(v, str) for v in ENTITY_VALUE_NORMALIZATION.values())

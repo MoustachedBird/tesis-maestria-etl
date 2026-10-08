@@ -5,8 +5,8 @@ import zipfile
 
 import pytest
 
-from src_etl.utils.file_validator import FileValidator, ValidationResult
-from src_metadata.models import ErrorType
+from src.etl.utils.file_validator import FileValidator, ValidationResult
+from src.meta.models import ErrorType
 
 
 @pytest.mark.unit

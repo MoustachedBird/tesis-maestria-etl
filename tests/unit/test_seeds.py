@@ -9,10 +9,10 @@ INSERT OR IGNORE de la siembra.
 import polars as pl
 import pytest
 
-from src_etl.loaders import dominios
-from src_etl.loaders.dominios import TABLES, build_rows
-from src_etl.loaders.estratos import build_rows as build_estrato_rows
-from src_etl.loaders.seeds import validate_seed
+from src.etl.loaders import dominios
+from src.etl.loaders.dominios import TABLES, build_rows
+from src.etl.loaders.estratos import build_rows as build_estrato_rows
+from src.etl.loaders.seeds import validate_seed
 
 TABLA = "denue_tipos_asentamiento"
 
@@ -78,7 +78,7 @@ class TestSeedMalFormado:
     def test_unique_compuesto_de_tabla(self):
         """sesnsp_delitos declara UNIQUE(bien_juridico, tipo, subtipo,
         modalidad): repetir la clave natural con otro id debe detenerse."""
-        from src_etl.loaders.sesnsp import delitos_seed_path
+        from src.etl.loaders.sesnsp import delitos_seed_path
 
         delitos = pl.read_parquet(delitos_seed_path())
         otro_id = delitos.head(1).with_columns(
@@ -88,6 +88,6 @@ class TestSeedMalFormado:
             validate_seed(pl.concat([delitos, otro_id]), "sesnsp_delitos", "x.parquet")
 
     def test_seeds_de_sesnsp_del_repo_son_validos(self):
-        from src_etl.loaders.sesnsp import build_delitos_rows
+        from src.etl.loaders.sesnsp import build_delitos_rows
 
         assert len(build_delitos_rows()) == 98

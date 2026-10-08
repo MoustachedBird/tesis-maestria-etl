@@ -42,10 +42,10 @@ def _tables(metadata, names):
 
 def upgrade() -> None:
     """Crea las tablas SESNSP y siembra el catalogo de delitos."""
+    from src.etl.loaders.sesnsp import load_seeds_sqlalchemy as load_delitos
     from src.shared.config import settings
     from src.shared.db.base import Base
     from src.shared.db.models import SesnspIncidenciaMunicipal  # noqa: F401
-    from src_etl.loaders.sesnsp import load_seeds_sqlalchemy as load_delitos
 
     conn = op.get_bind()
     Base.metadata.create_all(bind=conn, tables=_tables(Base.metadata, SESNSP_TABLES))

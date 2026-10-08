@@ -24,9 +24,9 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --group etl --frozen
 
 # 7. Copy application source code
-COPY src_etl/ ./src_etl/
-COPY src_metadata/ ./src_metadata/
-COPY src_api/ ./src_api/
+# Todo src/ de una vez: etl, meta y api dependen de src/shared (copiarlos
+# por separado dejaba la imagen sin el paquete compartido).
+COPY src/ ./src/
 
 # 8. Entrypoint
-ENTRYPOINT ["uv", "run", "python", "-m", "src_etl.main"]
+ENTRYPOINT ["uv", "run", "python", "-m", "src.etl.main"]

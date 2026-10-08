@@ -14,8 +14,8 @@ las globales `_shared_kb_*`): el indice i describe al candidato i, y
 import numpy as np
 import pytest
 
-from src_etl.utils.entity_resolution import _best_candidate
-from src_etl.utils.matching import (
+from src.etl.utils.entity_resolution import _best_candidate
+from src.etl.utils.matching import (
     NAME_TIER,
     PERFECT_NAME_SCORE,
     PERFECT_RAZON_SCORE,

@@ -54,13 +54,13 @@ def _tables(metadata, names):
 
 def upgrade() -> None:
     """Crea catalogos + tabla de hechos y siembra los catalogos."""
+    from src.etl.loaders.dominios import load_seeds_sqlalchemy as load_dominios
+    from src.etl.loaders.estratos import load_seeds_sqlalchemy as load_estratos
+    from src.etl.loaders.geography import load_seeds_sqlalchemy as load_geografia
+    from src.etl.loaders.scian import load_seeds_sqlalchemy as load_scian
     from src.shared.config import settings
     from src.shared.db.base import Base
     from src.shared.db.models import Establecimiento  # noqa: F401  (registra el metadata)
-    from src_etl.loaders.dominios import load_seeds_sqlalchemy as load_dominios
-    from src_etl.loaders.estratos import load_seeds_sqlalchemy as load_estratos
-    from src_etl.loaders.geography import load_seeds_sqlalchemy as load_geografia
-    from src_etl.loaders.scian import load_seeds_sqlalchemy as load_scian
 
     conn = op.get_bind()
     seeds = settings.SEEDS_DIR

@@ -65,8 +65,8 @@ def _catalog_id(table: str, label_col: str, label: str) -> int:
     """
     import polars as pl
 
+    from src.etl.loaders.dominios import SEED_FILES
     from src.shared.config import get_settings
-    from src_etl.loaders.dominios import SEED_FILES
 
     seeds = Path(get_settings().SEEDS_DIR)
     fname = SEED_FILES.get(table, f"seed_{table.removeprefix('denue_')}.parquet")

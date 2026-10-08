@@ -37,20 +37,20 @@ import typer
 # reorganize_domain_ids.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.shared.config import settings  # noqa: E402
-from src.shared.logging import get_stage_logger  # noqa: E402
-from src_etl.utils.clee_resolution_config import (  # noqa: E402
+from src.etl.utils.clee_resolution_config import (  # noqa: E402
     SILVER_READ_QUERY,
     SPATIAL_RADIUS_M,
 )
-from src_etl.utils.entity_resolution import (  # noqa: E402
+from src.etl.utils.entity_resolution import (  # noqa: E402
     assign_new_clees,
     build_single_period_kb,
     propagate_clees_radio,
     set_matching_logger,
 )
-from src_etl.utils.matching import clean_contact_columns  # noqa: E402
-from src_etl.utils.warehouse import connect_configured  # noqa: E402
+from src.etl.utils.matching import clean_contact_columns  # noqa: E402
+from src.etl.utils.warehouse import connect_configured  # noqa: E402
+from src.shared.config import settings  # noqa: E402
+from src.shared.logging import get_stage_logger  # noqa: E402
 
 logger = get_stage_logger(__name__, Path("./data/etl_fase7_eval.log"))
 

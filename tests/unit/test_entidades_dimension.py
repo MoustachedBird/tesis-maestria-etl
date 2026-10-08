@@ -3,7 +3,7 @@
 import duckdb
 import pytest
 
-from src_etl.loaders.entidades import TABLE_NAME, build_entidades_economicas
+from src.etl.loaders.entidades import TABLE_NAME, build_entidades_economicas
 
 
 def _make_observations(conn: duckdb.DuckDBPyConnection) -> None:

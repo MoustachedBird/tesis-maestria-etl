@@ -20,26 +20,26 @@ setup: ## Install dependencies
 	uv sync
 
 api: ## Run FastAPI dev server
-	uv run fastapi dev src_api/main.py
+	uv run fastapi dev src/api/main.py
 
 # ─── ETL Pipeline ────────────────────────────────────────────────────────────
 
 # Comandos globales: sin ARGS corren TODO; aisla secciones con flags --no-* (ver AGENTS.md).
 
 extract: ## Extract ALL sources (DENUE + SESNSP -> Bronze); ARGS="--no-denue|--no-sesnsp|--force"
-	$(PYTHON) -m src_etl.main extract $(ARGS)
+	$(PYTHON) -m src.etl.main extract $(ARGS)
 
 transform: ## Transform ALL sections (Bronze -> Silver); aisla con ARGS="--no-* ..."
-	$(PYTHON) -m src_etl.main transform $(ARGS)
+	$(PYTHON) -m src.etl.main transform $(ARGS)
 
 load: ## Load Silver -> Gold; ARGS="--force"
-	$(PYTHON) -m src_etl.main load $(ARGS)
+	$(PYTHON) -m src.etl.main load $(ARGS)
 
 pipeline: ## Full pipeline global (Transform -> Load; --extract para incluir descarga)
-	$(PYTHON) -m src_etl.main pipeline $(ARGS)
+	$(PYTHON) -m src.etl.main pipeline $(ARGS)
 
 build-entidades: ## Build entidades_economicas dimension (run AFTER CLEE resolution)
-	$(PYTHON) -m src_etl.main build-entidades
+	$(PYTHON) -m src.etl.main build-entidades
 
 eval-masked-clee-extract: ## Fase 7: extrae muestra de Silver (read-only) a data/eval/
 	$(PYTHON) scripts/evaluate_masked_clee.py extract $(ARGS)
@@ -54,7 +54,7 @@ propagation-stats: ## Cobertura/salud de clee_propagado_* sobre Silver (read-onl
 	$(PYTHON) scripts/clee_propagation_stats.py $(ARGS)
 
 retry: ## Retry failed extractions
-	$(PYTHON) -m src_etl.main retry
+	$(PYTHON) -m src.etl.main retry
 
 pipeline-steps: extract transform load ## Pipeline step by step
 	@echo "Pipeline completed"
@@ -80,11 +80,11 @@ clean-logs: ## Clean old logs
 
 metadata-query: ## Query metadata database
 	@echo "Recent job runs:"
-	@$(PYTHON) -c "from src_metadata.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); import json; print(json.dumps(t.get_recent_runs(5), indent=2, default=str))"
+	@$(PYTHON) -c "from src.meta.tracker import MetadataTracker; from pathlib import Path; t = MetadataTracker(Path('$(METADATA_DB)')); import json; print(json.dumps(t.get_recent_runs(5), indent=2, default=str))"
 
 metadata-stats: ## Show metadata statistics
 	@echo "Pipeline Statistics:"
-	@$(PYTHON) -c "from src_etl.transformers.denue import DenueTransformer; from pathlib import Path; t = DenueTransformer(Path('data')); import json; status = t.get_pipeline_status(); print(json.dumps(status, indent=2, default=str))"
+	@$(PYTHON) -c "from src.etl.transformers.denue import DenuePipelineOrchestrator; from pathlib import Path; t = DenuePipelineOrchestrator(Path('data')); import json; status = t.get_pipeline_status(); print(json.dumps(status, indent=2, default=str))"
 
 logs: ## Show latest logs
 	@echo "Latest download logs:"
@@ -127,9 +127,9 @@ db-status: ## Show migration status and index health
 	$(ALEMBIC) history
 	@echo ""
 	@echo "Indexes:"
-	@$(PYTHON) -c "from src_etl.core.config import settings; \
-from src_etl.utils.warehouse import connect_configured; \
-from src_etl.db.indexes import missing_indexes, expected_indexes; \
+	@$(PYTHON) -c "from src.shared.config import settings; \
+from src.etl.utils.warehouse import connect_configured; \
+from src.etl.db.indexes import missing_indexes, expected_indexes; \
 conn = connect_configured(settings.SILVER_DUCKDB_PATH, read_only=True); \
 m = missing_indexes(conn); \
 print(f'  {len(expected_indexes()) - len(m)}/{len(expected_indexes())} presentes' + (f' | FALTAN: {m}' if m else ' (completos)')); \
@@ -156,7 +156,7 @@ test-db: ## Database tests
 	uv run pytest -m db
 
 test-cov: ## Tests with coverage
-	uv run pytest --cov=src_etl --cov=src_metadata --cov-report=html --cov-report=term
+	uv run pytest --cov=src --cov-report=html --cov-report=term
 	@echo "Coverage report at: htmlcov/index.html"
 
 test-verbose: ## Tests in verbose mode
@@ -166,10 +166,10 @@ test-fast: ## Fast tests (unit only, no slow)
 	uv run pytest -m "unit and not slow"
 
 lint: ## Run ruff linter
-	uv run ruff check src_etl/ src_metadata/ src_api/ tests/
+	uv run ruff check src/ tests/ scripts/ alembic/
 
 lint-fix: ## Auto-fix lint issues
-	uv run ruff check src_etl/ src_metadata/ src_api/ tests/ --fix
+	uv run ruff check src/ tests/ scripts/ alembic/ --fix
 
 format: ## Format code with ruff
-	uv run ruff format src_etl/ src_metadata/ src_api/ tests/
+	uv run ruff format src/ tests/ scripts/ alembic/

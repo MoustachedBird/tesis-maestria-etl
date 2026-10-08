@@ -6,9 +6,9 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 
-from src_etl.core.download_config import DownloadConfig
-from src_etl.utils.downloader import Downloader, DownloadResult
-from src_metadata.models import ErrorType
+from src.etl.core.download_config import DownloadConfig
+from src.etl.utils.downloader import Downloader, DownloadResult
+from src.meta.models import ErrorType
 
 
 @pytest.mark.unit
@@ -94,7 +94,7 @@ class TestDownloaderInit:
         assert downloader.validator is not None
 
     def test_custom_validator(self, tmp_path):
-        from src_etl.utils.file_validator import FileValidator
+        from src.etl.utils.file_validator import FileValidator
 
         config = DownloadConfig(
             download_directory=tmp_path / "downloads",

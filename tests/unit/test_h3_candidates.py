@@ -15,8 +15,8 @@ import polars as pl
 import pytest
 from h3.api import basic_int as h3i
 
-from src_etl.utils.clee_resolution_config import H3_BLOCKING_RES, SPATIAL_RADIUS_M
-from src_etl.utils.matching import (
+from src.etl.utils.clee_resolution_config import H3_BLOCKING_RES, SPATIAL_RADIUS_M
+from src.etl.utils.matching import (
     find_h3_neighbors,
     find_spatial_neighbors,
 )

@@ -8,7 +8,7 @@ class Section(StrEnum):
     de grupo que se expanden a varias secciones atómicas. ``load`` solo
     aplica al comando ``pipeline`` (``transform`` y ``extract`` lo ignoran).
 
-    Vive en `shared` —antes era un enum local de `src_etl/main.py`— porque el
+    Vive en `shared` —antes era un enum local de `src/etl/main.py`— porque el
     scheduler necesita nombrar qué sección corre en cada tick y el API las
     valida al encolar en `meta.run_requests`; ninguno de los dos debe
     importar del CLI del ETL.

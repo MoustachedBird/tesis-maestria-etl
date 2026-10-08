@@ -1,10 +1,10 @@
-"""Tests del respaldo rotativo del warehouse (src_etl/utils/backup.py)."""
+"""Tests del respaldo rotativo del warehouse (src/etl/utils/backup.py)."""
 
 import duckdb
 import pytest
 
-from src_etl.utils import backup as backup_mod
-from src_etl.utils.backup import backup_path_for, backup_warehouse
+from src.etl.utils import backup as backup_mod
+from src.etl.utils.backup import backup_path_for, backup_warehouse
 
 
 @pytest.fixture(autouse=True)

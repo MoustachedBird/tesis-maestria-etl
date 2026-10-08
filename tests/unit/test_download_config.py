@@ -5,7 +5,7 @@ import json
 import pytest
 import yaml
 
-from src_etl.core.download_config import DownloadConfig
+from src.etl.core.download_config import DownloadConfig
 
 
 @pytest.mark.unit

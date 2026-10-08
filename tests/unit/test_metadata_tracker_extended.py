@@ -6,8 +6,8 @@ Tests the new process_tasks and clee_resolution_tasks tracking.
 
 import pytest
 
-from src_metadata.models import TaskStatus
-from src_metadata.tracker import MetadataTracker
+from src.meta.models import TaskStatus
+from src.meta.tracker import MetadataTracker
 
 
 @pytest.fixture

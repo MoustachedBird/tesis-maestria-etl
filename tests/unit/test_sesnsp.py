@@ -6,7 +6,7 @@ import duckdb
 import polars as pl
 import pytest
 
-from src_etl.loaders.sesnsp import (
+from src.etl.loaders.sesnsp import (
     SEED_DELITOS_FILE,
     build_delitos_rows,
     delitos_seed_path,
@@ -14,7 +14,7 @@ from src_etl.loaders.sesnsp import (
     validate_delitos_del_csv,
     validate_municipios_del_csv,
 )
-from src_etl.transformers.sesnsp import (
+from src.etl.transformers.sesnsp import (
     SesnspProcessor,
     cut_sort_key,
     detect_csv_encoding,
@@ -75,7 +75,7 @@ def _seed_delitos(tmp_path: Path) -> Path:
 
 def _tabla_delitos_sembrada(conn: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
     """Crea sesnsp_delitos y la siembra desde el seed, como la migracion."""
-    from src_etl.loaders.sesnsp import SESNSP_DELITOS_DDL
+    from src.etl.loaders.sesnsp import SESNSP_DELITOS_DDL
 
     _seed_delitos(tmp_path)
     conn.execute(SESNSP_DELITOS_DDL)
