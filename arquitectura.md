@@ -720,26 +720,57 @@ el re-export plano de los modelos de `silver`.
 
 ### Fase 3 — Capa de acceso sin DuckDB
 
-- [ ] `src/shared/db/copy.py`: `COPY ... FROM STDIN (FORMAT BINARY)` desde
-      DataFrames de Polars, por chunks, con cota de RAM.
-- [ ] `src/shared/db/staging.py`: contexto de tabla `UNLOGGED` → validar →
-      `ATTACH PARTITION` (§2.4).
-- [ ] Reescribir `db/indexes.py` sobre `pg_indexes` conservando el contrato
-      de `suspended_indexes()`, ahora con `CREATE INDEX CONCURRENTLY`.
-- [ ] Retirar `utils/warehouse.py:connect_configured` en favor de la sesión;
-      conservar `get_distinct_periods` como consulta de catálogo.
-- [ ] `establecimientos` particionada por `period` + helper que crea la
-      partición de un corte nuevo (§2.4) — viene de la Fase 2, va aquí
-      porque es el staging el que la usa.
-- [ ] **Migrar los tests a un Postgres de prueba.** Hoy 8 archivos crean
-      bases DuckDB desechables, y es lo único que todavía obliga a que
-      `ON DELETE CASCADE` y los schemas convivan con un segundo dialecto.
-      Opciones: `testcontainers` o un servicio de compose con `profiles:
-      [test]`. Sin esto, DuckDB no se puede quitar del todo.
+**El orden importa y se descubrió al intentarlo (2026-10-08).** El primer
+paso tiene que ser migrar los tests, no el particionado:
 
-**Criterio de aceptación:** tests unitarios de `copy.py` y `staging.py`
-contra un Postgres de prueba, incluido el caso "falla a media carga → Silver
-intacta".
+`duckdb_engine.Dialect` **hereda de `PGDialect_psycopg2`**, así que no
+ignora las opciones `postgresql_*` — las emite. Declarar
+`postgresql_partition_by` en el modelo hace que `create_all` sobre DuckDB
+falle con `syntax error at or near "PARTITION"`, y con él los 217 tests.
+No hay forma de tener la tabla particionada en el modelo y seguir creándola
+en DuckDB: **el particionado obliga a migrar los tests primero.**
+
+Orden corregido:
+
+- [ ] **1. Migrar los tests a un Postgres de prueba.** Es el desbloqueo de
+      todo lo demás. 8 archivos crean bases DuckDB desechables
+      (`test_indexes`, `test_seed_loaders`, `test_dominio_catalogs`,
+      `test_backup`, `test_sesnsp`, `test_entidades_dimension`,
+      `test_propagation_stats`, `conftest`). Opciones: `testcontainers` o un
+      servicio de compose con `profiles: [test]`.
+- [ ] **2. `establecimientos` particionada por `period`** + helper que crea
+      la partición de un corte nuevo (§2.4). Requiere cambiar la PK de `id`
+      a `(id, period)`: PostgreSQL exige que la clave de partición esté en
+      toda PK/UNIQUE de una tabla particionada.
+
+      Verificado sobre el Silver real que esto **no afloja la unicidad**:
+      los 82,896,801 ids son distintos entre sí porque `id` es un hash del
+      contenido de la fila. Lo que se pierde es la garantía *formal* de que
+      no pueda repetirse entre periodos, y no hay manera de conservarla —
+      Postgres tampoco admite un índice único global que no incluya la
+      clave de partición.
+- [ ] **3. `src/shared/db/copy.py`**: `COPY ... FROM STDIN` desde
+      DataFrames de Polars, por chunks, con cota de RAM.
+
+      **Decisión pendiente:** el proyecto trae `psycopg2-binary`, cuyo
+      `copy_expert` solo maneja texto/CSV. `COPY FORMAT BINARY` necesita
+      psycopg3 (`psycopg[binary]`, driver `postgresql+psycopg`). Hay que
+      elegir: CSV con el driver actual (más simple, sin cambio de
+      dependencia) o binario con psycopg3 (evita el parseo de texto de 82.9M
+      filas).
+- [ ] **4. `src/shared/db/staging.py`**: contexto de tabla `UNLOGGED` →
+      validar → `ATTACH PARTITION`. Depende de 2.
+- [ ] **5. Reescribir `db/indexes.py`** sobre `pg_indexes` conservando el
+      contrato de `suspended_indexes()`. Ojo: `CREATE INDEX CONCURRENTLY`
+      **no funciona sobre la tabla particionada padre** — hay que crear los
+      índices por partición. Depende de 1 y 2.
+- [ ] **6. Retirar `connect_configured`** en favor de la sesión; conservar
+      `get_distinct_periods` como consulta de catálogo. Depende de la Fase 4
+      (los stages son sus únicos consumidores).
+
+**Criterio de aceptación:** la suite corre contra Postgres,
+`silver.establecimientos` tiene sus 20 particiones, y el contexto de
+staging deja Silver intacta cuando la carga falla a la mitad.
 
 ### Fase 4 — Stages sobre Postgres
 
