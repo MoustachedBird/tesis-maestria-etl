@@ -21,7 +21,8 @@ from src.shared.config import get_settings
 
 # Import all models to ensure they're registered with Base.metadata
 from src.shared.db import models  # noqa: F401
-from src.shared.db.base import Base
+from src.shared.db.base import SCHEMAS, Base
+from src.shared.enums import Layer
 
 
 # ------------------------------------------------------------------------------
@@ -50,6 +51,14 @@ if config.config_file_name is not None:
 
 # Set target metadata for Alembic migrations
 target_metadata = Base.metadata
+
+VERSION_TABLE_SCHEMA = Layer.META.value
+"""Schema donde Alembic guarda `alembic_version`.
+
+En `meta` y no en el default (`silver`) porque es estado de control, no un
+dato de negocio: asi `pg_dump -n silver` trae solo datos y el versionado
+viaja con el resto de la observabilidad.
+"""
 
 
 def include_object(obj, name, type_, reflected, compare_to):
@@ -94,6 +103,13 @@ def include_name(name, type_, parent_names):
         # Skip any system catalog queries
         if type_ == "schema" and name in ("information_schema", "pg_catalog"):
             return False
+        return True
+
+    # En PostgreSQL con include_schemas=True, Alembic reflejaria TODOS los
+    # schemas de la base y marcaria como "sobrantes" los que no conoce. Se
+    # limita a los nuestros: `None` es el schema por defecto de la conexion.
+    if type_ == "schema":
+        return name in SCHEMAS or name is None
     return True
 
 
@@ -109,7 +125,11 @@ def run_migrations_offline() -> None:
 
     This is useful for generating SQL scripts without a database connection.
     """
-    url = settings.SILVER_DATABASE_URL
+    url = (
+        settings.DATABASE_URL
+        if settings.DATABASE_BACKEND == "postgresql"
+        else settings.SILVER_DATABASE_URL
+    )
 
     # Configure context based on backend
     config_dict = {
@@ -126,6 +146,8 @@ def run_migrations_offline() -> None:
         config_dict["render_as_batch"] = False
         config_dict["compare_type"] = True
         config_dict["compare_server_default"] = True
+        config_dict["include_schemas"] = True
+        config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
     elif settings.DATABASE_BACKEND == "duckdb":
         # DuckDB has limited introspection capabilities
         # Disable comparisons that trigger problematic catalog queries
@@ -141,15 +163,20 @@ def run_migrations_offline() -> None:
 # ------------------------------------------------------------------------------
 # Migration Logic (Online Mode)
 # ------------------------------------------------------------------------------
-def _get_silver_engine() -> Engine:
+def _get_engine() -> Engine:
     """
-    Create a SQLAlchemy engine pointing to the Silver DuckDB.
+    Engine de migraciones: la base unica con sus tres schemas.
 
-    Alembic manages the Silver warehouse schema. Gold is a file copy of Silver
-    (handled by SilverToGoldLoader), so it inherits the same schema.
+    En PostgreSQL es una sola conexion para silver, gold y meta -- la
+    unificacion que motiva todo el rediseno (arquitectura.md §1.3). En
+    DuckDB apunta al archivo Silver, que es lo unico que Alembic gestionaba
+    cuando Gold era una copia del archivo.
     """
     from sqlalchemy import create_engine as sa_create_engine
     from sqlalchemy.pool import NullPool
+
+    if settings.DATABASE_BACKEND == "postgresql":
+        return sa_create_engine(settings.DATABASE_URL, poolclass=NullPool, future=True)
 
     return sa_create_engine(
         settings.SILVER_DATABASE_URL,
@@ -166,9 +193,9 @@ def run_migrations_online() -> None:
     In this scenario we create an Engine and associate a connection with the context.
     This is the normal mode for running migrations against a live database.
 
-    Note: Alembic targets the Silver DuckDB. Gold gets its schema via file copy.
+    Nota: en PostgreSQL una sola conexion cubre los tres schemas.
     """
-    connectable = _get_silver_engine()
+    connectable = _get_engine()
 
     with connectable.connect() as connection:
         # Configure context based on backend
@@ -184,6 +211,11 @@ def run_migrations_online() -> None:
             config_dict["render_as_batch"] = False
             config_dict["compare_type"] = True
             config_dict["compare_server_default"] = True
+            # Sin include_schemas, autogenerate solo ve el schema por
+            # defecto de la conexion y propondria DROP de todo lo que vive
+            # en los otros dos.
+            config_dict["include_schemas"] = True
+            config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
         elif settings.DATABASE_BACKEND == "duckdb":
             # DuckDB has limited introspection capabilities
             # Disable comparisons that trigger problematic catalog queries

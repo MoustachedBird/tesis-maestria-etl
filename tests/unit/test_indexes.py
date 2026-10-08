@@ -18,7 +18,7 @@ from src.etl.db.indexes import (
     missing_indexes,
     suspended_indexes,
 )
-from src.shared.db.base import DEFAULT_SCHEMA, Base, get_table
+from src.shared.db.base import DEFAULT_SCHEMA, Base, get_table, tables_for
 from src.shared.db.models import Establecimiento  # noqa: F401
 
 
@@ -27,7 +27,9 @@ def db(tmp_path):
     """Base scratch con el esquema del modelo (igual que la migracion)."""
     path = tmp_path / "idx.duckdb"
     engine = create_engine(f"duckdb:///{path}")
-    Base.metadata.create_all(engine)
+    # Solo silver: las FKs de meta usan ON DELETE CASCADE, que DuckDB no
+    # admite, y este test prueba los indices de la tabla de hechos.
+    Base.metadata.create_all(engine, tables=tables_for(DEFAULT_SCHEMA))
     engine.dispose()
     conn = duckdb.connect(str(path))
     conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")

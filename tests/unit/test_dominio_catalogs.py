@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
-from src.shared.db.base import Base
+from src.shared.db.base import DEFAULT_SCHEMA, Base, tables_for
 from src.shared.db.models import (
     ActividadEconomica,
     Establecimiento,
@@ -89,7 +89,9 @@ def linked_session(tmp_path):
     """Sesion ORM sobre DuckDB scratch (create_all = esquema con FKs reales)
     con catalogos sembrados y un establecimiento referenciando cada uno."""
     engine = create_engine(f"duckdb:///{tmp_path}/linked.duckdb")
-    Base.metadata.create_all(engine)
+    # Solo silver: las FKs de meta usan ON DELETE CASCADE, que DuckDB no
+    # admite, y aqui se prueban los links del esquema de datos.
+    Base.metadata.create_all(engine, tables=tables_for(DEFAULT_SCHEMA))
 
     with Session(engine) as session:
         session.add_all(

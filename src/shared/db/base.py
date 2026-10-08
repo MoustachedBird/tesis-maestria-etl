@@ -65,6 +65,26 @@ class Base(DeclarativeBase):
     __tablename__: str
 
 
+def tables_for(schema: str) -> list:
+    """
+    Objetos `Table` de una capa, en el orden en que los declara el modelo.
+
+    Para `create_all(tables=...)` cuando se quiere UNA capa y no todas. El
+    caso que lo motiva: los tests del esquema de datos corren sobre DuckDB,
+    que **rechaza `ON DELETE CASCADE`** en las FKs — las de `meta` lo usan,
+    así que un `create_all()` sin filtro falla con
+    "FOREIGN KEY constraints cannot use CASCADE". Que la lista salga del
+    metadata y no esté escrita a mano evita que divergja del modelo.
+
+    Args:
+        schema: Nombre del schema (usar `Layer.SILVER.value` y similares).
+
+    Returns:
+        Lista de `Table` de ese schema, en orden de declaración.
+    """
+    return [t for t in Base.metadata.sorted_tables if t.schema == schema]
+
+
 def get_table(name: str, schema: str = DEFAULT_SCHEMA):
     """
     Objeto `Table` del metadata, aceptando el nombre sin calificar.
