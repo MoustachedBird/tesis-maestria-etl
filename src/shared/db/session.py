@@ -1,16 +1,15 @@
 """
 Database engine and session management.
 
-This module provides database connectivity abstraction for both PostgreSQL and DuckDB.
-It follows FastAPI best practices for database session management.
+Engine y sesiones de SQLAlchemy contra la base unica de PostgreSQL.
+Sigue las practicas de FastAPI para el manejo de sesiones.
 """
 
 from collections.abc import Generator
 from functools import lru_cache
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
 
 from src.shared.config import get_settings
 
@@ -20,11 +19,8 @@ def get_engine() -> Engine:
     """
     Get or create the SQLAlchemy engine based on configuration.
 
-    This function is cached to ensure only one engine instance exists.
-    The engine is configured differently based on the database backend:
-
-    - PostgreSQL: Uses connection pooling with configurable pool size
-    - DuckDB: Uses NullPool (no pooling) as DuckDB is file-based
+    Cacheada para que exista una sola instancia. Usa pool de conexiones
+    configurable (SQLALCHEMY_POOL_SIZE / MAX_OVERFLOW).
 
     Returns:
         Engine: SQLAlchemy engine instance
@@ -36,49 +32,14 @@ def get_engine() -> Engine:
     """
     settings = get_settings()
 
-    # Common engine arguments
-    engine_kwargs = {
-        "echo": settings.SQLALCHEMY_ECHO,
-        "future": True,  # Use SQLAlchemy 2.0 style
-    }
-
-    # Backend-specific configuration
-    if settings.DATABASE_BACKEND == "postgresql":
-        engine_kwargs.update(
-            {
-                "pool_size": settings.SQLALCHEMY_POOL_SIZE,
-                "max_overflow": settings.SQLALCHEMY_MAX_OVERFLOW,
-                "pool_pre_ping": settings.SQLALCHEMY_POOL_PRE_PING,
-            }
-        )
-
-    elif settings.DATABASE_BACKEND == "duckdb":
-        # DuckDB is file-based, so we disable pooling
-        engine_kwargs.update(
-            {
-                "poolclass": NullPool,
-                "connect_args": {
-                    "read_only": False,
-                },
-            }
-        )
-
-        # For DuckDB, we need to set some config options
-        # We'll do this via event listeners after engine creation
-
-    # Create engine
-    engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
-
-    # Configure DuckDB-specific settings
-    if settings.DATABASE_BACKEND == "duckdb":
-
-        @event.listens_for(engine, "connect")
-        def configure_duckdb(dbapi_conn, connection_record):
-            """Configure DuckDB connection with performance settings."""
-            cursor = dbapi_conn.cursor()
-            cursor.execute(f"SET threads TO {settings.DUCKDB_THREADS}")
-            cursor.execute(f"SET memory_limit = '{settings.DUCKDB_MEMORY_LIMIT}'")
-            cursor.close()
+    engine = create_engine(
+        settings.DATABASE_URL,
+        echo=settings.SQLALCHEMY_ECHO,
+        future=True,
+        pool_size=settings.SQLALCHEMY_POOL_SIZE,
+        max_overflow=settings.SQLALCHEMY_MAX_OVERFLOW,
+        pool_pre_ping=settings.SQLALCHEMY_POOL_PRE_PING,
+    )
 
     return engine
 

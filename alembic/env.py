@@ -1,7 +1,7 @@
 """
 Alembic environment configuration.
 
-This module configures Alembic migrations to work with both PostgreSQL and DuckDB.
+Migraciones de Alembic contra la base unica de PostgreSQL.
 It uses the settings from src/core/config.py to determine the database backend.
 """
 
@@ -10,7 +10,6 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from alembic.ddl.impl import DefaultImpl
 from sqlalchemy import Engine
 
 # Add project root to Python path
@@ -23,21 +22,6 @@ from src.shared.config import get_settings
 from src.shared.db import models  # noqa: F401
 from src.shared.db.base import SCHEMAS, Base
 from src.shared.enums import Layer
-
-
-# ------------------------------------------------------------------------------
-# DuckDB Support for Alembic
-# ------------------------------------------------------------------------------
-class DuckDBImpl(DefaultImpl):
-    """
-    Alembic DDL implementation for DuckDB dialect.
-
-    DuckDB is not natively supported by Alembic, so we register it
-    to use the default implementation for basic DDL operations.
-    """
-
-    __dialect__ = "duckdb"
-
 
 # ------------------------------------------------------------------------------
 # Alembic Configuration
@@ -85,31 +69,23 @@ def include_object(obj, name, type_, reflected, compare_to):
 
 def include_name(name, type_, parent_names):
     """
-    Filter function to prevent DuckDB from querying problematic system catalogs.
+    Limita la reflexion a nuestros tres schemas.
 
-    DuckDB has limited PostgreSQL compatibility and doesn't support all pg_catalog tables.
-    This filter prevents Alembic from attempting queries that would fail.
+    Con `include_schemas=True`, Alembic refleja TODOS los schemas de la base
+    y marcaria como sobrantes los que no conoce (los de extensiones, por
+    ejemplo), proponiendo DROP en el autogenerate. `None` es el schema por
+    defecto de la conexion.
 
     Args:
-        name: Name of the object
-        type_: Type of object (table, column, index, etc.)
-        parent_names: Dictionary of parent object names
+        name: Nombre del objeto.
+        type_: Tipo de objeto (schema, table, index...).
+        parent_names: Nombres de los objetos padre.
 
     Returns:
-        bool: True if object should be included, False otherwise
+        bool: True si el objeto debe considerarse.
     """
-    # For DuckDB, skip collation introspection (causes pg_collation errors)
-    if settings.DATABASE_BACKEND == "duckdb":
-        # Skip any system catalog queries
-        if type_ == "schema" and name in ("information_schema", "pg_catalog"):
-            return False
-        return True
-
-    # En PostgreSQL con include_schemas=True, Alembic reflejaria TODOS los
-    # schemas de la base y marcaria como "sobrantes" los que no conoce. Se
-    # limita a los nuestros: `None` es el schema por defecto de la conexion.
     if type_ == "schema":
-        return name in SCHEMAS or name is None
+        return name is None or name in SCHEMAS
     return True
 
 
@@ -125,13 +101,8 @@ def run_migrations_offline() -> None:
 
     This is useful for generating SQL scripts without a database connection.
     """
-    url = (
-        settings.DATABASE_URL
-        if settings.DATABASE_BACKEND == "postgresql"
-        else settings.SILVER_DATABASE_URL
-    )
+    url = settings.DATABASE_URL
 
-    # Configure context based on backend
     config_dict = {
         "url": url,
         "target_metadata": target_metadata,
@@ -141,18 +112,11 @@ def run_migrations_offline() -> None:
         "dialect_opts": {"paramstyle": "named"},
     }
 
-    # Backend-specific configuration
-    if settings.DATABASE_BACKEND == "postgresql":
-        config_dict["render_as_batch"] = False
-        config_dict["compare_type"] = True
-        config_dict["compare_server_default"] = True
-        config_dict["include_schemas"] = True
-        config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
-    elif settings.DATABASE_BACKEND == "duckdb":
-        # DuckDB has limited introspection capabilities
-        # Disable comparisons that trigger problematic catalog queries
-        config_dict["compare_type"] = False
-        config_dict["compare_server_default"] = False
+    config_dict["render_as_batch"] = False
+    config_dict["compare_type"] = True
+    config_dict["compare_server_default"] = True
+    config_dict["include_schemas"] = True
+    config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
 
     context.configure(**config_dict)
 
@@ -167,23 +131,14 @@ def _get_engine() -> Engine:
     """
     Engine de migraciones: la base unica con sus tres schemas.
 
-    En PostgreSQL es una sola conexion para silver, gold y meta -- la
-    unificacion que motiva todo el rediseno (arquitectura.md §1.3). En
-    DuckDB apunta al archivo Silver, que es lo unico que Alembic gestionaba
-    cuando Gold era una copia del archivo.
+    Una sola conexion cubre silver, gold y meta -- la unificacion que motiva
+    el rediseno (arquitectura.md §1.3). NullPool porque una migracion abre
+    una conexion, la usa y termina: no hay nada que agrupar.
     """
     from sqlalchemy import create_engine as sa_create_engine
     from sqlalchemy.pool import NullPool
 
-    if settings.DATABASE_BACKEND == "postgresql":
-        return sa_create_engine(settings.DATABASE_URL, poolclass=NullPool, future=True)
-
-    return sa_create_engine(
-        settings.SILVER_DATABASE_URL,
-        poolclass=NullPool,
-        connect_args={"read_only": False},
-        future=True,
-    )
+    return sa_create_engine(settings.DATABASE_URL, poolclass=NullPool, future=True)
 
 
 def run_migrations_online() -> None:
@@ -198,7 +153,6 @@ def run_migrations_online() -> None:
     connectable = _get_engine()
 
     with connectable.connect() as connection:
-        # Configure context based on backend
         config_dict = {
             "connection": connection,
             "target_metadata": target_metadata,
@@ -206,21 +160,13 @@ def run_migrations_online() -> None:
             "include_name": include_name,
         }
 
-        # Backend-specific configuration
-        if settings.DATABASE_BACKEND == "postgresql":
-            config_dict["render_as_batch"] = False
-            config_dict["compare_type"] = True
-            config_dict["compare_server_default"] = True
-            # Sin include_schemas, autogenerate solo ve el schema por
-            # defecto de la conexion y propondria DROP de todo lo que vive
-            # en los otros dos.
-            config_dict["include_schemas"] = True
-            config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
-        elif settings.DATABASE_BACKEND == "duckdb":
-            # DuckDB has limited introspection capabilities
-            # Disable comparisons that trigger problematic catalog queries
-            config_dict["compare_type"] = False
-            config_dict["compare_server_default"] = False
+        config_dict["render_as_batch"] = False
+        config_dict["compare_type"] = True
+        config_dict["compare_server_default"] = True
+        # Sin include_schemas, autogenerate solo ve el schema por defecto
+        # de la conexion y propondria DROP de lo que vive en los otros dos.
+        config_dict["include_schemas"] = True
+        config_dict["version_table_schema"] = VERSION_TABLE_SCHEMA
 
         context.configure(**config_dict)
 

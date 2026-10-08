@@ -23,5 +23,5 @@ DbSession = Annotated[Session, Depends(get_db)]
 # Use this in your FastAPI route handlers:
 # @app.get("/config")
 # def get_config(settings: AppSettings):
-#     return {"backend": settings.DATABASE_BACKEND}
+#     return {"db": settings.POSTGRES_DB}
 AppSettings = Annotated[Settings, Depends(get_settings)]

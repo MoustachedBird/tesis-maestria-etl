@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup: Initialize database
     settings = get_settings()
-    print(f"🚀 Starting API with {settings.DATABASE_BACKEND} backend")
+    print("🚀 Starting API (PostgreSQL)")
     print(f"📊 Database URL: {settings.DATABASE_URL}")
 
     # Create tables if they don't exist (for development)
@@ -120,7 +120,7 @@ async def database_health_check(db: DbSession):
 
         return {
             "status": "healthy",
-            "backend": settings.DATABASE_BACKEND,
+            "engine": "postgresql",
             "database_url": settings.DATABASE_URL.split("@")[-1]
             if "@" in settings.DATABASE_URL
             else settings.DATABASE_URL,
@@ -129,7 +129,7 @@ async def database_health_check(db: DbSession):
         return {
             "status": "unhealthy",
             "error": str(e),
-            "backend": settings.DATABASE_BACKEND,
+            "engine": "postgresql",
         }
 
 
@@ -143,7 +143,7 @@ async def api_info(settings: AppSettings):
     return {
         "title": settings.API_TITLE,
         "version": settings.API_VERSION,
-        "database_backend": settings.DATABASE_BACKEND,
+        "engine": "postgresql",
         "environment": "development",  # Add environment variable for this
     }
 

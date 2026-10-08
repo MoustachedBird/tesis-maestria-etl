@@ -1,7 +1,9 @@
-# src/core/config.py
 """
-Configuration management using Pydantic Settings.
-Supports both PostgreSQL and DuckDB backends with proper URL construction.
+Configuracion de la aplicacion con Pydantic Settings.
+
+Un solo motor: PostgreSQL, una base con los schemas silver, gold y meta.
+Las variables DUCKDB_* que quedan son legado de los stages que aun no se
+reescriben (Fase 4), no una opcion de configuracion.
 """
 
 from functools import lru_cache
@@ -38,9 +40,18 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Database Configuration
     # -------------------------------------------------------------------------
-    DATABASE_BACKEND: Literal["duckdb", "postgresql"] = "duckdb"
+    # El motor es PostgreSQL, punto. No hay flag de backend: un segundo
+    # motor soportado significaria dos caminos de codigo, dos dialectos de
+    # SQL y la posibilidad de que `make db-migrate` aplique el baseline
+    # sobre un archivo por error.
 
-    # DuckDB Configuration
+    # -------------------------------------------------------------------------
+    # DuckDB — LEGADO, se retira en la Fase 4
+    # -------------------------------------------------------------------------
+    # Siguen aqui porque los stages del ETL y la suite de tests aun operan
+    # sobre archivos DuckDB. Equivalentes en PostgreSQL: DUCKDB_THREADS ->
+    # PG_MAX_PARALLEL_WORKERS, DUCKDB_MEMORY_LIMIT -> PG_SHARED_BUFFERS +
+    # PG_WORK_MEM (ver docs/entorno_linux.md §2).
     SILVER_DUCKDB_PATH: Path | None = None
     GOLD_DUCKDB_PATH: Path | None = None
     DUCKDB_THREADS: int = 8
@@ -139,36 +150,19 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     @computed_field
     @property
-    def SILVER_DATABASE_URL(self) -> str:
-        """
-        Get the Silver DuckDB URL for Alembic migrations.
-
-        Returns:
-            str: SQLAlchemy-compatible database URL pointing to Silver
-        """
-        if self.DATABASE_BACKEND == "duckdb":
-            if self.SILVER_DUCKDB_PATH:
-                self.SILVER_DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
-                return f"duckdb:///{self.SILVER_DUCKDB_PATH}"
-            raise ValueError("SILVER_DUCKDB_PATH must be set for DuckDB backend")
-        # For PostgreSQL, Silver and Gold share the same database
-        return self.DATABASE_URL
-
-    @computed_field
-    @property
     def DATABASE_URL(self) -> str:
         """
-        Get the database URL based on the selected backend.
+        URL de conexion a la base: una sola para silver, gold y meta.
+
+        No hay `SILVER_DATABASE_URL` ni `GOLD_DATABASE_URL` separadas --
+        esa division existia cuando eran archivos distintos y es justo lo
+        que el rediseno elimina (arquitectura.md §1.3). Las capas se
+        distinguen por schema, no por conexion.
 
         Returns:
             str: SQLAlchemy-compatible database URL
         """
-        if self.DATABASE_BACKEND == "postgresql":
-            return self._get_postgresql_url()
-        elif self.DATABASE_BACKEND == "duckdb":
-            return self._get_duckdb_url()
-        else:
-            raise ValueError(f"Unsupported database backend: {self.DATABASE_BACKEND}")
+        return self._get_postgresql_url()
 
     @computed_field
     @property
@@ -181,31 +175,21 @@ class Settings(BaseSettings):
         que un bug en un endpoint no puede tocar silver ni confundir los dos
         granos de `establecimientos` (arquitectura.md §2.3.1).
 
-        En backend duckdb cae al mismo URL que DATABASE_URL: el archivo no
-        tiene roles, asi que la separacion no existe y no hay nada que
-        simular.
-
         Returns:
             str: SQLAlchemy-compatible read-only database URL
         """
-        if self.DATABASE_BACKEND == "postgresql":
-            return self._get_postgresql_url(read_only=True)
-        return self.DATABASE_URL
+        return self._get_postgresql_url(read_only=True)
 
     @computed_field
     @property
     def DATABASE_URL_ASYNC(self) -> str:
         """
-        Get async database URL for async SQLAlchemy (PostgreSQL only).
+        URL asincrona (driver asyncpg), para endpoints async del API.
 
         Returns:
             str: Async SQLAlchemy-compatible database URL
         """
-        if self.DATABASE_BACKEND == "postgresql":
-            return self._get_postgresql_url(async_driver=True)
-        else:
-            # DuckDB doesn't support async yet
-            return self.DATABASE_URL
+        return self._get_postgresql_url(async_driver=True)
 
     # -------------------------------------------------------------------------
     # Helper Methods
@@ -244,18 +228,6 @@ class Settings(BaseSettings):
             f"{driver}://{credentials}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 
-    def _get_duckdb_url(self) -> str:
-        """
-        Construct DuckDB URL.
-
-        Returns:
-            str: DuckDB connection URL
-        """
-        # Ensure parent directory exists
-        if self.GOLD_DUCKDB_PATH:
-            self.GOLD_DUCKDB_PATH.parent.mkdir(parents=True, exist_ok=True)
-            return f"duckdb:///{self.GOLD_DUCKDB_PATH}"
-        raise ValueError("GOLD_DUCKDB_PATH must be set for DuckDB backend")
 
     # -------------------------------------------------------------------------
     # Model Configuration
