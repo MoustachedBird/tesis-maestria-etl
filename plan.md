@@ -250,11 +250,50 @@ recuperación**:
   **el warehouse completo** (~8 h de rebuild desde Bronze), que es
   exactamente lo que el commit de ese incidente concluyó que no escala.
 
+### Selectividad medida (lo que decide qué índice sirve)
+
+Sobre las 82,896,801 filas, filas devueltas por valor:
+
+| Columna | Valores distintos | Filas/valor |
+|---|---:|---:|
+| `clee_propagado_radio` | 10,450,524 | **~8** |
+| `clee` | 9,579,860 | **~9** |
+| `h3_cell_9` | 256,062 | ~324 |
+| `cod_postal` | 36,690 | ~2,259 |
+| `codigo_act` | 1,127 | ~73,555 |
+| `cve_mun` | 570 | ~145,433 |
+| `cve_ent` | 32 | ~2,590,525 |
+| `period` | 20 | **~4,144,840** |
+
+Y los tiempos, que son el argumento:
+
+| Consulta | Tiempo |
+|---|---|
+| Lookup por `clee` (indexado, 9 filas) | **0.6 ms** |
+| Filtro por `period` (indexado, 2.68M filas) | 209.7 ms |
+| Filtro por `nom_estab` (**sin índice**, 809 de 82.9M) | 222.4 ms |
+
+Un filtro no selectivo **con** índice cuesta lo mismo que un escaneo
+**sin** índice: cuando el predicado no discrimina, el ART no aporta porque
+DuckDB ya descarta bloques por min/max. El costo de *no* tener índice es
+~200 ms, despreciable para carga analítica.
+
+Conclusión: se justifican `clee` y `clee_propagado_radio` (búsqueda
+puntual); `h3_cell_9` es discutible; el resto (`period`, `cve_ent`,
+`cve_mun`, `codigo_act`, `cod_postal`, coords, los compuestos) no compra
+nada medible — pero quitarlos exige perfilar consultas reales primero.
+
 ### Opciones, de la más barata a la más cara
 
-1. **Eliminar los índices duplicados** (`ix_estab_clee`,
-   `ix_estab_postal`, `ix_estab_geo_simple`). Barato, reversible, reduce
-   espacio y tiempo de recreación. Medir el delta de tamaño.
+1. ~~**Eliminar los índices duplicados**~~ **hecho** (migración
+   `a4000idx`): `ix_estab_clee` (duplicaba
+   `ix_establecimientos_clee`), `ix_estab_postal` (duplicaba
+   `ix_establecimientos_cod_postal`) y `ix_estab_geo_simple` (prefijo de
+   `ix_estab_geo`). Eliminados también del ORM, que es la fuente de
+   verdad — si no, `suspended_indexes()` los recrearía tras cada carga.
+   16 → 13 índices declarados; ninguna columna perdió cobertura.
+   **La migración no se ha aplicado** a la Silver actual. Pendiente:
+   medir el delta de tamaño cuando se aplique o se reconstruya la base.
 2. **Cambiar el patrón de escritura a reescribir-y-cambiar por
    partición**, con `period` como llave (ya indexada, 19 cortes). En vez
    de `UPDATE` sobre toda la tabla, escribir la salida resuelta de cada

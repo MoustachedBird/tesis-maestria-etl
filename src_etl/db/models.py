@@ -213,23 +213,26 @@ class Establecimiento(Base):
                 "denue_localidades.cve_loc",
             ],
         ),
-        # Geographic queries (most common)
+        # Geographic queries (most common).
+        # No ix_estab_geo_simple ("cve_ent", "cve_mun"): es PREFIJO de este
+        # indice, asi que el planner resuelve con el compuesto y el corto
+        # solo costaba un ART extra que mantener (ver migracion a4000idx).
         Index("ix_estab_geo", "cve_ent", "cve_mun", "cve_loc"),
-        Index("ix_estab_geo_simple", "cve_ent", "cve_mun"),
         # Economic activity + time analysis
         Index("ix_estab_activity_period", "codigo_act", "period"),
         # Composite searches (state + activity + size)
         Index("ix_estab_composite", "cve_ent", "codigo_act", "per_ocu_id"),
-        # Postal code lookups
-        Index("ix_estab_postal", "cod_postal"),
         # Coordinates for spatial queries
         Index("ix_estab_coords", "latitud", "longitud"),
         # Business type filtering
         Index("ix_estab_type_size", "tipounieco_id", "per_ocu_id"),
-        # CLEE lookups
-        Index("ix_estab_clee", "clee"),
         # H3 blocking key (CLEE resolution)
         Index("ix_estab_h3_9", "h3_cell_9"),
+        # NO declarar aqui indices de UNA columna que ya trae `index=True`
+        # en su mapped_column: SQLAlchemy genera ix_establecimientos_<col> y
+        # este bloque generaria un SEGUNDO ART sobre el mismo campo. Asi
+        # nacieron ix_estab_clee (clee) e ix_estab_postal (cod_postal),
+        # eliminados en la migracion a4000idx.
     )
 
     # ===== RELATIONSHIPS (derivadas de los FKs reales) =====
