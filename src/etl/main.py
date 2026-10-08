@@ -1,4 +1,3 @@
-from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -6,12 +5,15 @@ from rich.console import Console
 from rich.markup import escape
 
 from src.etl.extractors.denue import DenueExtractor
+from src.shared.enums import DENUE_ATOMIC, SECTION_GROUPS, Section
 
 app = typer.Typer(help="ETL Pipeline para DENUE - Proyecto de Tesis")
 console = Console()
 
 # Project paths
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# parents[2] y no [1]: este modulo vive en src/etl/, asi que la raiz del
+# proyecto esta dos niveles arriba (antes era src_etl/ y bastaba con uno).
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = PROJECT_ROOT / "data"
 BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 
@@ -19,37 +21,9 @@ BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
 # ---------------------------------------------------------------------------
 # SECTION SELECTION (--only allowlist mode)
 # ---------------------------------------------------------------------------
-class Section(StrEnum):
-    """Selectable ETL sections for the ``--only`` allowlist flag.
-
-    Atomic tokens map 1:1 to a step; ``denue`` and ``clee`` are group aliases
-    that expand to several atomic sections. ``load`` only applies to the
-    ``pipeline`` command (transform/extract ignore it).
-    """
-
-    ingest = "ingest"
-    normalize_dates = "normalize-dates"
-    h3_cells = "h3-cells"
-    clee_radio = "clee-radio"
-    clee_h3 = "clee-h3"
-    sesnsp = "sesnsp"
-    load = "load"
-    denue = "denue"  # group -> all DENUE sub-steps
-    clee = "clee"  # group -> clee-radio + clee-h3
-
-
-# Atomic sections each group alias expands to.
-_DENUE_ATOMIC: tuple[Section, ...] = (
-    Section.ingest,
-    Section.normalize_dates,
-    Section.h3_cells,
-    Section.clee_radio,
-    Section.clee_h3,
-)
-_SECTION_GROUPS: dict[Section, tuple[Section, ...]] = {
-    Section.denue: _DENUE_ATOMIC,
-    Section.clee: (Section.clee_radio, Section.clee_h3),
-}
+# Section, DENUE_ATOMIC y SECTION_GROUPS viven en src/shared/enums/sections.py:
+# el scheduler nombra la sección de cada tick y el API las valida al encolar,
+# y ninguno debe importar del CLI del ETL.
 
 
 def _expand_only(only: list[Section] | None) -> set[Section] | None:
@@ -62,7 +36,7 @@ def _expand_only(only: list[Section] | None) -> set[Section] | None:
         return None
     atomic: set[Section] = set()
     for sec in only:
-        atomic.update(_SECTION_GROUPS.get(sec, (sec,)))
+        atomic.update(SECTION_GROUPS.get(sec, (sec,)))
     return atomic
 
 
@@ -160,7 +134,7 @@ def extract(
     selected = _expand_only(only)
     if selected is not None:
         # groups are already expanded to atomic sections; any DENUE sub-step selects the source
-        denue = bool(selected & set(_DENUE_ATOMIC))
+        denue = bool(selected & set(DENUE_ATOMIC))
         sesnsp = Section.sesnsp in selected
 
     if force:
@@ -344,9 +318,7 @@ def pipeline(
         help="Run CLEE resolution (H3 blocking), comparison track",
     ),
     sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
-    load_gold: bool = typer.Option(
-        True, "--load/--no-load", help="Load Silver -> Gold at the end"
-    ),
+    load_gold: bool = typer.Option(True, "--load/--no-load", help="Load Silver -> Gold at the end"),
     only: list[Section] = typer.Option(
         None,
         "--only",

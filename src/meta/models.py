@@ -7,45 +7,28 @@ and serialization.
 """
 
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.shared.enums import ErrorType, JobStatus, TaskStatus
 
-class JobStatus(str, Enum):
-    """Job execution status."""
-
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-    PARTIAL = "PARTIAL"
-
-
-class TaskStatus(str, Enum):
-    """Task execution status."""
-
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-    SKIPPED = "SKIPPED"
-
-
-class ErrorType(str, Enum):
-    """Classification of errors that can occur during downloads."""
-
-    NETWORK_ERROR = "NETWORK"
-    HTTP_404 = "HTTP_404"
-    HTTP_500 = "HTTP_500"
-    HTTP_TIMEOUT = "TIMEOUT"
-    VALIDATION_ERROR = "VALIDATION"
-    DISK_FULL = "DISK_FULL"
-    ZIP_CORRUPT = "ZIP_CORRUPT"
-    HASH_MISMATCH = "HASH_MISMATCH"
-    SIZE_MISMATCH = "SIZE_MISMATCH"
-    UNKNOWN = "UNKNOWN"
+__all__ = [
+    "CLEEResolutionTask",
+    "DataLineage",
+    "DownloadResult",
+    "DownloadTask",
+    # Re-exportados desde shared por compatibilidad de imports; la
+    # definición vive en src/shared/enums/jobs.py porque el scheduler y el
+    # API los necesitan sin importar de meta.
+    "ErrorType",
+    "JobRun",
+    "JobStatus",
+    "NormalizeTask",
+    "ProcessTask",
+    "RunSummary",
+    "TaskStatus",
+]
 
 
 class JobRun(BaseModel):
