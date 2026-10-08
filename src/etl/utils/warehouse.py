@@ -4,6 +4,7 @@ from pathlib import Path
 import duckdb
 
 from src.shared.config import settings
+from src.shared.db.base import DEFAULT_SCHEMA
 
 
 def connect_configured(
@@ -20,16 +21,24 @@ def connect_configured(
     RAM). Usar este helper en TODA conexion a Silver/Gold en vez de
     duckdb.connect() directo.
 
+    Tambien fija `SET schema='silver'`: desde que los modelos ORM declaran
+    schema (Fase 2), las tablas se crean como `silver.establecimientos`,
+    pero el SQL crudo de los stages las sigue nombrando sin calificar. Esto
+    es un ANDAMIO DE TRANSICION -- se retira en la Fase 4, cuando ese SQL
+    se reescriba contra PostgreSQL con los nombres ya calificados y el rol
+    `etl_rw` corra con `search_path = ''` (arquitectura.md §2.3.1).
+
     Args:
         db_path: Ruta al archivo .duckdb.
         read_only: Abrir en modo solo lectura.
 
     Returns:
-        Conexion con memory_limit y threads configurados.
+        Conexion con memory_limit, threads y schema configurados.
     """
     conn = duckdb.connect(str(db_path), read_only=read_only)
     conn.execute(f"SET memory_limit='{settings.DUCKDB_MEMORY_LIMIT}'")
     conn.execute(f"SET threads={settings.DUCKDB_THREADS}")
+    conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")
     return conn
 
 

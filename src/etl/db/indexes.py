@@ -46,13 +46,13 @@ def expected_indexes() -> dict[str, str]:
     Returns:
         Dict nombre -> sentencia CREATE INDEX.
     """
-    from src.shared.db.base import Base
+    from src.shared.db.base import get_table
     from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 
     dialect = _duckdb_dialect()
     out: dict[str, str] = {}
     for table_name in MANAGED_TABLES:
-        table = Base.metadata.tables[table_name]
+        table = get_table(table_name)
         for index in table.indexes:
             out[index.name] = str(CreateIndex(index).compile(dialect=dialect)).strip()
     return out

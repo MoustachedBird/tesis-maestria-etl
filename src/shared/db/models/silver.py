@@ -752,9 +752,7 @@ class EntidadEconomica(Base):
         String(10), comment="Postal code (most recent period)"
     )
     latitud: Mapped[float | None] = mapped_column(Double, comment="Latitude (most recent period)")
-    longitud: Mapped[float | None] = mapped_column(
-        Double, comment="Longitude (most recent period)"
-    )
+    longitud: Mapped[float | None] = mapped_column(Double, comment="Longitude (most recent period)")
     h3_cell_9: Mapped[int | None] = mapped_column(
         BigInteger, comment="H3 res-9 cell (most recent period)"
     )

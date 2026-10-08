@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from src.etl.loaders import dominios, estratos, geography, scian
-from src.shared.db.base import Base
+from src.shared.db.base import DEFAULT_SCHEMA, Base, get_table
 from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 
 
@@ -19,9 +19,11 @@ def _db_with_tables(tmp_path, *table_names) -> duckdb.DuckDBPyConnection:
     """Crea las tablas dadas con el esquema del modelo (como la migracion)."""
     path = tmp_path / "seeds.duckdb"
     engine = create_engine(f"duckdb:///{path}")
-    Base.metadata.create_all(engine, tables=[Base.metadata.tables[n] for n in table_names])
+    Base.metadata.create_all(engine, tables=[get_table(n) for n in table_names])
     engine.dispose()
-    return duckdb.connect(str(path))
+    conn = duckdb.connect(str(path))
+    conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")
+    return conn
 
 
 @pytest.mark.unit

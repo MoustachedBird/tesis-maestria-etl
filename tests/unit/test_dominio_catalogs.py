@@ -198,17 +198,18 @@ class TestIngestDomainGuard:
         from src.etl.loaders.dominios import load_seeds as load_dominios_seeds
         from src.etl.loaders.estratos import TABLE_NAME as EST_TABLE
         from src.etl.loaders.estratos import load_seeds as load_estratos_seeds
-        from src.shared.db.base import Base
+        from src.shared.db.base import DEFAULT_SCHEMA, Base, get_table
         from src.shared.db.models import Establecimiento  # noqa: F401
 
         db = tmp_path / "guard.duckdb"
         engine = create_engine(f"duckdb:///{db}")
         names = [t for t, *_ in DOM_TABLES] + [EST_TABLE]
-        Base.metadata.create_all(engine, tables=[Base.metadata.tables[n] for n in names])
+        Base.metadata.create_all(engine, tables=[get_table(n) for n in names])
         engine.dispose()
 
         writer = EstablecimientoWriter(db)
         conn = duckdb.connect(str(db))
+        conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")
         load_dominios_seeds(conn)
         load_estratos_seeds(conn)
         return writer, conn
