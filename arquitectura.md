@@ -666,6 +666,11 @@ verificación.
       FKs reales y `ON DELETE CASCADE`.
 - [x] Baseline único `b0000baseline` en lugar de las 4 migraciones de
       DuckDB: crea los 3 schemas, 18 tablas, el rol de lectura y siembra.
+- [x] **Un solo motor en la capa de configuración.** Fuera
+      `DATABASE_BACKEND`, `SILVER_DATABASE_URL`, `_get_duckdb_url`,
+      `DuckDBImpl` y las ramas por backend de `session.py` y `alembic/env.py`.
+      Tener el flag era un riesgo real: en `duckdb`, `make db-migrate`
+      aplicaba el baseline sobre el archivo en vez del contenedor.
 - [ ] **`establecimientos` particionada por `period`** — se pasa a la Fase 3,
       donde vive el helper de staging que la usa (§2.4).
 
@@ -697,6 +702,16 @@ Qué puede salir mal, por probabilidad:
 3. **Tipos sin equivalente exacto.** `Double` y `DateTime(timezone=True)`
    compilan bien, pero solo se han verificado compilando, no ejecutando.
 
+**Qué queda de DuckDB y dónde muere.** La capa de configuración ya es
+mono-motor; lo que sigue abriendo archivos no pasa por ella:
+
+| Qué | Dónde | Muere en |
+|---|---|---|
+| `connect_configured`, `indexes.py`, `backup.py` | capa de acceso | **Fase 3** |
+| 6 stages: ingest, normalize-dates, h3-cells, las 2 CLEE, sesnsp | `src/etl/` | **Fase 4** |
+| 8 archivos de test sobre DuckDB desechable | `tests/` | **Fase 3** — requiere un Postgres de test |
+| `DUCKDB_*`, `WAREHOUSE_BACKUP_ENABLED` en `.env` | config | **Fase 4**, con los stages |
+
 **Tres andamios de transición** introducidos a propósito, todos marcados
 para retirarse en la Fase 4: el listener `before_create` que emite
 `CREATE SCHEMA IF NOT EXISTS`, el `SET schema='silver'` de
@@ -713,6 +728,14 @@ el re-export plano de los modelos de `silver`.
       de `suspended_indexes()`, ahora con `CREATE INDEX CONCURRENTLY`.
 - [ ] Retirar `utils/warehouse.py:connect_configured` en favor de la sesión;
       conservar `get_distinct_periods` como consulta de catálogo.
+- [ ] `establecimientos` particionada por `period` + helper que crea la
+      partición de un corte nuevo (§2.4) — viene de la Fase 2, va aquí
+      porque es el staging el que la usa.
+- [ ] **Migrar los tests a un Postgres de prueba.** Hoy 8 archivos crean
+      bases DuckDB desechables, y es lo único que todavía obliga a que
+      `ON DELETE CASCADE` y los schemas convivan con un segundo dialecto.
+      Opciones: `testcontainers` o un servicio de compose con `profiles:
+      [test]`. Sin esto, DuckDB no se puede quitar del todo.
 
 **Criterio de aceptación:** tests unitarios de `copy.py` y `staging.py`
 contra un Postgres de prueba, incluido el caso "falla a media carga → Silver
