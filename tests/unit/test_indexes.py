@@ -9,7 +9,8 @@ import duckdb
 import pytest
 from sqlalchemy import create_engine
 
-from src_etl.db.base import Base
+from src.shared.db.base import Base
+from src.shared.db.models import Establecimiento  # noqa: F401
 from src_etl.db.indexes import (
     MANAGED_TABLES,
     drop_indexes,
@@ -19,7 +20,6 @@ from src_etl.db.indexes import (
     missing_indexes,
     suspended_indexes,
 )
-from src_etl.db.models import Establecimiento  # noqa: F401
 
 
 @pytest.fixture()

@@ -25,7 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src_etl.db.base import Base
+from src.shared.db.base import Base
 
 
 class Establecimiento(Base):

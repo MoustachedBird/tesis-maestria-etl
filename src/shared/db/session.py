@@ -149,7 +149,7 @@ def init_db() -> None:
         # In your application startup
         init_db()
     """
-    from src_etl.db.base import Base
+    from src.shared.db.base import Base
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
@@ -166,7 +166,7 @@ def drop_db() -> None:
         drop_db()
         init_db()
     """
-    from src_etl.db.base import Base
+    from src.shared.db.base import Base
 
     engine = get_engine()
     Base.metadata.drop_all(bind=engine)

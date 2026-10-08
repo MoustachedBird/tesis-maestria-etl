@@ -31,8 +31,8 @@ TABLE = "entidades_economicas"
 
 def upgrade() -> None:
     """Crea la dimension vacia."""
-    from src_etl.db.base import Base
-    from src_etl.db.models import EntidadEconomica  # noqa: F401
+    from src.shared.db.base import Base
+    from src.shared.db.models import EntidadEconomica  # noqa: F401
 
     conn = op.get_bind()
     Base.metadata.create_all(bind=conn, tables=[Base.metadata.tables[TABLE]])
@@ -41,8 +41,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Borra la dimension."""
-    from src_etl.db.base import Base
-    from src_etl.db.models import EntidadEconomica  # noqa: F401
+    from src.shared.db.base import Base
+    from src.shared.db.models import EntidadEconomica  # noqa: F401
 
     conn = op.get_bind()
     Base.metadata.drop_all(bind=conn, tables=[Base.metadata.tables[TABLE]])

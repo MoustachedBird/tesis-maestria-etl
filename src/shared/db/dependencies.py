@@ -10,7 +10,7 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from src.shared.config import Settings, get_settings
-from src_etl.db.database import get_db
+from src.shared.db.session import get_db
 
 # Type alias for database dependency
 # Use this in your FastAPI route handlers:

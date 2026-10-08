@@ -43,8 +43,8 @@ def _tables(metadata, names):
 def upgrade() -> None:
     """Crea las tablas SESNSP y siembra el catalogo de delitos."""
     from src.shared.config import settings
-    from src_etl.db.base import Base
-    from src_etl.db.models import SesnspIncidenciaMunicipal  # noqa: F401
+    from src.shared.db.base import Base
+    from src.shared.db.models import SesnspIncidenciaMunicipal  # noqa: F401
     from src_etl.loaders.sesnsp import load_seeds_sqlalchemy as load_delitos
 
     conn = op.get_bind()
@@ -56,8 +56,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Borra el hecho y luego el catalogo."""
-    from src_etl.db.base import Base
-    from src_etl.db.models import SesnspIncidenciaMunicipal  # noqa: F401
+    from src.shared.db.base import Base
+    from src.shared.db.models import SesnspIncidenciaMunicipal  # noqa: F401
 
     conn = op.get_bind()
     Base.metadata.drop_all(bind=conn, tables=_tables(Base.metadata, SESNSP_TABLES))

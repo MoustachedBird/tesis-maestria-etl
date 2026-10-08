@@ -14,7 +14,7 @@ se convierten a tablas, ni columnas que despues se renombran.
     indices del modelo.
   - Siembra los catalogos desde los seeds parquet de `data/seeds`.
 
-El esquema se crea desde `src_etl.db.models` (metadata del ORM), que es la
+El esquema se crea desde `src.shared.db.models` (metadata del ORM), que es la
 definicion canonica: asi la migracion no puede desincronizarse del modelo.
 
 Revision ID: a1000denue
@@ -55,8 +55,8 @@ def _tables(metadata, names):
 def upgrade() -> None:
     """Crea catalogos + tabla de hechos y siembra los catalogos."""
     from src.shared.config import settings
-    from src_etl.db.base import Base
-    from src_etl.db.models import Establecimiento  # noqa: F401  (registra el metadata)
+    from src.shared.db.base import Base
+    from src.shared.db.models import Establecimiento  # noqa: F401  (registra el metadata)
     from src_etl.loaders.dominios import load_seeds_sqlalchemy as load_dominios
     from src_etl.loaders.estratos import load_seeds_sqlalchemy as load_estratos
     from src_etl.loaders.geography import load_seeds_sqlalchemy as load_geografia
@@ -76,8 +76,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Borra la tabla de hechos y los catalogos (orden inverso a los FKs)."""
-    from src_etl.db.base import Base
-    from src_etl.db.models import Establecimiento  # noqa: F401
+    from src.shared.db.base import Base
+    from src.shared.db.models import Establecimiento  # noqa: F401
 
     conn = op.get_bind()
     Base.metadata.drop_all(bind=conn, tables=_tables(Base.metadata, CORE_TABLES))

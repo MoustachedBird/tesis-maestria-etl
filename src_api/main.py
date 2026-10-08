@@ -13,8 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from src.shared.config import get_settings
-from src_etl.db import init_db
-from src_etl.db.dependencies import AppSettings, DbSession
+from src.shared.db import init_db
+from src.shared.db.dependencies import AppSettings, DbSession
 
 
 @asynccontextmanager
@@ -151,7 +151,7 @@ async def api_info(settings: AppSettings):
 # ------------------------------------------------------------------------------
 # Example CRUD Endpoints (commented out - implement as needed)
 # ------------------------------------------------------------------------------
-# from src_etl.db.models import Establecimiento
+# from src.shared.db.models import Establecimiento
 # from src_api.schemas import EstablecimientoResponse
 # from typing import List
 

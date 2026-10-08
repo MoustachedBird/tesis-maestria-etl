@@ -17,20 +17,20 @@ import duckdb
 import pytest
 from sqlalchemy import inspect
 
-from src_etl.db.models import (
+from src.shared.db.models import (
     ActividadEconomica,
     Entidad,
     Establecimiento,
     Localidad,
     Municipio,
 )
-from src_etl.db.models import (
+from src.shared.db.models import (
     TipoAsentamiento as TipoAsentamientoCat,
 )
-from src_etl.db.models import (
+from src.shared.db.models import (
     TipoUnidadEconomica as TipoUnidadEconomicaCat,
 )
-from src_etl.db.models import (
+from src.shared.db.models import (
     TipoVialidad as TipoVialidadCat,
 )
 

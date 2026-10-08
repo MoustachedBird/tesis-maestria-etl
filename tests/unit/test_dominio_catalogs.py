@@ -16,17 +16,17 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from src_etl.db.base import Base
-from src_etl.db.models import (
+from src.shared.db.base import Base
+from src.shared.db.models import (
     ActividadEconomica,
     Establecimiento,
     EstratoPersonal,
     TipoVialidad,
 )
-from src_etl.db.models import (
+from src.shared.db.models import (
     TipoAsentamiento as TipoAsentamientoCat,
 )
-from src_etl.db.models import (
+from src.shared.db.models import (
     TipoUnidadEconomica as TipoUnidadEconomicaCat,
 )
 from src_etl.loaders.dominios import build_rows
@@ -193,8 +193,8 @@ class TestIngestDomainGuard:
         """
         import duckdb
 
-        from src_etl.db.base import Base
-        from src_etl.db.models import Establecimiento  # noqa: F401
+        from src.shared.db.base import Base
+        from src.shared.db.models import Establecimiento  # noqa: F401
         from src_etl.loaders.denue import EstablecimientoWriter
         from src_etl.loaders.dominios import TABLES as DOM_TABLES
         from src_etl.loaders.dominios import load_seeds as load_dominios_seeds

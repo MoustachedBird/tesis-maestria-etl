@@ -10,8 +10,8 @@ import duckdb
 import pytest
 from sqlalchemy import create_engine
 
-from src_etl.db.base import Base
-from src_etl.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
+from src.shared.db.base import Base
+from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 from src_etl.loaders import dominios, estratos, geography, scian
 
 

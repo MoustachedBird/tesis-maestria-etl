@@ -46,8 +46,8 @@ def expected_indexes() -> dict[str, str]:
     Returns:
         Dict nombre -> sentencia CREATE INDEX.
     """
-    from src_etl.db.base import Base
-    from src_etl.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
+    from src.shared.db.base import Base
+    from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 
     dialect = _duckdb_dialect()
     out: dict[str, str] = {}

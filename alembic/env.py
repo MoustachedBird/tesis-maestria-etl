@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.shared.config import get_settings
 
 # Import all models to ensure they're registered with Base.metadata
-from src_etl.db import models  # noqa: F401
-from src_etl.db.base import Base
+from src.shared.db import models  # noqa: F401
+from src.shared.db.base import Base
 
 
 # ------------------------------------------------------------------------------

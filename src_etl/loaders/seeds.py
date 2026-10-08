@@ -28,8 +28,8 @@ from sqlalchemy import UniqueConstraint, text
 
 def _table(table_name: str):
     """Objeto Table del metadata del ORM para la tabla dada."""
-    from src_etl.db.base import Base
-    from src_etl.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
+    from src.shared.db.base import Base
+    from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 
     return Base.metadata.tables[table_name]
 
