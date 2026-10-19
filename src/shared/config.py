@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     POSTGRES_RO_USER: str = "api_ro"
     POSTGRES_RO_PASSWORD: str = ""
 
+    # Filas por bloque en `shared/db/copy.py`. Es la cota de RAM de las
+    # escrituras masivas: el buffer CSV de un bloque vive entero en memoria
+    # antes de irse al servidor, asi que RAM_pico ~ chunk x bytes_por_fila.
+    # 500k x ~400 B = ~200 MiB por bloque, holgado en la workstation y
+    # tolerable en una laptop. Subirlo ayuda poco (el cuello es el parseo
+    # del servidor); bajarlo es la palanca si un ingest se queda sin RAM.
+    COPY_CHUNK_ROWS: int = 500_000
+
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
     SQLALCHEMY_POOL_SIZE: int = 5
@@ -203,13 +211,15 @@ class Settings(BaseSettings):
         Construct PostgreSQL URL with proper driver.
 
         Args:
-            async_driver: If True, use asyncpg driver instead of psycopg2
+            async_driver: If True, use asyncpg driver instead of psycopg3
             read_only: If True, use the api_ro role instead of the owner
 
         Returns:
             str: PostgreSQL connection URL
         """
-        driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg2"
+        # `postgresql+psycopg` es psycopg3 (psycopg2 seria `+psycopg2`).
+        # Requisito de `shared/db/copy.py`: COPY en formato binario.
+        driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg"
 
         user = self.POSTGRES_RO_USER if read_only else self.POSTGRES_USER
         raw_password = self.POSTGRES_RO_PASSWORD if read_only else self.POSTGRES_PASSWORD

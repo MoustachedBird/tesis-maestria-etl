@@ -17,7 +17,11 @@ dependencies = [
     "sqlalchemy>=2.0.46",
     "alembic>=1.18.1",
     "duckdb-engine>=0.17.0",
-    "psycopg2-binary>=2.9.11",
+    # psycopg3, no psycopg2: `copy.py` escribe con COPY ... FROM STDIN en
+    # formato BINARY, que psycopg2 no soporta (su copy_expert solo maneja
+    # texto/CSV). Con 82.9M filas el parseo de texto del servidor no es un
+    # detalle. Ver arquitectura.md Fase 3.3.
+    "psycopg[binary]>=3.2",
     "structlog>=24.1.0",
     "pyyaml>=6.0.0",
     "rich>=14.2.0",
