@@ -53,6 +53,12 @@ class TestDefinicion:
             assert name in sql
 
 
+# Postgres: el fixture `db` hace create_all de todo silver, y desde que
+# `establecimientos` es particionada eso ya no se puede materializar en
+# DuckDB. Se migra junto con la reescritura de `db/indexes.py` sobre
+# pg_indexes (arquitectura.md Fase 3.5), no antes: el sujeto de estos tests
+# cambia entero en esa fase.
+@pytest.mark.postgres
 @pytest.mark.unit
 class TestCicloDeVida:
     def test_la_base_migrada_nace_completa(self, db):

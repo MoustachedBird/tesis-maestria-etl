@@ -131,6 +131,10 @@ def linked_session(tmp_path):
     engine.dispose()
 
 
+# Postgres: `linked_session` hace create_all de todo silver (incluida
+# `establecimientos`, ya particionada) y ademas usa `session.get` con un id
+# escalar, que deja de ser valido con la PK compuesta (id, period).
+@pytest.mark.postgres
 @pytest.mark.unit
 class TestEstablecimientoLinks:
     """Relationships FK-driven navegables desde Establecimiento."""
