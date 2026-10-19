@@ -1563,25 +1563,41 @@ GET /api/v1/redoc        # ReDoc
 
 ```bash
 # Database
-DATABASE_BACKEND=duckdb
+# NO hay DATABASE_BACKEND: desde la Fase 2 de arquitectura.md el motor es
+# PostgreSQL y nada mas. Las DUCKDB_* que quedan solo las leen los stages
+# todavia no migrados (ingest, CLEE, sesnsp) y mueren con ellos en la Fase 4.
 SILVER_DUCKDB_PATH=data/silver/mipymes.duckdb
 GOLD_DUCKDB_PATH=data/gold/mipymes.duckdb
 DUCKDB_THREADS=8
 DUCKDB_MEMORY_LIMIT=16GB
 METADATA_DUCKDB_PATH=data/metadata.duckdb
 
-# PostgreSQL (when DATABASE_BACKEND=postgresql)
+# PostgreSQL: una sola base, tres schemas (silver, gold, meta).
+# Driver psycopg3 (`postgresql+psycopg`), no psycopg2: `shared/db/copy.py`
+# necesita COPY ... FROM STDIN y psycopg2 esta en modo mantenimiento.
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_DB=mipymes
-POSTGRES_USER=postgres
+POSTGRES_USER=etl_rw
 POSTGRES_PASSWORD=your_password
+POSTGRES_RO_USER=api_ro
+POSTGRES_RO_PASSWORD=another_password
+
+# Filas por bloque de COPY en las escrituras masivas: es la cota de RAM del
+# ingest (RAM_pico ~ filas x bytes_por_fila). Bajarlo si un ingest se queda
+# sin memoria.
+COPY_CHUNK_ROWS=500000
 
 # SQLAlchemy
 SQLALCHEMY_ECHO=false
 SQLALCHEMY_POOL_SIZE=5
 SQLALCHEMY_MAX_OVERFLOW=10
 SQLALCHEMY_POOL_PRE_PING=true
+
+# Postgres de pruebas para los tests marcados `postgres`. Vacia = se deriva
+# de POSTGRES_* con sufijo `_test`. Esos tests se saltan solos si no hay
+# servidor, asi que dejarla vacia es valido.
+TEST_POSTGRES_URL=
 
 # Application
 LOG_LEVEL=INFO

@@ -707,9 +707,12 @@ mono-motor; lo que sigue abriendo archivos no pasa por ella:
 
 | Qué | Dónde | Muere en |
 |---|---|---|
-| `connect_configured`, `indexes.py`, `backup.py` | capa de acceso | **Fase 3** |
+| ~~`indexes.py`~~ | capa de acceso | ✅ **Fase 3** — reescrito sobre `pg_indexes` |
+| `connect_configured` | capa de acceso | **Fase 4** — los stages son sus únicos consumidores |
+| `backup.py` | capa de acceso | **Fase 9** — su razón de ser (R3) desaparece |
 | 6 stages: ingest, normalize-dates, h3-cells, las 2 CLEE, sesnsp | `src/etl/` | **Fase 4** |
-| 8 archivos de test sobre DuckDB desechable | `tests/` | **Fase 3** — requiere un Postgres de test |
+| 2 clases de test (`TestEstablecimientoLinks`, `TestCicloDeVida`) | `tests/` | marcadas `postgres` y saltadas; se migran con su sujeto |
+| 5 archivos de test con `duckdb.connect` crudo | `tests/` | **Fase 4**, con los stages que prueban |
 | `DUCKDB_*`, `WAREHOUSE_BACKUP_ENABLED` en `.env` | config | **Fase 4**, con los stages |
 
 **Tres andamios de transición** introducidos a propósito, todos marcados
@@ -718,55 +721,107 @@ para retirarse en la Fase 4: el listener `before_create` que emite
 `connect_configured` (el SQL crudo de los stages aún no está calificado) y
 el re-export plano de los modelos de `silver`.
 
-### Fase 3 — Capa de acceso sin DuckDB
+### Fase 3 — Capa de acceso sin DuckDB ⚠️ CÓDIGO LISTO, VALIDACIÓN PENDIENTE (2026-10-19)
 
-**El orden importa y se descubrió al intentarlo (2026-10-08).** El primer
-paso tiene que ser migrar los tests, no el particionado:
+**El bloqueo era más chico de lo que decía este plan.** La versión anterior
+afirmaba que había que migrar los 8 archivos de test antes de poder
+particionar. Medido en el código, **solo 2 clases rompen**, no 8 archivos:
+las únicas que llaman `create_all` con `tables_for(DEFAULT_SCHEMA)` —que
+arrastra `establecimientos`— son `test_dominio_catalogs::TestEstablecimientoLinks`
+y `test_indexes::TestCicloDeVida`. `test_seed_loaders` nombra sus tablas
+(`denue_entidades`, …) y nunca crea la tabla de hechos, así que sobrevive
+intacto; los otros 5 archivos usan `duckdb.connect` con SQL crudo y ni
+siquiera pasan por el ORM.
 
-`duckdb_engine.Dialect` **hereda de `PGDialect_psycopg2`**, así que no
-ignora las opciones `postgresql_*` — las emite. Declarar
-`postgresql_partition_by` en el modelo hace que `create_all` sobre DuckDB
-falle con `syntax error at or near "PARTITION"`, y con él los 217 tests.
-No hay forma de tener la tabla particionada en el modelo y seguir creándola
-en DuckDB: **el particionado obliga a migrar los tests primero.**
+Y dos de esos tests **no se migran, se borran**: `test_backup` prueba
+`utils/backup.py`, que la Fase 9 elimina, y `test_indexes` prueba
+`db/indexes.py`, que esta misma fase reescribe. Migrarlos antes era trabajo
+destinado a la basura.
 
-Orden corregido:
+Orden ejecutado:
 
-- [ ] **1. Migrar los tests a un Postgres de prueba.** Es el desbloqueo de
-      todo lo demás. 8 archivos crean bases DuckDB desechables
-      (`test_indexes`, `test_seed_loaders`, `test_dominio_catalogs`,
-      `test_backup`, `test_sesnsp`, `test_entidades_dimension`,
-      `test_propagation_stats`, `conftest`). Opciones: `testcontainers` o un
-      servicio de compose con `profiles: [test]`.
-- [ ] **2. `establecimientos` particionada por `period`** + helper que crea
-      la partición de un corte nuevo (§2.4). Requiere cambiar la PK de `id`
-      a `(id, period)`: PostgreSQL exige que la clave de partición esté en
-      toda PK/UNIQUE de una tabla particionada.
+- [x] **1. Marcador `@pytest.mark.postgres` + skip condicional**, en lugar
+      de la migración big-bang. `conftest.py` sondea el servidor una vez por
+      sesión (`TEST_POSTGRES_URL`, con default derivado de `POSTGRES_*` más
+      sufijo `_test`) y salta lo marcado si no responde. El suite queda
+      verde y la deuda queda greppable, en vez de ser rojo que uno aprende a
+      ignorar. Cada archivo se migra cuando se reescribe su sujeto.
+- [x] **2. `establecimientos` particionada por `period`**, PK a
+      `(id, period)`, helper en `src/shared/db/partitions.py`
+      (`create_partition`, `detach_partition`, `drop_partition`,
+      `existing_partitions`).
 
-      Verificado sobre el Silver real que esto **no afloja la unicidad**:
-      los 82,896,801 ids son distintos entre sí porque `id` es un hash del
-      contenido de la fila. Lo que se pierde es la garantía *formal* de que
-      no pueda repetirse entre periodos, y no hay manera de conservarla —
-      Postgres tampoco admite un índice único global que no incluya la
-      clave de partición.
-- [ ] **3. `src/shared/db/copy.py`**: `COPY ... FROM STDIN` desde
-      DataFrames de Polars, por chunks, con cota de RAM.
+      **LIST y no RANGE**: cada corte es una fecha discreta (20 valores),
+      así que LIST da exactamente una partición por corte —la unidad de
+      recuperación de §2.4— y hace imposible que dos cortes caigan en la
+      misma partición por un límite mal escrito. El pruning funciona igual.
 
-      **Decisión pendiente:** el proyecto trae `psycopg2-binary`, cuyo
-      `copy_expert` solo maneja texto/CSV. `COPY FORMAT BINARY` necesita
-      psycopg3 (`psycopg[binary]`, driver `postgresql+psycopg`). Hay que
-      elegir: CSV con el driver actual (más simple, sin cambio de
-      dependencia) o binario con psycopg3 (evita el parseo de texto de 82.9M
-      filas).
-- [ ] **4. `src/shared/db/staging.py`**: contexto de tabla `UNLOGGED` →
-      validar → `ATTACH PARTITION`. Depende de 2.
-- [ ] **5. Reescribir `db/indexes.py`** sobre `pg_indexes` conservando el
-      contrato de `suspended_indexes()`. Ojo: `CREATE INDEX CONCURRENTLY`
-      **no funciona sobre la tabla particionada padre** — hay que crear los
-      índices por partición. Depende de 1 y 2.
+      Se quitó el `index=True` de `period`: es la clave de partición, así
+      que dentro de cada partición sería un índice sobre una columna
+      constante — 20 árboles que mantener para cero selectividad.
+
+      Verificado sobre el Silver real que la PK compuesta **no afloja la
+      unicidad**: los 82,896,801 ids son distintos entre sí porque `id` es
+      un hash del contenido de la fila. Lo que se pierde es la garantía
+      *formal* entre periodos, y no hay manera de conservarla — Postgres
+      tampoco admite un índice único global que excluya la clave de
+      partición.
+- [x] **3. `src/shared/db/copy.py`** — **decisión cerrada: CSV, no binario**,
+      y psycopg3 igual.
+
+      El planteamiento original tenía el cuello mal ubicado. El formato
+      binario obliga a `copy.write_row(tupla)`, o sea un bucle Python sobre
+      82.9M tuplas; CSV deja que Polars serialice el bloque entero en Rust
+      multihilo y que psycopg mande los bytes de corrido. El cliente casi no
+      participa y lo que se paga es el parseo del servidor, que es C.
+      psycopg3 se adopta igual (psycopg2 está en modo mantenimiento y la
+      API de bloques soporta ambos caminos si hay que medir).
+
+      `quote_style="non_numeric"` no es cosmético: sin él Polars escribe
+      NULL y cadena vacía idénticos, y los campos vacíos del DENUE se
+      cargarían mal en silencio.
+- [x] **4. `src/shared/db/staging.py`**: cargar en tabla suelta → validar →
+      `ATTACH PARTITION`. El CHECK que replica el límite se agrega **antes**
+      del attach: no ahorra trabajo total, pero mueve el escaneo a un
+      momento en que no se tiene un `ACCESS EXCLUSIVE` sobre la tabla padre.
+
+      **Divergencia del plan: la tabla de staging nace LOGGED, no UNLOGGED.**
+      Una partición UNLOGGED hace a Silver no duradera, y evitarlo obliga a
+      `SET LOGGED` antes del attach, que reescribe la tabla y vuelve a
+      escribir todo el WAL que el UNLOGGED había ahorrado — los datos se
+      escriben dos veces. El ahorro real en cargas masivas es
+      `wal_level=minimal`, que es configuración del servidor, no código.
+      Queda el parámetro `unlogged` para medirlo cuando haya servidor.
+- [x] **5. `db/indexes.py` reescrito** sobre `pg_indexes`, conservando el
+      contrato de `suspended_indexes()`. Soltar el índice del padre se lleva
+      los de todas las particiones, así que drop/ensure quedan tan simples
+      como antes. `CREATE INDEX CONCURRENTLY` **no funciona sobre el padre**:
+      está implementado como `ensure_indexes(concurrently=True)`, que crea
+      el del padre con `ON ONLY`, construye uno por partición y los engancha
+      con `ALTER INDEX ... ATTACH PARTITION`. El default es el camino
+      bloqueante, correcto dentro del ETL.
 - [ ] **6. Retirar `connect_configured`** en favor de la sesión; conservar
       `get_distinct_periods` como consulta de catálogo. Depende de la Fase 4
       (los stages son sus únicos consumidores).
+
+**Verificado sin servidor:** `205 passed, 35 skipped` (antes 217/23 — los 12
+que se movieron son exactamente las 2 clases marcadas, cero fallos nuevos);
+el DDL compilado sale con `PRIMARY KEY (id, period)` y
+`PARTITION BY LIST (period)`; `duckdb_engine` sigue funcionando sin psycopg2
+instalado (SQLAlchemy difiere la importación del DBAPI); ruff en los 44
+preexistentes, cero nuevos.
+
+**⚠️ PENDIENTE — nada de esto ha tocado un servidor.** Por orden de riesgo:
+
+1. **`staging.py` completo.** `ATTACH PARTITION`, el CHECK previo y el
+   rename no se han ejecutado nunca. Es el módulo con más superficie.
+2. **`copy.py` y el round-trip de NULL vs `""`.** La hipótesis de que
+   `quote_style="non_numeric"` + `FORMAT CSV` los distingue hay que verla
+   cumplirse sobre datos reales del DENUE.
+3. **`ensure_indexes(concurrently=True)`.** El baile `ON ONLY` + attach es
+   el camino menos trillado del módulo.
+4. **Los 2 bloques de tests marcados**, que siguen escritos contra DuckDB:
+   al levantar Postgres hay que migrarlos, no solo dejar de saltarlos.
 
 **Criterio de aceptación:** la suite corre contra Postgres,
 `silver.establecimientos` tiene sus 20 particiones, y el contexto de
