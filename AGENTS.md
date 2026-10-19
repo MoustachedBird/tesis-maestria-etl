@@ -972,6 +972,22 @@ etl-core/
 
 ## Build Commands
 
+> **Dónde corre qué.** La Mac es entorno de desarrollo y ahí se corre
+> nativo. **En la workstation Linux NADA corre nativo**: no hay `uv` ni venv
+> en el host, todo pasa por Docker. El Makefile enruta con `DOCKER=1`:
+>
+> ```bash
+> export DOCKER=1        # una vez por sesión SSH en la Linux
+> make setup             # construye las dos etapas de la imagen
+> make db-up             # Postgres
+> make db-migrate        # alembic DENTRO del contenedor `tools`
+> make test              # pytest DENTRO del contenedor `tools`
+> ```
+>
+> Sin `DOCKER=1` los mismos targets usan `uv run` en el host, que es el
+> flujo de la Mac. Los comandos sueltos de abajo son la variante nativa;
+> en la Linux se invocan vía `docker compose run --rm tools <comando>`.
+
 ```bash
 # Environment
 uv sync                                    # Install all dependencies

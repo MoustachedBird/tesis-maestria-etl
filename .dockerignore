@@ -1,0 +1,48 @@
+# El contexto de build se manda entero al daemon, asi que lo que no entra a
+# la imagen no deberia ni viajar. Sin esto el contexto incluye data/ (cientos
+# de MB entre Bronze y eval) y .venv, y cada build arrastra todo eso.
+
+# Entornos y bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Datos: entran por el bind mount de compose, nunca por la imagen.
+# Excepcion: los seeds, que la migracion necesita y pesan 456 KB.
+data/*
+!data/seeds/
+
+# Artefactos de corridas
+logs/
+htmlcov/
+coverage.xml
+.coverage
+.coverage.*
+*.duckdb
+*.db
+*.wal
+*.log
+
+# Caches de herramientas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Control de versiones y editores
+.git/
+.gitea/
+.vscode/
+.idea/
+.DS_Store
+
+# Secretos: el .env real se inyecta con env_file en runtime, no se hornea.
+.env
+.env.prod
+.env.test
+
+# Documentacion pesada que no hace falta en la imagen
+*.pdf
+*.xlsx
+*.xls

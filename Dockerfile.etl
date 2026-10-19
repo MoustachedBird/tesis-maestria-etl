@@ -1,32 +1,73 @@
-# 1. Use lightweight Python 3.12 image
-FROM python:3.12-slim
+# ============================================================================
+# Imagen del ETL — dos etapas sobre una base comun
+# ============================================================================
+# En la workstation Linux NADA corre nativo: el pipeline, las migraciones, los
+# tests y los scripts se ejecutan todos en contenedor. Por eso hay dos
+# objetivos:
+#
+#   --target etl  (default)  pipeline y migraciones. Sin dependencias de dev.
+#   --target dev             + pytest/ruff + tests/ + scripts/, para validar.
+#
+# El codigo va COPIADO en `etl` (imagen reproducible para correr el pipeline) y
+# MONTADO en `dev` desde compose (ciclo de edicion sin rebuild).
 
-# 2. Set environment variables
+# ─── Base: sistema, Chrome y dependencias de runtime ────────────────────────
+FROM python:3.12-slim AS base
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# 3. Install system dependencies & Chrome
-RUN apt-get update && apt-get install -y wget gnupg unzip curl \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list' \
+# Chrome para el scraping de DENUE. amd64 unicamente, que es lo que corre la
+# workstation; en arm64 habria que cambiar a chromium (arquitectura.md §2.3.3).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget gnupg unzip curl ca-certificates \
+    && mkdir -p /etc/apt/keyrings \
+    && wget -q -O /etc/apt/keyrings/google-chrome.asc \
+        https://dl-ssl.google.com/linux/linux_signing_key.pub \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] \
+http://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y google-chrome-stable \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Set working directory
 WORKDIR /app
 
-# 5. Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# 6. Copy dependency files and install
+# `--no-dev` y no `--group etl`: ese grupo nunca existio en pyproject.toml, asi
+# que el build fallaba con "Group `etl` is not defined". Lo que se queria decir
+# es "las dependencias del proyecto, sin las de desarrollo".
 COPY pyproject.toml uv.lock ./
-RUN uv sync --group etl --frozen
+RUN uv sync --frozen --no-dev
 
-# 7. Copy application source code
-# Todo src/ de una vez: etl, meta y api dependen de src/shared (copiarlos
-# por separado dejaba la imagen sin el paquete compartido).
+# ─── etl: lo que corre el pipeline y las migraciones ────────────────────────
+FROM base AS etl
+
+# Todo src/ de una vez: etl, meta y api dependen de src/shared (copiarlos por
+# separado dejaba la imagen sin el paquete compartido).
 COPY src/ ./src/
+# Alembic entra a la imagen porque `make db-migrate` tambien corre en
+# contenedor; sin esto no habria con que migrar.
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
 
-# 8. Entrypoint
 ENTRYPOINT ["uv", "run", "python", "-m", "src.etl.main"]
+
+# ─── dev: validacion (pytest, smoke, ruff, alembic a mano) ──────────────────
+FROM base AS dev
+
+# Ahora si las de desarrollo.
+RUN uv sync --frozen
+
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+COPY tests/ ./tests/
+COPY scripts/ ./scripts/
+COPY alembic.ini pytest.ini .coveragerc ./
+
+# Sin ENTRYPOINT fijo al CLI del ETL: aqui se invocan herramientas distintas.
+# `uv run` como entrypoint deja que compose pase `pytest`, `alembic upgrade
+# head` o `python -m scripts.smoke_fase3` como argumentos.
+ENTRYPOINT ["uv", "run"]
+CMD ["pytest"]

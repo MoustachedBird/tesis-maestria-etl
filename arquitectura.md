@@ -599,13 +599,38 @@ y **no hay datos que trasladar ni preparar** — ver el recuadro de §5.
 
 - [ ] Clonar el repo en la Linux. Los seeds vienen con él (9 parquet
       versionados en `data/seeds/`).
-- [ ] Declarar `cpus`, `mem_limit` y `shm_size` por servicio en el compose
+- [x] Declarar `cpus`, `mem_limit` y `shm_size` por servicio en el compose
       (§2.3.2) y `POLARS_MAX_THREADS` en el ETL.
 - [ ] Opcional, prioridad baja: `chromium` en vez de `google-chrome-stable`
       en `Dockerfile.etl` (§2.3.3). En amd64 el actual funciona.
 
-**Criterio de aceptación:** el repo clonado en la Linux construye la imagen
-del ETL.
+**Regla de ejecución (2026-10-19): en la workstation Linux NADA corre
+nativo.** No hay `uv` ni venv en el host — el pipeline, las migraciones, los
+tests y los scripts de validación corren todos en contenedor. Eso obligó a
+tres cambios:
+
+- **`Dockerfile.etl` pasa a dos etapas.** `--target etl` para pipeline y
+  migraciones (sin dependencias de dev), `--target dev` para pytest, ruff y
+  los scripts. La imagen ahora incluye `alembic/` y `alembic.ini`, sin los
+  cuales `make db-migrate` no podía correr dentro del contenedor.
+- **Servicio `tools` en el compose** (profile `tools`), que monta el código
+  en vez de hornearlo: editar y re-correr los tests no cuesta un rebuild.
+- **El Makefile enruta por `DOCKER=1`.** `make test` sigue siendo `uv run
+  pytest` en la Mac; `DOCKER=1 make test` es `docker compose run --rm tools
+  pytest`. En la Linux se exporta `DOCKER=1` una vez por sesión.
+
+**Un bug que esto destapó:** `Dockerfile.etl` **nunca pudo construirse**.
+Hacía `uv sync --group etl --frozen` y ese grupo no existe en
+`pyproject.toml` — `uv` falla con "Group `etl` is not defined". Nadie lo
+había notado porque la imagen jamás se había construido. Ahora es
+`--frozen --no-dev`, que es lo que se quería decir.
+
+Se agrega también un `.dockerignore`: sin él el contexto de build arrastra
+`data/` (cientos de MB entre Bronze y eval) y `.venv` en cada `docker build`.
+
+**Criterio de aceptación:** el repo clonado en la Linux construye **las dos
+etapas** de la imagen, y `DOCKER=1 make db-migrate && DOCKER=1 make test`
+corren sin que exista un intérprete de Python en el host.
 
 ### Fase 1 — Paquete `src/shared` ✅ COMPLETA (2026-10-08)
 

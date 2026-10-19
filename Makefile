@@ -2,23 +2,47 @@
 	db-up db-down db-logs psql db-config db-destroy db-migrate db-downgrade db-reset db-status
 .DEFAULT_GOAL := help
 
+# ─── Runner: nativo o contenedor ─────────────────────────────────────────────
+# En la workstation Linux NADA corre nativo: no hay uv ni venv en el host, todo
+# pasa por Docker. En la Mac de desarrollo sí se corre nativo.
+#
+#   make test              -> uv run pytest            (Mac)
+#   DOCKER=1 make test     -> docker compose run tools pytest  (Linux)
+#
+# Para no escribir DOCKER=1 en cada comando, en la Linux conviene exportarlo
+# una vez por sesión:  export DOCKER=1
+ifdef DOCKER
+RUN := docker compose run --rm tools
+else
+RUN := uv run
+endif
+
 # Variables
-PYTHON := uv run python
+PYTHON := $(RUN) python
 SILVER_DB := data/silver/mipymes.duckdb
 GOLD_DB := data/gold/mipymes.duckdb
 METADATA_DB := data/metadata.duckdb
-ALEMBIC := uv run alembic
+ALEMBIC := $(RUN) alembic
+PYTEST := $(RUN) pytest
+RUFF := $(RUN) ruff
 
 help: ## Show help
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "DENUE ETL Pipeline"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
 	@echo ""
 
-setup: ## Install dependencies
+setup: ## Install dependencies (nativo); con DOCKER=1 construye las imagenes
+ifdef DOCKER
+	docker compose build etl tools
+else
 	uv sync
+endif
+
+docker-build: ## Construye/reconstruye las imagenes del ETL y de herramientas
+	docker compose build etl tools
 
 api: ## Run FastAPI dev server
 	uv run fastapi dev src/api/main.py
@@ -114,6 +138,14 @@ db-logs: ## Sigue los logs de Postgres
 psql: ## Abre una sesion psql en la base
 	docker compose exec postgres psql -U $${POSTGRES_USER:-etl_rw} -d $${POSTGRES_DB:-mipymes}
 
+db-create-test: ## Crea la base de pruebas (<POSTGRES_DB>_test), idempotente
+	@docker compose exec -T postgres psql -U $${POSTGRES_USER:-etl_rw} -d $${POSTGRES_DB:-mipymes} \
+		-tc "SELECT 1 FROM pg_database WHERE datname = '$${POSTGRES_DB:-mipymes}_test'" \
+		| grep -q 1 \
+		&& echo "La base $${POSTGRES_DB:-mipymes}_test ya existe." \
+		|| docker compose exec -T postgres createdb -U $${POSTGRES_USER:-etl_rw} \
+			"$${POSTGRES_DB:-mipymes}_test" && echo "Base de pruebas lista."
+
 db-config: ## Muestra el tuning efectivo de Postgres (lo que quedo aplicado)
 	@docker compose exec -T postgres psql -U $${POSTGRES_USER:-etl_rw} -d $${POSTGRES_DB:-mipymes} \
 		-c "SELECT name, setting, unit FROM pg_settings WHERE name IN \
@@ -182,32 +214,38 @@ dev: setup ## Setup development
 # ─── Testing ─────────────────────────────────────────────────────────────────
 
 test: ## Run all tests
-	uv run pytest
+	$(PYTEST)
+
+test-postgres: ## Solo los tests marcados `postgres` (requieren servidor)
+	$(PYTEST) -m postgres
+
+smoke-fase3: ## Valida la Fase 3 contra Postgres (particiones, COPY, staging, indices)
+	$(PYTHON) -m scripts.smoke_fase3
 
 test-unit: ## Unit tests (fast)
-	uv run pytest -m unit
+	$(PYTEST) -m unit
 
 test-integration: ## Integration tests (with DB)
-	uv run pytest -m integration
+	$(PYTEST) -m integration
 
 test-db: ## Database tests
-	uv run pytest -m db
+	$(PYTEST) -m db
 
 test-cov: ## Tests with coverage
-	uv run pytest --cov=src --cov-report=html --cov-report=term
+	$(PYTEST) --cov=src --cov-report=html --cov-report=term
 	@echo "Coverage report at: htmlcov/index.html"
 
 test-verbose: ## Tests in verbose mode
-	uv run pytest -vv
+	$(PYTEST) -vv
 
 test-fast: ## Fast tests (unit only, no slow)
-	uv run pytest -m "unit and not slow"
+	$(PYTEST) -m "unit and not slow"
 
 lint: ## Run ruff linter
-	uv run ruff check src/ tests/ scripts/ alembic/
+	$(RUFF) check src/ tests/ scripts/ alembic/
 
 lint-fix: ## Auto-fix lint issues
-	uv run ruff check src/ tests/ scripts/ alembic/ --fix
+	$(RUFF) check src/ tests/ scripts/ alembic/ --fix
 
 format: ## Format code with ruff
-	uv run ruff format src/ tests/ scripts/ alembic/
+	$(RUFF) format src/ tests/ scripts/ alembic/
