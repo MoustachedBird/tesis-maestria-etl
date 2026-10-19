@@ -44,7 +44,16 @@ class Establecimiento(Base):
 
     __tablename__ = "establecimientos"
 
-    # ===== PRIMARY KEY =====
+    # ===== PRIMARY KEY (COMPUESTA: la particion obliga) =====
+    # `period` forma parte de la PK porque PostgreSQL exige que la clave de
+    # particion este contenida en toda PK/UNIQUE de una tabla particionada.
+    #
+    # Esto NO afloja la unicidad real: `id` es un hash del contenido de la
+    # fila, asi que los 82,896,801 ids del Silver son distintos entre si aun
+    # cruzando periodos. Lo que se pierde es la garantia *formal* de que no
+    # pueda repetirse entre periodos, y no hay forma de conservarla --
+    # Postgres tampoco admite un indice unico global que excluya la clave de
+    # particion. Ver arquitectura.md Fase 3.2.
     id: Mapped[str] = mapped_column(
         String, primary_key=True, comment="Unique establishment identifier (hash)"
     )
@@ -191,7 +200,13 @@ class Establecimiento(Base):
     fecha_alta_date: Mapped[Date | None] = mapped_column(
         Date, comment="Registration date in DENUE (YYYY-MM-01) as Date"
     )
-    period: Mapped[date] = mapped_column(Date, index=True, comment="Data period/snapshot date")
+    # Sin `index=True`: es la clave de particion, asi que el planner llega a
+    # la particion correcta por pruning. Un indice sobre `period` dentro de
+    # cada particion seria un indice sobre una columna constante --20 arboles
+    # que mantener en cada escritura masiva para cero selectividad.
+    period: Mapped[date] = mapped_column(
+        Date, primary_key=True, comment="Data period/snapshot date (clave de particion)"
+    )
 
     # ===== CONSTRAINTS & INDEXES =====
     # FKs de geografia como constraints REALES tambien en el ORM (mismo
@@ -233,6 +248,14 @@ class Establecimiento(Base):
         # este bloque generaria un SEGUNDO ART sobre el mismo campo. Asi
         # nacieron ix_estab_clee (clee) e ix_estab_postal (cod_postal),
         # eliminados en la migracion a4000idx.
+        #
+        # Particionado por LIST y no por RANGE: cada corte del DENUE es una
+        # fecha discreta (2015-01-01 ... 2026-05-01, 20 valores), asi que
+        # LIST da exactamente una particion por corte --que es la unidad de
+        # recuperacion que busca arquitectura.md §2.4-- y hace imposible que
+        # dos cortes caigan en la misma particion por un limite mal escrito.
+        # El pruning funciona igual para `period = X` y para rangos.
+        {"postgresql_partition_by": "LIST (period)"},
     )
 
     # ===== RELATIONSHIPS (derivadas de los FKs reales) =====
