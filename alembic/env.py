@@ -141,6 +141,30 @@ def _get_engine() -> Engine:
     return sa_create_engine(settings.DATABASE_URL, poolclass=NullPool, future=True)
 
 
+def _ensure_schemas(connection) -> None:
+    """Crea los tres schemas antes de que Alembic toque nada.
+
+    Huevo y gallina, encontrado en la primera corrida contra una base virgen
+    (2026-10-20): `version_table_schema="meta"` hace que Alembic cree
+    `meta.alembic_version` **antes** de ejecutar migracion alguna, pero el
+    schema `meta` lo creaba el propio baseline en su primer paso. Resultado:
+    `InvalidSchemaName: schema "meta" does not exist` sobre base limpia.
+
+    Los schemas no son contenido de una migracion sino el continente donde
+    viven todas --incluida la tabla de versiones--, asi que su creacion va
+    aqui, antes del `run_migrations`. El `CREATE SCHEMA IF NOT EXISTS` que
+    el baseline todavia hace queda redundante pero inofensivo.
+
+    Args:
+        connection: conexion abierta sobre la que correran las migraciones.
+    """
+    from sqlalchemy import text
+
+    for schema in SCHEMAS:
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+    connection.commit()
+
+
 def run_migrations_online() -> None:
     """
     Run migrations in 'online' mode.
@@ -153,6 +177,8 @@ def run_migrations_online() -> None:
     connectable = _get_engine()
 
     with connectable.connect() as connection:
+        _ensure_schemas(connection)
+
         config_dict = {
             "connection": connection,
             "target_metadata": target_metadata,
