@@ -12,8 +12,7 @@ Los parquet de `data/seeds` son la fuente de verdad de los catalogos, asi que
 un archivo mal formado (id repetido, etiqueta duplicada, columna obligatoria
 en NULL) es un error de datos que debe detenerse EN LA MIGRACION, con un
 mensaje que diga archivo, columna y valores ofensores — no convertirse en un
-error criptico de constraint a media carga, ni peor: desaparecer en silencio
-porque la siembra usa INSERT OR IGNORE.
+error criptico de constraint a media carga, ni peor: pasar inadvertido.
 
 Las restricciones NO se declaran aqui: se leen del modelo ORM
 (`Base.metadata`), que es la definicion canonica del esquema. Asi esta
@@ -193,30 +192,11 @@ def read_seed(
 # ---------------------------------------------------------------------------
 
 
-def seed_duckdb(conn, table_name: str, df: pl.DataFrame) -> int:
-    """
-    Siembra via conexion DuckDB nativa; idempotente y append-only.
-
-    `INSERT OR IGNORE` por PK: inserta solo lo que falta y nunca dropea ni
-    trunca (los catalogos estan referenciados por FKs de las tablas de
-    hechos, que bloquearian un DELETE).
-
-    Returns:
-        Numero de filas efectivamente insertadas.
-    """
-    cols = df.columns
-    placeholders = ", ".join(["?"] * len(cols))
-    return conn.executemany(
-        f"INSERT OR IGNORE INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})",
-        df.rows(),
-    ).fetchone()[0]
-
-
-def seed_sqlalchemy(
+def seed_table(
     connection, table_name: str, df: pl.DataFrame, truncate: bool = True
 ) -> int:
     """
-    Siembra via conexion SQLAlchemy (migraciones Alembic).
+    Siembra un catalogo.
 
     Las sentencias se construyen desde el objeto `Table` del modelo, no
     como texto: el schema, el entrecomillado y el bindeo de parametros los

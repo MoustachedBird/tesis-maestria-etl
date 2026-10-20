@@ -11,7 +11,7 @@ from pathlib import Path
 
 import polars as pl
 
-from src.etl.loaders.seeds import read_seed, seed_duckdb, seed_sqlalchemy
+from src.etl.loaders.seeds import read_seed, seed_table
 
 SEED_FILE = "seed_actividades.parquet"
 TABLE_NAME = "denue_actividades_economicas"
@@ -31,17 +31,10 @@ def build_rows(seeds_dir: Path | None = None) -> list[dict]:
     return read_seed(TABLE_NAME, SEED_FILE, seeds_dir, transform=_with_scian_hierarchy).to_dicts()
 
 
-def load_seeds(conn, seeds_dir: Path | None = None, force: bool = False) -> dict[str, int]:
-    """Siembra el catalogo via DuckDB nativo (bootstrap del ingest)."""
-    df = read_seed(TABLE_NAME, SEED_FILE, seeds_dir, transform=_with_scian_hierarchy)
-    seed_duckdb(conn, TABLE_NAME, df)
-    return {TABLE_NAME: df.height}
-
-
-def load_seeds_sqlalchemy(
+def load_seeds(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
     """Siembra el catalogo via SQLAlchemy (migraciones Alembic)."""
     df = read_seed(TABLE_NAME, SEED_FILE, seeds_dir, transform=_with_scian_hierarchy)
-    seed_sqlalchemy(connection, TABLE_NAME, df, truncate=truncate)
+    seed_table(connection, TABLE_NAME, df, truncate=truncate)
     return {TABLE_NAME: df.height}

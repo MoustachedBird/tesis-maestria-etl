@@ -14,7 +14,7 @@ eso son append-only. La carga y validacion las hace `loaders/seeds.py`
 from pathlib import Path
 
 from src.etl.loaders import seeds
-from src.etl.loaders.seeds import read_seed, seed_duckdb, seed_sqlalchemy
+from src.etl.loaders.seeds import read_seed, seed_table
 
 # (tabla, columna label) de cada catalogo de dominio, en orden de carga.
 TABLES = [
@@ -40,23 +40,13 @@ def build_rows(seeds_dir: Path | None = None) -> dict[str, list[dict]]:
     }
 
 
-def load_seeds(conn, seeds_dir: Path | None = None, force: bool = False) -> dict[str, int]:
-    """Siembra los catalogos via DuckDB nativo (bootstrap del ingest)."""
-    stats: dict[str, int] = {}
-    for table, _label in TABLES:
-        df = read_seed(table, SEED_FILES[table], seeds_dir)
-        seed_duckdb(conn, table, df)
-        stats[table] = df.height
-    return stats
-
-
-def load_seeds_sqlalchemy(
+def load_seeds(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
-    """Siembra los catalogos via SQLAlchemy (migraciones Alembic)."""
+    """Siembra los catalogos del modulo."""
     stats: dict[str, int] = {}
     for table, _label in TABLES:
         df = read_seed(table, SEED_FILES[table], seeds_dir)
-        seed_sqlalchemy(connection, table, df, truncate=truncate)
+        seed_table(connection, table, df, truncate=truncate)
         stats[table] = df.height
     return stats

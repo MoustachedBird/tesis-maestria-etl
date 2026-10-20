@@ -13,7 +13,7 @@ el catalogo es append-only.
 from pathlib import Path
 
 from src.etl.loaders import seeds
-from src.etl.loaders.seeds import read_seed, seed_duckdb, seed_sqlalchemy
+from src.etl.loaders.seeds import read_seed, seed_table
 
 TABLE_NAME = "denue_estratos_personal"
 SEED_FILE = "seed_estratos_personal.parquet"
@@ -29,17 +29,10 @@ def build_rows(seeds_dir: Path | None = None) -> list[dict]:
     return read_seed(TABLE_NAME, SEED_FILE, seeds_dir).to_dicts()
 
 
-def load_seeds(conn, seeds_dir: Path | None = None, force: bool = False) -> dict[str, int]:
-    """Siembra el catalogo via DuckDB nativo (bootstrap del ingest)."""
-    df = read_seed(TABLE_NAME, SEED_FILE, seeds_dir)
-    seed_duckdb(conn, TABLE_NAME, df)
-    return {TABLE_NAME: df.height}
-
-
-def load_seeds_sqlalchemy(
+def load_seeds(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
     """Siembra el catalogo via SQLAlchemy (migraciones Alembic)."""
     df = read_seed(TABLE_NAME, SEED_FILE, seeds_dir)
-    seed_sqlalchemy(connection, TABLE_NAME, df, truncate=truncate)
+    seed_table(connection, TABLE_NAME, df, truncate=truncate)
     return {TABLE_NAME: df.height}

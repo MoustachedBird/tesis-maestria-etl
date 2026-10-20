@@ -8,7 +8,7 @@ el mapeo archivo -> tabla, en orden de dependencia de FKs.
 
 from pathlib import Path
 
-from src.etl.loaders.seeds import read_seed, seed_duckdb, seed_sqlalchemy
+from src.etl.loaders.seeds import read_seed, seed_table
 
 # (archivo seed, tabla), en orden de FKs: entidades <- municipios <- localidades.
 SEED_MAPPINGS = [
@@ -24,23 +24,13 @@ def build_rows(seeds_dir: Path | None = None) -> dict[str, list[dict]]:
     return {table: read_seed(table, f, seeds_dir).to_dicts() for f, table in SEED_MAPPINGS}
 
 
-def load_seeds(conn, seeds_dir: Path | None = None, force: bool = False) -> dict[str, int]:
-    """Siembra los catalogos via DuckDB nativo (bootstrap del ingest)."""
-    stats: dict[str, int] = {}
-    for file_name, table in SEED_MAPPINGS:
-        df = read_seed(table, file_name, seeds_dir)
-        seed_duckdb(conn, table, df)
-        stats[table] = df.height
-    return stats
-
-
-def load_seeds_sqlalchemy(
+def load_seeds(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
-    """Siembra los catalogos via SQLAlchemy (migraciones Alembic)."""
+    """Siembra los catalogos del modulo."""
     stats: dict[str, int] = {}
     for file_name, table in SEED_MAPPINGS:
         df = read_seed(table, file_name, seeds_dir)
-        seed_sqlalchemy(connection, table, df, truncate=truncate)
+        seed_table(connection, table, df, truncate=truncate)
         stats[table] = df.height
     return stats

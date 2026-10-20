@@ -211,13 +211,16 @@ class TestIngestDomainGuard:
         engine = create_engine(f"duckdb:///{db}")
         names = [t for t, *_ in DOM_TABLES] + [EST_TABLE]
         Base.metadata.create_all(engine, tables=[get_table(n) for n in names])
+        with engine.begin() as seeding:
+            load_dominios_seeds(seeding)
+            load_estratos_seeds(seeding)
         engine.dispose()
 
+        # `validate_integrity` consulta los catalogos con SQL propio del
+        # writer, que todavia espera una conexion nativa.
         writer = EstablecimientoWriter(db)
         conn = duckdb.connect(str(db))
         conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")
-        load_dominios_seeds(conn)
-        load_estratos_seeds(conn)
         return writer, conn
 
     def test_rejects_out_of_domain_value(self, tmp_path):

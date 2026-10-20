@@ -122,10 +122,10 @@ def _tables(metadata, schema: str, names: list[str]) -> list:
 
 def upgrade() -> None:
     """Crea los schemas, las tablas de silver y meta, el rol de lectura y siembra."""
-    from src.etl.loaders.dominios import load_seeds_sqlalchemy as load_dominios
-    from src.etl.loaders.estratos import load_seeds_sqlalchemy as load_estratos
-    from src.etl.loaders.geography import load_seeds_sqlalchemy as load_geografia
-    from src.etl.loaders.scian import load_seeds_sqlalchemy as load_scian
+    from src.etl.loaders.dominios import load_seeds as load_dominios
+    from src.etl.loaders.estratos import load_seeds as load_estratos
+    from src.etl.loaders.geography import load_seeds as load_geografia
+    from src.etl.loaders.scian import load_seeds as load_scian
     from src.shared.config import settings
     from src.shared.db.base import SCHEMAS, Base
     from src.shared.db.models import meta, silver  # noqa: F401  (registra el metadata)

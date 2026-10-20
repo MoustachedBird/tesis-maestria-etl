@@ -30,7 +30,7 @@ import duckdb
 import polars as pl
 
 from src.etl.loaders import seeds
-from src.etl.loaders.seeds import read_seed, seed_sqlalchemy
+from src.etl.loaders.seeds import read_seed, seed_table
 
 SESNSP_DELITOS_DDL = """
 CREATE TABLE IF NOT EXISTS sesnsp_delitos (
@@ -92,12 +92,12 @@ def build_delitos_rows(seeds_dir: Path | None = None) -> list[dict]:
     return read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir).to_dicts()
 
 
-def load_seeds_sqlalchemy(
+def load_seeds(
     connection, seeds_dir: Path | None = None, truncate: bool = True
 ) -> dict[str, int]:
     """Siembra `sesnsp_delitos` desde el parquet (entry point de la migracion)."""
     df = read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir)
-    seed_sqlalchemy(connection, DELITOS_TABLE, df, truncate=truncate)
+    seed_table(connection, DELITOS_TABLE, df, truncate=truncate)
     return {DELITOS_TABLE: df.height}
 
 
