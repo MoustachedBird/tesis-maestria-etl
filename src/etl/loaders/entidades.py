@@ -27,12 +27,11 @@ Decisiones de diseno:
 
 from pathlib import Path
 
-import duckdb
+from sqlalchemy import Engine, delete, func, select, text
+from sqlalchemy.engine import Connection
 
-from src.etl.utils.backup import backup_warehouse
-from src.etl.utils.warehouse import connect_configured
 from src.meta.tracker import MetadataTracker
-from src.shared.config import settings
+from src.shared.db.base import get_table
 from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
@@ -41,38 +40,14 @@ logger = get_stage_logger(__name__, Path("./data/etl_entidades.log"))
 TABLE_NAME = "entidades_economicas"
 """Nombre de la tabla dimension en Silver (Gold la hereda en make load)."""
 
-ENTIDADES_DDL = """
-CREATE TABLE IF NOT EXISTS entidades_economicas (
-    clee_propagado_radio VARCHAR PRIMARY KEY,
-    es_sintetica BOOLEAN NOT NULL,
-    nom_estab VARCHAR,
-    raz_social VARCHAR,
-    codigo_act VARCHAR,
-    cve_ent VARCHAR,
-    cve_mun VARCHAR,
-    cod_postal VARCHAR,
-    latitud DOUBLE,
-    longitud DOUBLE,
-    h3_cell_9 BIGINT,
-    primer_periodo DATE NOT NULL,
-    ultimo_periodo DATE NOT NULL,
-    n_periodos INTEGER NOT NULL,
-    fecha_alta_date DATE
-)
-"""
-"""DDL de la dimension (N3, todo.md): PK = identidad resuelta; atributos
-del periodo mas reciente; `es_sintetica` marca los NEW_* (negocios sin
-match — nuevos o desaparecidos); `fecha_alta_date` es la MINIMA conocida
-entre las observaciones (alta mas antigua reportada a INEGI)."""
-
 BUILD_SQL = """
-INSERT INTO entidades_economicas
+INSERT INTO silver.entidades_economicas
 WITH obs AS (
     SELECT
         clee_propagado_radio, id, period, nom_estab, raz_social,
         codigo_act, cve_ent, cve_mun, cod_postal, latitud, longitud,
         h3_cell_9, fecha_alta_date
-    FROM establecimientos
+    FROM silver.establecimientos
     WHERE clee_propagado_radio IS NOT NULL AND clee_propagado_radio != ''
 ),
 vida AS (
@@ -107,26 +82,28 @@ del periodo mas reciente (rn=1, desempate por id); el rango de vida y la
 fecha de alta vienen del agregado por identidad."""
 
 
-def build_entidades_economicas(conn: duckdb.DuckDBPyConnection) -> int:
+def build_entidades_economicas(conn: Connection) -> int:
     """
-    (Re)construye la dimension completa en la conexion dada.
+    (Re)construye la dimension completa sobre la conexion dada.
 
-    DROP + CREATE + INSERT en una transaccion: la tabla queda consistente
-    o intacta. Ver docstring del modulo para por que el rebuild es total.
+    DELETE + INSERT, no DROP + CREATE: la tabla y sus indices los define la
+    migracion, asi que dropearla la recrearia sin ellos. El llamador abre la
+    transaccion, de modo que la tabla queda consistente o intacta.
+
+    El rebuild es total y no incremental porque los ids `NEW_*` no son
+    estables entre re-resoluciones: una identidad sintetica de hoy puede ser
+    otra manana, asi que actualizar en sitio dejaria filas huerfanas.
+
+    Args:
+        conn: conexion con transaccion abierta.
 
     Returns:
-        Numero de entidades (filas) construidas.
+        int: identidades construidas.
     """
-    conn.execute("BEGIN TRANSACTION")
-    try:
-        conn.execute(f"DROP TABLE IF EXISTS {TABLE_NAME}")
-        conn.execute(ENTIDADES_DDL)
-        conn.execute(BUILD_SQL)
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    return conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}").fetchone()[0]
+    tabla = get_table(TABLE_NAME)
+    conn.execute(delete(tabla))
+    conn.execute(text(BUILD_SQL))
+    return conn.execute(select(func.count()).select_from(tabla)).scalar_one()
 
 
 class EntidadesDimensionBuilder:
@@ -148,17 +125,26 @@ class EntidadesDimensionBuilder:
         self,
         data_root: Path,
         tracker: MetadataTracker | None = None,
-        silver_db_path: Path | None = None,
+        engine: Engine | None = None,
     ):
         """
         Args:
             data_root: Raiz de datos.
             tracker: MetadataTracker; por default, uno nuevo.
-            silver_db_path: Silver DuckDB (default: settings).
+            engine: conexion a la base; por default la del proyecto.
         """
         self.data_root = Path(data_root)
         self.tracker = tracker or MetadataTracker()
-        self.warehouse_path = Path(silver_db_path or settings.SILVER_DUCKDB_PATH)
+        self._engine = engine
+
+    @property
+    def engine(self) -> Engine:
+        """Engine de la base, resuelto la primera vez que se usa."""
+        if self._engine is None:
+            from src.shared.db.session import get_engine
+
+            self._engine = get_engine()
+        return self._engine
 
     def run(self) -> bool:
         """
@@ -177,26 +163,27 @@ class EntidadesDimensionBuilder:
         task_id = self.tracker.create_process_task(
             run_id=run_id,
             task_name=TABLE_NAME,
-            source_path=str(self.warehouse_path),
+            source_path="silver.establecimientos",
             target_table=TABLE_NAME,
         )
         self.tracker.start_process_task(task_id)
         logger.info(f"📦 Construyendo dimension {TABLE_NAME}...")
-        backup_warehouse(self.warehouse_path, stage="build-entidades")
-
-        conn = connect_configured(self.warehouse_path)
         try:
-            rows = build_entidades_economicas(conn)
-            sinteticas = conn.execute(
-                f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE es_sintetica"
-            ).fetchone()[0]
+            # Una transaccion para el DELETE y el INSERT: la dimension queda
+            # construida o intacta, nunca a medias.
+            with self.engine.begin() as conn:
+                rows = build_entidades_economicas(conn)
+                tabla = get_table(TABLE_NAME)
+                sinteticas = conn.execute(
+                    select(func.count()).select_from(tabla).where(tabla.c.es_sintetica)
+                ).scalar_one()
 
             self.tracker.complete_process_task(task_id, TaskStatus.SUCCESS, rows_loaded=rows)
             self.tracker.record_lineage(
                 run_id=run_id,
                 task_id=task_id,
-                source_location=f"{self.warehouse_path}::establecimientos",
-                target_location=f"{self.warehouse_path}::{TABLE_NAME}",
+                source_location="silver.establecimientos",
+                target_location=f"silver.{TABLE_NAME}",
                 source_type="TABLE",
                 target_type="TABLE",
             )
@@ -219,5 +206,3 @@ class EntidadesDimensionBuilder:
             self.tracker.complete_process_task(task_id, TaskStatus.FAILED, error_message=str(e))
             self.tracker.complete_run(run_id, JobStatus.FAILED, error_summary=str(e))
             return False
-        finally:
-            conn.close()

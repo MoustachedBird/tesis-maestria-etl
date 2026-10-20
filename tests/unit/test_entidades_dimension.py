@@ -1,96 +1,122 @@
-"""Tests for the entidades_economicas dimension builder (N3)."""
+"""La dimension N3: de observaciones por periodo a una fila por identidad.
 
-import duckdb
+`entidades_economicas` colapsa las ~82.9M observaciones en un negocio por
+identidad resuelta, con su ventana de vida. Lo que se prueba es el colapso:
+que cada identidad quede una vez, que los atributos sean los del periodo mas
+reciente y que la ventana cubra todas sus apariciones.
+"""
+
+from datetime import date
+
+import polars as pl
 import pytest
+from sqlalchemy import func, select
 
 from src.etl.loaders.entidades import TABLE_NAME, build_entidades_economicas
+from src.shared.db.base import get_table
+from src.shared.db.copy import copy_dataframe
+from src.shared.db.partitions import create_partition
+
+pytestmark = pytest.mark.postgres
+
+#: Cortes del escenario. El negocio con CLEE aparece en los tres.
+CORTES = [date(2019, 11, 1), date(2021, 5, 1), date(2022, 11, 1), date(2016, 1, 1)]
+
+#: Un negocio visto en 3 cortes (con mudanza de CP en el ultimo), uno
+#: sintetico visto una vez, y una fila sin resolver que debe quedar fuera.
+OBSERVACIONES = [
+    ("a1", "14TAC123", date(2019, 11, 1), "TACOS EL GUERO", "44100", date(2010, 7, 1)),
+    ("a2", "14TAC123", date(2021, 5, 1), "TACOS EL GUERO", "44100", date(2010, 7, 1)),
+    ("a3", "14TAC123", date(2022, 11, 1), "TACOS EL GUERO SA", "44200", date(2009, 1, 1)),
+    ("b1", "NEW_14H3-abc", date(2016, 1, 1), "MISCELANEA LUPITA", "45500", date(2015, 3, 1)),
+    ("c1", None, date(2016, 1, 1), "SIN RESOLVER", "45500", date(2015, 4, 1)),
+]
 
 
-def _make_observations(conn: duckdb.DuckDBPyConnection) -> None:
-    """Tabla establecimientos minima (solo columnas que consume el builder).
-
-    Escenario: un negocio con CLEE visto en 3 periodos (con mudanza de CP
-    en el ultimo), uno sintetico NEW_* visto una vez, y una fila sin
-    resolver (clee NULL) que debe quedar fuera.
-    """
-    conn.execute("""
-        CREATE TABLE establecimientos (
-            id VARCHAR, clee_propagado_radio VARCHAR, period DATE,
-            nom_estab VARCHAR, raz_social VARCHAR, codigo_act VARCHAR,
-            cve_ent VARCHAR, cve_mun VARCHAR, cod_postal VARCHAR,
-            latitud DOUBLE, longitud DOUBLE, h3_cell_9 BIGINT,
-            fecha_alta_date DATE
+@pytest.fixture
+def conn(silver_engine):
+    """Conexion con las observaciones del escenario ya cargadas."""
+    with silver_engine.begin() as conn:
+        for corte in CORTES:
+            create_partition(conn, corte)
+        copy_dataframe(
+            conn,
+            pl.DataFrame(
+                OBSERVACIONES,
+                schema={
+                    "id": pl.Utf8,
+                    "clee_propagado_radio": pl.Utf8,
+                    "period": pl.Date,
+                    "nom_estab": pl.Utf8,
+                    "cod_postal": pl.Utf8,
+                    "fecha_alta_date": pl.Date,
+                },
+                orient="row",
+            ),
+            "establecimientos",
         )
-    """)
-    conn.execute("""
-        INSERT INTO establecimientos VALUES
-        ('a1', '14TAC123', DATE '2019-11-01', 'TACOS EL GUERO', 'GUERO SA',
-         '722514', '14', '039', '44100', 20.66, -103.35, 617700169958293503,
-         DATE '2010-07-01'),
-        ('a2', '14TAC123', DATE '2021-05-01', 'TACOS EL GUERO', 'GUERO SA',
-         '722514', '14', '039', '44100', 20.66, -103.35, 617700169958293503,
-         DATE '2010-07-01'),
-        ('a3', '14TAC123', DATE '2022-11-01', 'TACOS EL GUERO SA', 'GUERO SA',
-         '722514', '14', '039', '44200', 20.67, -103.36, 617700169958293504,
-         DATE '2009-01-01'),
-        ('b1', 'NEW_14H3-abc123', DATE '2016-01-01', 'MISCELANEA LUPITA', NULL,
-         '461110', '14', '120', '45500', 20.50, -103.20, 617700169958290000,
-         DATE '2015-03-01'),
-        ('c1', NULL, DATE '2016-01-01', 'SIN RESOLVER', NULL,
-         '461110', '14', '120', '45500', 20.51, -103.21, 617700169958290001,
-         DATE '2015-04-01')
-    """)
+        yield conn
 
 
-@pytest.mark.unit
-class TestBuildEntidadesEconomicas:
-    """build_entidades_economicas(): agregacion observaciones -> dimension."""
+def dimension(conn):
+    """La dimension como lista de diccionarios, ordenada por identidad."""
+    tabla = get_table(TABLE_NAME)
+    filas = conn.execute(select(tabla).order_by(tabla.c.clee_propagado_radio)).mappings()
+    return [dict(f) for f in filas]
 
-    def _build(self) -> duckdb.DuckDBPyConnection:
-        """Construye la dimension sobre el escenario minimo."""
-        conn = duckdb.connect()
-        _make_observations(conn)
+
+class TestColapso:
+    def test_una_fila_por_identidad(self, conn):
         assert build_entidades_economicas(conn) == 2
-        return conn
-
-    def test_one_row_per_identity_and_null_excluded(self):
-        conn = self._build()
-        ids = [
-            r[0]
-            for r in conn.execute(
-                f"SELECT clee_propagado_radio FROM {TABLE_NAME} ORDER BY 1"
-            ).fetchall()
+        assert [f["clee_propagado_radio"] for f in dimension(conn)] == [
+            "14TAC123",
+            "NEW_14H3-abc",
         ]
-        assert ids == ["14TAC123", "NEW_14H3-abc123"]
 
-    def test_lifespan_and_most_recent_attributes(self):
-        conn = self._build()
-        row = conn.execute(
-            f"""SELECT primer_periodo, ultimo_periodo, n_periodos, cod_postal,
-                       nom_estab, fecha_alta_date, es_sintetica
-                FROM {TABLE_NAME} WHERE clee_propagado_radio = '14TAC123'"""
-        ).fetchone()
-        primer, ultimo, n, cp, nom, alta, sintetica = row
-        assert (primer.isoformat(), ultimo.isoformat(), n) == ("2019-11-01", "2022-11-01", 3)
-        # Atributos del periodo MAS RECIENTE (la mudanza de CP de 2022 gana)
-        assert cp == "44200"
-        assert nom == "TACOS EL GUERO SA"
-        # fecha_alta_date = la MINIMA conocida entre observaciones
-        assert alta.isoformat() == "2009-01-01"
-        assert sintetica is False
+    def test_las_observaciones_sin_resolver_quedan_fuera(self, conn):
+        """Una fila sin identidad no es un negocio: no puede ser una fila."""
+        build_entidades_economicas(conn)
+        assert "SIN RESOLVER" not in [f["nom_estab"] for f in dimension(conn)]
 
-    def test_synthetic_flag(self):
-        conn = self._build()
-        assert conn.execute(
-            f"SELECT es_sintetica FROM {TABLE_NAME} WHERE clee_propagado_radio LIKE 'NEW_%'"
-        ).fetchone() == (True,)
+    def test_la_ventana_de_vida_cubre_todas_sus_apariciones(self, conn):
+        build_entidades_economicas(conn)
+        negocio = dimension(conn)[0]
+        assert negocio["primer_periodo"] == date(2019, 11, 1)
+        assert negocio["ultimo_periodo"] == date(2022, 11, 1)
+        assert negocio["n_periodos"] == 3
 
-    def test_rebuild_is_idempotent(self):
-        conn = self._build()
-        assert build_entidades_economicas(conn) == 2  # rebuild total, sin duplicados
 
-    def test_empty_resolution_yields_empty_dimension(self):
-        conn = duckdb.connect()
-        _make_observations(conn)
-        conn.execute("UPDATE establecimientos SET clee_propagado_radio = NULL")
+class TestAtributos:
+    def test_gana_el_periodo_mas_reciente(self, conn):
+        """Si un negocio se mudo, la dimension debe tener la direccion nueva."""
+        build_entidades_economicas(conn)
+        negocio = dimension(conn)[0]
+        assert negocio["cod_postal"] == "44200"
+        assert negocio["nom_estab"] == "TACOS EL GUERO SA"
+
+    def test_la_fecha_de_alta_es_la_minima_conocida(self, conn):
+        """Es el alta mas antigua que INEGI reporto, no la del ultimo corte."""
+        build_entidades_economicas(conn)
+        assert dimension(conn)[0]["fecha_alta_date"] == date(2009, 1, 1)
+
+    def test_las_identidades_sinteticas_quedan_marcadas(self, conn):
+        """Los NEW_* son negocios sin match: el analisis debe distinguirlos."""
+        build_entidades_economicas(conn)
+        por_id = {f["clee_propagado_radio"]: f for f in dimension(conn)}
+        assert por_id["14TAC123"]["es_sintetica"] is False
+        assert por_id["NEW_14H3-abc"]["es_sintetica"] is True
+
+
+class TestRebuild:
+    def test_reconstruir_no_duplica(self, conn):
+        """Es rebuild total porque los ids NEW_* no son estables."""
+        build_entidades_economicas(conn)
+        assert build_entidades_economicas(conn) == 2
+
+    def test_sin_identidades_resueltas_la_dimension_queda_vacia(self, conn):
+        estab = get_table("establecimientos")
+        conn.execute(estab.update().values(clee_propagado_radio=None))
         assert build_entidades_economicas(conn) == 0
+        assert conn.execute(
+            select(func.count()).select_from(get_table(TABLE_NAME))
+        ).scalar_one() == 0
