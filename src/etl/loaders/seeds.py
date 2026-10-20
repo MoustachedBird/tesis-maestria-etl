@@ -23,7 +23,7 @@ validacion no puede desincronizarse de la tabla que valida.
 from pathlib import Path
 
 import polars as pl
-from sqlalchemy import UniqueConstraint, text
+from sqlalchemy import UniqueConstraint, delete, insert, select
 
 
 def _table(table_name: str):
@@ -212,43 +212,23 @@ def seed_duckdb(conn, table_name: str, df: pl.DataFrame) -> int:
     ).fetchone()[0]
 
 
-def _qualified(table_name: str) -> str:
-    """Nombre calificado con su schema, tomado del modelo ORM.
-
-    El SQL de siembra iba sin calificar y en DuckDB resolvia por el
-    `SET schema='silver'` de `connect_configured`. En PostgreSQL el
-    `search_path` por default es `"$user", public`, asi que
-    `SELECT ... FROM denue_entidades` no encuentra nada aunque
-    `silver.denue_entidades` exista --que es como fallo la primera
-    migracion contra una base real (2026-10-20).
-
-    El schema sale del metadata y no de una constante para que no pueda
-    divergir del modelo, y para no tener que reintroducir un `SET
-    search_path`: calificar es justamente lo que permite retirar ese
-    andamio (arquitectura.md §Fase 2, "tres andamios de transicion").
-
-    Args:
-        table_name: nombre sin calificar, p. ej. `denue_entidades`.
-
-    Returns:
-        str: p. ej. `"silver"."denue_entidades"`.
-    """
-    table = _table(table_name)
-    return f'"{table.schema}"."{table.name}"'
-
-
 def seed_sqlalchemy(
     connection, table_name: str, df: pl.DataFrame, truncate: bool = True
 ) -> int:
     """
     Siembra via conexion SQLAlchemy (migraciones Alembic).
 
+    Las sentencias se construyen desde el objeto `Table` del modelo, no
+    como texto: el schema, el entrecomillado y el bindeo de parametros los
+    resuelve SQLAlchemy a partir de la misma definicion canonica que crea
+    la tabla, asi que no pueden divergir de ella.
+
     Solo reescribe cuando el contenido de la tabla difiere del parquet, de
     modo que re-aplicar la migracion no toca filas que ya estan bien.
 
     Args:
         connection: SQLAlchemy connection.
-        table_name: Tabla destino, sin calificar (se resuelve su schema).
+        table_name: Tabla destino.
         df: Filas ya validadas.
         truncate: Si True, vacia la tabla antes de reescribir en caso de
             diferencia.
@@ -256,16 +236,13 @@ def seed_sqlalchemy(
     Returns:
         Numero de filas del catalogo.
     """
-    cols = df.columns
-    target = _qualified(table_name)
-    existing = connection.execute(text(f"SELECT {', '.join(cols)} FROM {target}")).fetchall()
-    if [tuple(r) for r in existing] != df.rows():
+    table = _table(table_name)
+    columns = [table.c[name] for name in df.columns]
+
+    existing = connection.execute(select(*columns)).fetchall()
+    if [tuple(row) for row in existing] != df.rows():
         if truncate:
-            connection.execute(text(f"DELETE FROM {target}"))
-        params = ", ".join(f":{c}" for c in cols)
-        connection.execute(
-            text(f"INSERT INTO {target} ({', '.join(cols)}) VALUES ({params})"),
-            df.to_dicts(),
-        )
+            connection.execute(delete(table))
+        connection.execute(insert(table), df.to_dicts())
         print(f"   Loaded {df.height:,} rows into {table_name}")
     return df.height
