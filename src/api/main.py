@@ -12,8 +12,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from src.api.routers import ops
 from src.shared.config import get_settings
-from src.shared.db import init_db
 from src.shared.db.dependencies import AppSettings, DbSession
 
 
@@ -25,18 +25,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Handles startup and shutdown events for the FastAPI application.
     On startup, it initializes the database tables if they don't exist.
     """
-    # Startup: Initialize database
+    # El esquema lo crea la migracion, no el API: `init_db()` aqui lo
+    # construiria saltandose Alembic, y con el rol de solo lectura al que
+    # este servicio debe correr ni siquiera tendria permiso.
     settings = get_settings()
-    print("🚀 Starting API (PostgreSQL)")
-    print(f"📊 Database URL: {settings.DATABASE_URL}")
-
-    # Create tables if they don't exist (for development)
-    # In production, use Alembic migrations instead
-    try:
-        init_db()
-        print("✅ Database initialized")
-    except Exception as e:
-        print(f"⚠️  Database initialization warning: {e}")
+    print(f"API arriba contra {settings.POSTGRES_DB}")
 
     yield
 
@@ -79,8 +72,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Include routers
-    # app.include_router(establecimientos_router, prefix=f"{settings.API_PREFIX}/establecimientos")
+    app.include_router(ops.router, prefix=settings.API_PREFIX)
 
     return app
 

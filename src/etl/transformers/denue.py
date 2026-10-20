@@ -47,6 +47,7 @@ class DenuePipelineOrchestrator:
         data_root: Path,
         silver_db_path: Path | None = None,
         gold_db_path: Path | None = None,
+        tracker: MetadataTracker | None = None,
     ):
         """
         Initialize unified transformer.
@@ -55,10 +56,12 @@ class DenuePipelineOrchestrator:
             data_root: Root data directory
             silver_db_path: Path to Silver DuckDB (default: from settings)
             gold_db_path: Path to Gold DuckDB (default: from settings)
+            tracker: MetadataTracker; por default, uno nuevo. Igual que en
+                el resto de componentes, se inyecta en los tests.
         """
         self.data_root = Path(data_root)
 
-        self.tracker = MetadataTracker()
+        self.tracker = tracker or MetadataTracker()
 
         # Resolve paths (validators guarantee non-None, assert for type checker)
         resolved_silver = Path(silver_db_path) if silver_db_path else settings.SILVER_DUCKDB_PATH

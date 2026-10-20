@@ -16,6 +16,7 @@ corrida.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import polars as pl
@@ -150,15 +151,21 @@ def probar_carga(engine) -> None:
         ).scalar_one()
         check(total == ROWS * len(PERIODS), f"la tabla padre ve {total} filas")
 
-        # El pruning: una consulta por periodo debe tocar una sola particion.
-        plan = conn.execute(
-            text(
-                "EXPLAIN SELECT COUNT(*) FROM silver.establecimientos "
-                f"WHERE period = DATE '{PERIODS[0].isoformat()}'"
-            )
-        ).scalars().all()
-        tocadas = [ln for ln in plan if "establecimientos_" in ln]
-        check(len(tocadas) == 1, f"pruning: la consulta toca 1 particion ({len(tocadas)})")
+        # El pruning: una consulta por periodo debe tocar una sola
+        # particion. Se extraen los nombres de particion del plan con un
+        # patron exacto y no buscando un substring: los nombres de indice
+        # tambien contienen "establecimientos_" y darian falsos positivos.
+        plan = "\n".join(
+            conn.execute(
+                text(
+                    "EXPLAIN SELECT COUNT(*) FROM silver.establecimientos "
+                    f"WHERE period = DATE '{PERIODS[0].isoformat()}'"
+                )
+            ).scalars()
+        )
+        tocadas = set(re.findall(r"\bestablecimientos_\d{4}_\d{2}\b", plan))
+        esperada = {partition_name(PERIODS[0])}
+        check(tocadas == esperada, f"pruning: el plan toca solo {esperada}; toco {tocadas}")
 
 
 def probar_nulls(engine) -> None:

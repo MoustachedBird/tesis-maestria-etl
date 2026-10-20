@@ -52,6 +52,45 @@ def qualified_partition(period: date, schema: str = DEFAULT_SCHEMA) -> str:
     return f'"{schema}"."{partition_name(period)}"'
 
 
+def create_partition(
+    conn: Connection,
+    period: date,
+    schema: str = DEFAULT_SCHEMA,
+    if_not_exists: bool = True,
+) -> str:
+    """Crea una particion vacia, ya enganchada a la tabla padre.
+
+    El camino normal del ingest NO pasa por aqui: `staging.py` carga fuera y
+    engancha la tabla ya llena, que es lo que hace la operacion atomica.
+    Esto es para cuando hace falta la particion antes de tener filas --un
+    INSERT suelto sobre un corte nuevo falla con "no partition of relation
+    found for row", porque PostgreSQL no las crea al vuelo.
+
+    Idempotente por default.
+
+    Args:
+        conn: conexion con permisos de DDL.
+        period: fecha del corte.
+        schema: schema de la tabla particionada.
+        if_not_exists: si False, falla cuando la particion ya existe.
+
+    Returns:
+        str: nombre de la particion.
+    """
+    exists_clause = "IF NOT EXISTS " if if_not_exists else ""
+    # El limite va como literal y no como parametro: PostgreSQL no admite
+    # bind params en el DDL de particiones. El valor es un `date`, asi que
+    # su representacion ISO es segura por construccion.
+    conn.execute(
+        text(
+            f"CREATE TABLE {exists_clause}{qualified_partition(period, schema)} "
+            f'PARTITION OF "{schema}"."{PARTITIONED_TABLE}" '
+            f"FOR VALUES IN (DATE '{period.isoformat()}')"
+        )
+    )
+    return partition_name(period)
+
+
 def detach_partition(conn: Connection, period: date, schema: str = DEFAULT_SCHEMA) -> None:
     """Desengancha la particion de un corte sin borrar sus datos.
 

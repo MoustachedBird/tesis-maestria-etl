@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
-from src.shared.db.base import DEFAULT_SCHEMA, Base, tables_for
+from src.shared.db.base import DEFAULT_SCHEMA, Base
 from src.shared.db.models import (
     ActividadEconomica,
     Establecimiento,
@@ -32,6 +32,10 @@ from src.shared.db.models import (
 from src.shared.db.models import (
     TipoUnidadEconomica as TipoUnidadEconomicaCat,
 )
+from src.shared.db.partitions import create_partition
+
+#: Corte al que pertenecen los establecimientos de prueba.
+PERIODO = date(2024, 11, 1)
 
 
 def _seed_id(table: str, label_col: str, label: str) -> int:
@@ -85,13 +89,14 @@ class TestDominioSeeds:
 
 
 @pytest.fixture()
-def linked_session(tmp_path):
-    """Sesion ORM sobre DuckDB scratch (create_all = esquema con FKs reales)
-    con catalogos sembrados y un establecimiento referenciando cada uno."""
-    engine = create_engine(f"duckdb:///{tmp_path}/linked.duckdb")
-    # Solo silver: las FKs de meta usan ON DELETE CASCADE, que DuckDB no
-    # admite, y aqui se prueban los links del esquema de datos.
-    Base.metadata.create_all(engine, tables=tables_for(DEFAULT_SCHEMA))
+def linked_session(silver_engine):
+    """Sesion con los catalogos sembrados y un establecimiento que los liga."""
+    engine = silver_engine
+
+    # `establecimientos` esta particionada: sin la particion del corte, el
+    # INSERT falla con "no partition of relation found for row".
+    with engine.begin() as conn:
+        create_partition(conn, PERIODO)
 
     with Session(engine) as session:
         session.add_all(
@@ -122,7 +127,7 @@ def linked_session(tmp_path):
                 tipo_vial_id=_seed_id("denue_tipos_vialidad", "tipo_vial", "CALLE"),
                 tipo_asent_id=_seed_id("denue_tipos_asentamiento", "tipo_asent", "COLONIA"),
                 tipounieco_id=_seed_id("denue_tipos_unidad_economica", "tipounieco", "FIJO"),
-                period=date(2024, 11, 1),
+                period=PERIODO,
             )
         )
         session.commit()
@@ -131,36 +136,33 @@ def linked_session(tmp_path):
     engine.dispose()
 
 
-# Postgres: `linked_session` hace create_all de todo silver (incluida
-# `establecimientos`, ya particionada) y ademas usa `session.get` con un id
-# escalar, que deja de ser valido con la PK compuesta (id, period).
 @pytest.mark.postgres
 @pytest.mark.unit
 class TestEstablecimientoLinks:
     """Relationships FK-driven navegables desde Establecimiento."""
 
     def test_estrato_link(self, linked_session):
-        estab = linked_session.get(Establecimiento, "test-estab-1")
+        estab = linked_session.get(Establecimiento, ("test-estab-1", PERIODO))
         assert estab.estrato is not None
         assert estab.estrato.categoria == "Small"
         assert (estab.estrato.empleados_min, estab.estrato.empleados_max) == (11, 30)
 
     def test_actividad_link(self, linked_session):
-        estab = linked_session.get(Establecimiento, "test-estab-1")
+        estab = linked_session.get(Establecimiento, ("test-estab-1", PERIODO))
         assert estab.actividad.sector == "72"
         assert estab.actividad.rama == "7225"
 
     def test_tipo_links_resuelven_labels(self, linked_session):
-        estab = linked_session.get(Establecimiento, "test-estab-1")
+        estab = linked_session.get(Establecimiento, ("test-estab-1", PERIODO))
         assert estab.tipo_vialidad.tipo_vial == "CALLE"
         assert estab.tipo_asentamiento.tipo_asent == "COLONIA"
         assert "permanente" in estab.tipo_unidad.descripcion
         assert estab.tipo_vialidad.descripcion.strip()
 
     def test_links_are_none_when_fk_null(self, linked_session):
-        linked_session.add(Establecimiento(id="test-estab-2", period=date(2024, 11, 1)))
+        linked_session.add(Establecimiento(id="test-estab-2", period=PERIODO))
         linked_session.commit()
-        estab = linked_session.get(Establecimiento, "test-estab-2")
+        estab = linked_session.get(Establecimiento, ("test-estab-2", PERIODO))
         assert estab.estrato is None
         assert estab.tipo_vialidad is None
         assert estab.tipo_unidad is None
@@ -170,7 +172,7 @@ class TestEstablecimientoLinks:
         from sqlalchemy.exc import DBAPIError
 
         linked_session.add(
-            Establecimiento(id="test-estab-bad", per_ocu_id=999, period=date(2024, 11, 1))
+            Establecimiento(id="test-estab-bad", per_ocu_id=999, period=PERIODO)
         )
         with pytest.raises(DBAPIError):
             linked_session.commit()
@@ -180,7 +182,7 @@ class TestEstablecimientoLinks:
         from sqlalchemy.exc import DBAPIError
 
         linked_session.add(
-            Establecimiento(id="test-estab-bad2", codigo_act="999999", period=date(2024, 11, 1))
+            Establecimiento(id="test-estab-bad2", codigo_act="999999", period=PERIODO)
         )
         with pytest.raises(DBAPIError):
             linked_session.commit()
@@ -204,7 +206,7 @@ class TestIngestDomainGuard:
         from src.etl.loaders.dominios import load_seeds as load_dominios_seeds
         from src.etl.loaders.estratos import TABLE_NAME as EST_TABLE
         from src.etl.loaders.estratos import load_seeds as load_estratos_seeds
-        from src.shared.db.base import DEFAULT_SCHEMA, Base, get_table
+        from src.shared.db.base import get_table
         from src.shared.db.models import Establecimiento  # noqa: F401
 
         db = tmp_path / "guard.duckdb"

@@ -17,7 +17,7 @@ SEEDS_DIR = PROJECT_ROOT / "data" / "seeds"
 
 
 @pytest.fixture
-def temp_transformer(tmp_path):
+def temp_transformer(tmp_path, tracker):
     """Create temporary transformer for testing."""
     data_root = tmp_path / "data"
     data_root.mkdir()
@@ -40,6 +40,7 @@ def temp_transformer(tmp_path):
         data_root=data_root,
         silver_db_path=silver_db,
         gold_db_path=gold_db,
+        tracker=tracker,
     )
 
     return transformer

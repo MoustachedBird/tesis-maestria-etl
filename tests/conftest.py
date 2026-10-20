@@ -563,3 +563,51 @@ def pg_engine():
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     yield engine
     engine.dispose()
+
+
+@pytest.fixture
+def tracker(pg_engine):
+    """`MetadataTracker` sobre un schema `meta` recien creado y vacio.
+
+    Recrea las tablas en cada test en vez de limpiarlas: es barato (son 6
+    tablas sin datos) y deja cada prueba partiendo del mismo estado sin
+    depender del orden de ejecucion.
+
+    Args:
+        pg_engine: engine del Postgres de pruebas.
+
+    Returns:
+        MetadataTracker: apuntando a la base de pruebas.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from src.meta.tracker import MetadataTracker
+    from src.shared.db.base import Base, tables_for
+
+    tablas = tables_for("meta")
+    Base.metadata.drop_all(pg_engine, tables=tablas)
+    Base.metadata.create_all(pg_engine, tables=tablas)
+    return MetadataTracker(session_factory=sessionmaker(bind=pg_engine))
+
+
+@pytest.fixture
+def silver_engine(pg_engine):
+    """Engine con el schema `silver` recien creado desde el modelo.
+
+    El mismo camino que la migracion (`create_all` sobre los `Table` de la
+    capa), de modo que lo que se prueba aqui es el esquema real y no una
+    copia escrita a mano.
+
+    Args:
+        pg_engine: engine del Postgres de pruebas.
+
+    Yields:
+        Engine: con `silver` poblado de tablas vacias.
+    """
+    from src.shared.db.base import Base, tables_for
+
+    tablas = tables_for("silver")
+    Base.metadata.drop_all(pg_engine, tables=tablas)
+    Base.metadata.create_all(pg_engine, tables=tablas)
+    yield pg_engine
+    Base.metadata.drop_all(pg_engine, tables=tablas)

@@ -21,7 +21,7 @@ import json
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import case, func, select
@@ -41,6 +41,21 @@ from src.shared.enums import ErrorType, JobStatus, TaskStatus
 #: en uso: la tabla nacio preparada para VALIDATE y CLEANUP que nunca se
 #: implementaron.
 DOWNLOAD_TASK_TYPE = "DOWNLOAD"
+
+
+def _now() -> datetime:
+    """Instante actual en UTC, con zona.
+
+    Las columnas de tiempo son `TIMESTAMPTZ`, asi que PostgreSQL devuelve
+    datetimes *aware*. Escribir uno *naive* no falla al insertar, pero si al
+    restarlo despues para calcular una duracion: "can't subtract
+    offset-naive and offset-aware datetimes". Todo instante que entra o sale
+    del tracker pasa por aqui.
+
+    Returns:
+        datetime: ahora, en UTC.
+    """
+    return datetime.now(UTC)
 
 
 def _as_dict(obj) -> dict[str, Any]:
@@ -120,7 +135,7 @@ class MetadataTracker:
             str: run_id (UUID).
         """
         run_id = str(uuid.uuid4())
-        now = datetime.now()
+        now = _now()
         with self._session() as session:
             session.add(
                 JobRun(
@@ -189,7 +204,7 @@ class MetadataTracker:
                 else:
                     status = JobStatus.PARTIAL
 
-            end_time = datetime.now()
+            end_time = _now()
             run.end_time = end_time
             run.duration_seconds = (
                 (end_time - run.start_time).total_seconds() if run.start_time else 0.0
@@ -306,7 +321,7 @@ class MetadataTracker:
             if task is None:
                 return
             task.status = TaskStatus.RUNNING.value
-            task.start_time = datetime.now()
+            task.start_time = _now()
             for key, value in fields.items():
                 setattr(task, key, value)
 
@@ -327,7 +342,7 @@ class MetadataTracker:
             task = session.get(model, task_id)
             if task is None:
                 return
-            end_time = datetime.now()
+            end_time = _now()
             task.status = status.value
             task.end_time = end_time
             if task.start_time:

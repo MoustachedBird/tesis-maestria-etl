@@ -115,23 +115,40 @@ def expected_indexes() -> dict[str, str]:
 def existing_indexes(conn) -> set[str]:
     """Nombres de los indices de usuario presentes hoy en las tablas gestionadas.
 
-    Lee `pg_indexes`, que para una tabla particionada reporta el indice del
-    padre bajo el nombre del padre --que es justo el nivel al que se gestiona
-    aqui; los indices hijos se manejan solos.
+    Excluye los indices que respaldan un constraint --PK y UNIQUE--, que
+    PostgreSQL expone igual que a los demas en su catalogo. No son de
+    usuario: soltarlos cambiaria el esquema en vez de solo su rendimiento,
+    y `drop_indexes` nunca los toca. Devolverlos aqui haria que la funcion
+    dijera una cosa y significara otra.
+
+    Para una tabla particionada reporta el indice del padre bajo el nombre
+    del padre, que es el nivel al que se gestiona aqui: los hijos se
+    propagan solos.
 
     Args:
         conn: conexion SQLAlchemy sobre PostgreSQL.
 
     Returns:
-        set[str]: nombres de indice presentes.
+        set[str]: nombres de indice de usuario.
     """
     from src.shared.db.base import DEFAULT_SCHEMA, get_table
 
     schema = get_table(MANAGED_TABLES[0]).schema or DEFAULT_SCHEMA
     rows = conn.execute(
         text(
-            "SELECT indexname FROM pg_indexes "
-            "WHERE schemaname = :schema AND tablename = ANY(:tables)"
+            """
+            SELECT idx.relname
+            FROM pg_index i
+            JOIN pg_class idx ON idx.oid = i.indexrelid
+            JOIN pg_class tbl ON tbl.oid = i.indrelid
+            JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+            WHERE ns.nspname = :schema
+              AND tbl.relname = ANY(:tables)
+              AND NOT i.indisprimary
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid
+              )
+            """
         ),
         {"schema": schema, "tables": list(MANAGED_TABLES)},
     ).scalars()
