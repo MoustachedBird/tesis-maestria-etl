@@ -19,7 +19,7 @@ class Section(StrEnum):
     Nota: ``normalize_dates`` y ``h3_cells`` desaparecen al migrar a
     PostgreSQL —el ``COPY`` normaliza la fecha y calcula las celdas H3 en
     vuelo, así que no quedan pasos que ejecutar (ver `arquitectura.md` §4.2
-    y §4.4). Se conservan aquí mientras el pipeline siga sobre DuckDB.
+    y §4.4). Se conservan hasta que esos stages se reescriban.
     """
 
     ingest = "ingest"

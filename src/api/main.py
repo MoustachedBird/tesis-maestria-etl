@@ -148,33 +148,6 @@ async def api_info(settings: AppSettings):
     }
 
 
-# ------------------------------------------------------------------------------
-# Example CRUD Endpoints (commented out - implement as needed)
-# ------------------------------------------------------------------------------
-# from src.shared.db.models import Establecimiento
-# from src.api.schemas import EstablecimientoResponse
-# from typing import List
-
-# @app.get(f"{get_settings().API_PREFIX}/establecimientos", response_model=List[EstablecimientoResponse])
-# async def list_establecimientos(
-#     db: DbSession,
-#     skip: int = 0,
-#     limit: int = 100,
-# ):
-#     """List establecimientos with pagination."""
-#     establecimientos = db.query(Establecimiento).offset(skip).limit(limit).all()
-#     return establecimientos
-
-
-# @app.get(f"{get_settings().API_PREFIX}/establecimientos/{{est_id}}", response_model=EstablecimientoResponse)
-# async def get_establecimiento(est_id: str, db: DbSession):
-#     """Get a single establecimiento by id."""
-#     establecimiento = db.query(Establecimiento).filter(Establecimiento.id == est_id).first()
-#     if not establecimiento:
-#         raise HTTPException(status_code=404, detail="Establecimiento not found")
-#     return establecimiento
-
-
 if __name__ == "__main__":
     import uvicorn
 

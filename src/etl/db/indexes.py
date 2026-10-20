@@ -65,9 +65,9 @@ def _child_index_name(parent_index: str, partition: str) -> str:
     Returns:
         str: nombre unico por particion, de a lo mas 63 caracteres.
     """
-    from src.shared.db.partitions import PARTITION_PREFIX
+    from src.shared.db.partitions import PARTITIONED_TABLE
 
-    suffix = partition.removeprefix(f"{PARTITION_PREFIX}_")
+    suffix = partition.removeprefix(f"{PARTITIONED_TABLE}_")
     room = MAX_IDENTIFIER_LEN - len(suffix) - 1
     return f"{parent_index[:room]}_{suffix}"
 

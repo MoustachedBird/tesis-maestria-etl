@@ -7,21 +7,12 @@ JOIN con los datos que describe (`meta.process_tasks` →
 `silver.establecimientos` por periodo), que es la razón de fondo para no
 tener una base de metadatos aparte.
 
-Dos cosas que cambian respecto al esquema de DuckDB, además del motor:
+Dos propiedades que el esquema anterior no podía dar:
 
-**Las FKs ahora existen.** El DDL anterior las documentaba como ausentes a
-propósito — *"Foreign key constraints removed due to DuckDB UPDATE
-limitations; referential integrity is maintained at application level"*. Al
-traducir el esquema se confirmó el motivo concreto: DuckDB rechaza el DDL
-con *"FOREIGN KEY constraints cannot use CASCADE, SET NULL or SET DEFAULT"*.
-PostgreSQL no tiene esa limitación, así que cada tabla de tareas referencia
-su `job_runs.run_id` de verdad, con `ON DELETE CASCADE`: borrar una corrida
-se lleva sus tareas y su linaje, en vez de dejar huérfanos que nadie
-detecta.
-
-Consecuencia práctica mientras la suite siga sobre DuckDB: un
-`Base.metadata.create_all()` sin filtrar falla al llegar aquí. Los tests del
-esquema de datos usan `tables_for(DEFAULT_SCHEMA)` para crear solo `silver`.
+**Las FKs son reales.** Cada tabla de tareas referencia su `job_runs.run_id`
+con `ON DELETE CASCADE`, así que borrar una corrida se lleva sus tareas y su
+linaje en vez de dejar huérfanos que nadie detecta. Antes la integridad se
+sostenía desde la aplicación, por una limitación del motor que ya no aplica.
 
 **Los estados son enums de Python, no VARCHAR libres.** Se guardan como
 texto (los valores de `JobStatus`/`TaskStatus`, idénticos a los de hoy) pero

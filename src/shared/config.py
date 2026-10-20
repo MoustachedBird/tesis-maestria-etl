@@ -34,32 +34,22 @@ class Settings(BaseSettings):
     GOLD_DIR: Path = DATA_DIR / "gold"
     SEEDS_DIR: Path = DATA_DIR / "seeds"
 
-    # Logs
-    LOGS_DIR: Path = PROJECT_ROOT / "logs"
-
     # -------------------------------------------------------------------------
-    # Database Configuration
+    # Almacenamiento en archivo — LEGADO, se retira con la Fase 4
     # -------------------------------------------------------------------------
-    # El motor es PostgreSQL, punto. No hay flag de backend: un segundo
-    # motor soportado significaria dos caminos de codigo, dos dialectos de
-    # SQL y la posibilidad de que `make db-migrate` aplique el baseline
-    # sobre un archivo por error.
-
-    # -------------------------------------------------------------------------
-    # DuckDB — LEGADO, se retira en la Fase 4
-    # -------------------------------------------------------------------------
-    # Siguen aqui porque los stages del ETL y la suite de tests aun operan
-    # sobre archivos DuckDB. Equivalentes en PostgreSQL: DUCKDB_THREADS ->
+    # Lo leen los stages que todavia no se reescriben sobre PostgreSQL.
+    # Equivalentes ya vigentes del lado del servidor: DUCKDB_THREADS ->
     # PG_MAX_PARALLEL_WORKERS, DUCKDB_MEMORY_LIMIT -> PG_SHARED_BUFFERS +
-    # PG_WORK_MEM (ver docs/entorno_linux.md §2).
+    # PG_WORK_MEM (ver docs/entorno_linux.md §2). Al migrar el ultimo stage
+    # desaparecen los cuatro junto con WAREHOUSE_BACKUP_ENABLED.
     SILVER_DUCKDB_PATH: Path | None = None
     GOLD_DUCKDB_PATH: Path | None = None
     DUCKDB_THREADS: int = 8
     DUCKDB_MEMORY_LIMIT: str = "16GB"
 
-    # Respaldo rotativo del warehouse antes de cada comando que lo modifica
-    # (ver utils/backup.py). En APFS es un clon copy-on-write: instantaneo
-    # y sin costo de espacio, por eso viene encendido por default.
+    # Respaldo rotativo del archivo antes de cada comando que lo modifica
+    # (ver utils/backup.py). Parte del mismo legado: con la base en un
+    # servidor, el respaldo pasa a ser pg_dump por schema (Fase 9).
     WAREHOUSE_BACKUP_ENABLED: bool = True
 
     # -------------------------------------------------------------------------

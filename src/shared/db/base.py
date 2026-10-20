@@ -69,12 +69,10 @@ def tables_for(schema: str) -> list:
     """
     Objetos `Table` de una capa, en el orden en que los declara el modelo.
 
-    Para `create_all(tables=...)` cuando se quiere UNA capa y no todas. El
-    caso que lo motiva: los tests del esquema de datos corren sobre DuckDB,
-    que **rechaza `ON DELETE CASCADE`** en las FKs — las de `meta` lo usan,
-    así que un `create_all()` sin filtro falla con
-    "FOREIGN KEY constraints cannot use CASCADE". Que la lista salga del
-    metadata y no esté escrita a mano evita que divergja del modelo.
+    Para `create_all(tables=...)` cuando se quiere UNA capa y no todas:
+    los tests del esquema de datos montan solo `silver`, sin arrastrar las
+    tablas de control. Que la lista salga del metadata y no esté escrita a
+    mano evita que diverja del modelo.
 
     Args:
         schema: Nombre del schema (usar `Layer.SILVER.value` y similares).
@@ -127,9 +125,6 @@ def get_table(name: str, schema: str = DEFAULT_SCHEMA):
 # de Alembic; este listener cubre los tests y el uso en desarrollo, donde se
 # arma un esquema desechable con `create_all` sobre una base vacía.
 #
-# `CREATE SCHEMA IF NOT EXISTS` lo entienden tanto PostgreSQL como DuckDB,
-# que es lo que permite que la suite siga corriendo sobre DuckDB mientras la
-# migración avanza.
 for _schema in SCHEMAS:
     event.listen(
         Base.metadata,

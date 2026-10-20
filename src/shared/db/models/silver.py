@@ -1,11 +1,15 @@
 """
-SQLAlchemy ORM Models for DENUE Database.
+Modelos ORM del schema `silver`: las observaciones del DENUE.
 
-This module contains all database table definitions using SQLAlchemy 2.0 ORM.
-All models inherit from the Base class defined in base.py.
+`establecimientos` es la tabla de hechos --una fila por establecimiento y
+corte, 38 columnas-- y el resto son los catalogos a los que apunta por FK:
+geografia (entidad, municipio, localidad), actividad economica (SCIAN) y los
+dominios (tipo de vialidad, asentamiento, unidad economica, estrato de
+personal).
 
-The schema matches the DuckDB warehouse structure with all 38 columns for establecimientos
-and proper catalog tables for geographic and economic classifications.
+Esta es la definicion canonica del esquema: de aqui salen el DDL de la
+migracion, los indices que gestiona `etl/db/indexes.py` y las restricciones
+contra las que se validan los seeds.
 """
 
 import re
@@ -39,7 +43,7 @@ class Establecimiento(Base):
     - Contact information
     - Temporal tracking (registration date and data period)
 
-    This model matches the actual DuckDB warehouse schema with all 38 columns.
+    38 columnas: identificacion, actividad, domicilio, contacto y periodo.
     """
 
     __tablename__ = "establecimientos"
@@ -213,7 +217,7 @@ class Establecimiento(Base):
     # esquema que el DDL del writer); los FKs de dominio van inline en sus
     # mapped_column de arriba. Decision del usuario (2026-07-17): relaciones
     # fisicas por id. Costo asumido y documentado en AGENTS.md: los FKs en
-    # DuckDB implican mantenimiento de indice en escrituras masivas.
+    # cada FK implica mantenimiento de indice en escrituras masivas.
     __table_args__ = (
         ForeignKeyConstraint(["cve_ent"], ["denue_entidades.cve_ent"]),
         ForeignKeyConstraint(
@@ -514,7 +518,7 @@ class TipoVialidad(Base):
     """
     Road/Street Type Domain Catalog.
 
-    Normalizes the old `tipo_vial_type` DuckDB ENUM into a catalog table:
+    Cataloga los tipos de vialidad, antes un ENUM en la tabla de hechos:
     `establecimientos.tipo_vial_id` references `id` with a real FK. Sembrado
     desde `data/seeds/seed_tipos_vialidad.parquet` (fuente de verdad).
     """
@@ -542,7 +546,7 @@ class TipoAsentamiento(Base):
     """
     Settlement Type Domain Catalog.
 
-    Normalizes the old `tipo_asent_type` DuckDB ENUM into a catalog table:
+    Cataloga los tipos de asentamiento, antes un ENUM en la tabla de hechos:
     `establecimientos.tipo_asent_id` references `id` with a real FK. Sembrado
     desde `data/seeds/seed_tipos_asentamiento.parquet` (fuente de verdad).
     """
@@ -570,7 +574,7 @@ class TipoUnidadEconomica(Base):
     """
     Economic Unit Type Domain Catalog.
 
-    Normalizes the old `tipounieco_type` DuckDB ENUM into a catalog table:
+    Cataloga los tipos de unidad economica, antes un ENUM en la tabla de hechos:
     `establecimientos.tipounieco_id` references `id` with a real FK. The
     permanence semantics (FIJO/SEMIFIJO) live in the queryable `descripcion`
     column instead of Python-only comments. Sembrado desde

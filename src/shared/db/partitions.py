@@ -6,9 +6,10 @@ que pedia arquitectura.md §2.4: un corte que se carga mal se desengancha y
 se vuelve a cargar sin tocar los otros 19, en vez de reconstruir las 82.9M
 filas del warehouse completo.
 
-Las particiones no se declaran en el modelo ORM --son objetos que nacen con
-cada corte nuevo, no esquema fijo-- asi que se crean desde aqui, con DDL
-parametrizado por fecha y nunca por interpolacion de texto libre.
+Las particiones no se declaran en el modelo ORM: son objetos que nacen con
+cada corte, no esquema fijo. Quien las crea es `staging.py`, al enganchar la
+tabla ya cargada y validada; aqui vive el resto de su ciclo de vida
+--nombrarlas, desengancharlas, eliminarlas, enumerarlas.
 """
 
 from __future__ import annotations
@@ -20,13 +21,10 @@ from sqlalchemy.engine import Connection
 
 from src.shared.db.base import DEFAULT_SCHEMA
 
-#: Tabla particionada. Unica por ahora; si se suman mas, esto pasa a ser un
-#: parametro en vez de una constante del modulo.
+#: Tabla particionada. Sus particiones se llaman `<tabla>_YYYY_MM`
+#: (p. ej. `establecimientos_2024_11`). Unica por ahora; si se suman mas,
+#: esto pasa a ser un parametro en vez de una constante del modulo.
 PARTITIONED_TABLE = "establecimientos"
-
-#: Prefijo de las particiones hijas. El nombre completo es
-#: `establecimientos_YYYY_MM` (p. ej. `establecimientos_2024_11`).
-PARTITION_PREFIX = "establecimientos"
 
 
 def partition_name(period: date) -> str:
@@ -38,7 +36,7 @@ def partition_name(period: date) -> str:
     Returns:
         str: identificador sin comillas, p. ej. `establecimientos_2024_11`.
     """
-    return f"{PARTITION_PREFIX}_{period.year:04d}_{period.month:02d}"
+    return f"{PARTITIONED_TABLE}_{period.year:04d}_{period.month:02d}"
 
 
 def qualified_partition(period: date, schema: str = DEFAULT_SCHEMA) -> str:
@@ -52,42 +50,6 @@ def qualified_partition(period: date, schema: str = DEFAULT_SCHEMA) -> str:
         str: p. ej. `"silver"."establecimientos_2024_11"`.
     """
     return f'"{schema}"."{partition_name(period)}"'
-
-
-def create_partition(
-    conn: Connection,
-    period: date,
-    schema: str = DEFAULT_SCHEMA,
-    if_not_exists: bool = True,
-) -> str:
-    """Crea la particion de un corte, enganchada a la tabla padre.
-
-    Idempotente por default: volver a llamarla para un corte existente no
-    hace nada. Es el camino normal del ingest, que no deberia tener que
-    saber si el corte ya se vio antes.
-
-    Args:
-        conn: conexion con permisos de DDL sobre el schema.
-        period: fecha del corte.
-        schema: schema de la tabla particionada.
-        if_not_exists: si False, falla cuando la particion ya existe.
-
-    Returns:
-        str: nombre de la particion creada o ya existente.
-    """
-    exists_clause = "IF NOT EXISTS " if if_not_exists else ""
-    # `period` entra como literal con cast explicito y no como bind param:
-    # PostgreSQL no admite parametros en el DDL de particiones. El valor es
-    # un `datetime.date`, no texto del usuario, asi que su repr ISO es
-    # segura por construccion.
-    conn.execute(
-        text(
-            f"CREATE TABLE {exists_clause}{qualified_partition(period, schema)} "
-            f'PARTITION OF "{schema}"."{PARTITIONED_TABLE}" '
-            f"FOR VALUES IN (DATE '{period.isoformat()}')"
-        )
-    )
-    return partition_name(period)
 
 
 def detach_partition(conn: Connection, period: date, schema: str = DEFAULT_SCHEMA) -> None:
