@@ -1,16 +1,15 @@
-"""
-Configuracion de la aplicacion con Pydantic Settings.
+"""Configuracion de la aplicacion con Pydantic Settings.
 
 Un solo motor: PostgreSQL, una base con los schemas silver, gold y meta.
-Las variables DUCKDB_* que quedan son legado de los stages que aun no se
-reescriben (Fase 4), no una opcion de configuracion.
+No hay flag de backend ni rutas de archivo: la unica forma de llegar a los
+datos es la conexion que se arma aqui.
 """
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import computed_field, field_validator
+from pydantic import computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,30 +26,11 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     PROJECT_ROOT: Path = Path(__file__).parent.parent.parent
 
-    # Data directories
+    # Lo unico que sigue siendo archivo es la entrada: los ZIP de Bronze y
+    # los seeds versionados. Silver y Gold viven en la base.
     DATA_DIR: Path = PROJECT_ROOT / "data"
     BRONZE_DIR: Path = DATA_DIR / "bronze"
-    SILVER_DIR: Path = DATA_DIR / "silver"
-    GOLD_DIR: Path = DATA_DIR / "gold"
     SEEDS_DIR: Path = DATA_DIR / "seeds"
-
-    # -------------------------------------------------------------------------
-    # Almacenamiento en archivo — LEGADO, se retira con la Fase 4
-    # -------------------------------------------------------------------------
-    # Lo leen los stages que todavia no se reescriben sobre PostgreSQL.
-    # Equivalentes ya vigentes del lado del servidor: DUCKDB_THREADS ->
-    # PG_MAX_PARALLEL_WORKERS, DUCKDB_MEMORY_LIMIT -> PG_SHARED_BUFFERS +
-    # PG_WORK_MEM (ver docs/entorno_linux.md §2). Al migrar el ultimo stage
-    # desaparecen los cuatro junto con WAREHOUSE_BACKUP_ENABLED.
-    SILVER_DUCKDB_PATH: Path | None = None
-    GOLD_DUCKDB_PATH: Path | None = None
-    DUCKDB_THREADS: int = 8
-    DUCKDB_MEMORY_LIMIT: str = "16GB"
-
-    # Respaldo rotativo del archivo antes de cada comando que lo modifica
-    # (ver utils/backup.py). Parte del mismo legado: con la base en un
-    # servidor, el respaldo pasa a ser pg_dump por schema (Fase 9).
-    WAREHOUSE_BACKUP_ENABLED: bool = True
 
     # -------------------------------------------------------------------------
     # PostgreSQL Configuration
@@ -117,33 +97,6 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api/v1"
 
     # -------------------------------------------------------------------------
-    # Validators
-    # -------------------------------------------------------------------------
-    @field_validator("SILVER_DUCKDB_PATH", mode="before")
-    @classmethod
-    def set_silver_duckdb_path(cls, v: Path | None, info) -> Path:
-        """Set default Silver DuckDB path if not provided."""
-        if v is None:
-            silver_dir = info.data.get("SILVER_DIR")
-            if silver_dir is None:
-                data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
-                silver_dir = data_dir / "silver"
-            return silver_dir / "mipymes.duckdb"
-        return Path(v) if not isinstance(v, Path) else v
-
-    @field_validator("GOLD_DUCKDB_PATH", mode="before")
-    @classmethod
-    def set_gold_duckdb_path(cls, v: Path | None, info) -> Path:
-        """Set default Gold DuckDB path if not provided."""
-        if v is None:
-            gold_dir = info.data.get("GOLD_DIR")
-            if gold_dir is None:
-                data_dir = info.data.get("DATA_DIR", Path(__file__).parent.parent.parent / "data")
-                gold_dir = data_dir / "gold"
-            return gold_dir / "mipymes.duckdb"
-        return Path(v) if not isinstance(v, Path) else v
-
-    # -------------------------------------------------------------------------
     # Computed Properties
     # -------------------------------------------------------------------------
     @computed_field
@@ -207,8 +160,8 @@ class Settings(BaseSettings):
         Returns:
             str: PostgreSQL connection URL
         """
-        # `postgresql+psycopg` es psycopg3 (psycopg2 seria `+psycopg2`).
-        # Requisito de `shared/db/copy.py`: COPY en formato binario.
+        # `postgresql+psycopg` es psycopg3 (psycopg2 seria `+psycopg2`):
+        # lo pide `shared/db/copy.py` para el COPY por bloques.
         driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg"
 
         user = self.POSTGRES_RO_USER if read_only else self.POSTGRES_USER

@@ -6,26 +6,26 @@ archivo correctos y que re-sembrar deja el catalogo igual.
 """
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 
 from src.etl.loaders import dominios, estratos, geography, scian
 from src.shared.db.base import Base, get_table
 from src.shared.db.models import Establecimiento  # noqa: F401  (puebla el metadata)
 
+pytestmark = pytest.mark.postgres
+
 
 @pytest.fixture()
-def connection(tmp_path, request):
+def connection(silver_engine, request):
     """Conexion con las tablas del marcador `tables` ya creadas.
 
     El esquema sale del modelo, igual que en la migracion, asi que estos
     tests fallan si el seed deja de encajar con la tabla que lo recibe.
     """
     table_names = request.node.get_closest_marker("tables").args
-    engine = create_engine(f"duckdb:///{tmp_path}/seeds.duckdb")
-    Base.metadata.create_all(engine, tables=[get_table(n) for n in table_names])
-    with engine.connect() as conn:
+    Base.metadata.create_all(silver_engine, tables=[get_table(n) for n in table_names])
+    with silver_engine.begin() as conn:
         yield conn
-    engine.dispose()
 
 
 def _count(conn, table_name: str) -> int:

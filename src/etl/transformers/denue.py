@@ -2,9 +2,9 @@
 Unified DENUE Data Transformer
 
 Orchestrates the complete ETL transformation pipeline:
-1. TRANSFORM Stage: ZIP -> Silver DuckDB (Bronze -> Silver)
-2. CLEE RESOLUTION Stage: Entity Resolution (Silver DuckDB in-place)
-3. LOAD Stage: Silver DuckDB -> Gold DuckDB (Silver -> Gold)
+1. TRANSFORM: los ZIP de Bronze se vuelven particiones de Silver
+2. CLEE RESOLUTION: resolucion de identidad, en sitio sobre Silver
+
 
 Uses MetadataTracker for comprehensive tracking and observability.
 """
@@ -12,12 +12,9 @@ Uses MetadataTracker for comprehensive tracking and observability.
 import logging
 from pathlib import Path
 
-from src.etl.loaders.loader import SilverToGoldLoader
 from src.etl.transformers.clee_resolver import CLEEResolver
 from src.etl.transformers.processor import BronzeToSilverProcessor
-from src.etl.utils.backup import backup_warehouse
 from src.meta.tracker import MetadataTracker
-from src.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +40,6 @@ class DenuePipelineOrchestrator:
     def __init__(
         self,
         data_root: Path,
-        silver_db_path: Path | None = None,
-        gold_db_path: Path | None = None,
         tracker: MetadataTracker | None = None,
     ):
         """
@@ -52,23 +47,12 @@ class DenuePipelineOrchestrator:
 
         Args:
             data_root: Root data directory
-            silver_db_path: Path to Silver DuckDB (default: from settings)
-            gold_db_path: Path to Gold DuckDB (default: from settings)
             tracker: MetadataTracker; por default, uno nuevo. Igual que en
                 el resto de componentes, se inyecta en los tests.
         """
         self.data_root = Path(data_root)
 
         self.tracker = tracker or MetadataTracker()
-
-        # Resolve paths (validators guarantee non-None, assert for type checker)
-        resolved_silver = Path(silver_db_path) if silver_db_path else settings.SILVER_DUCKDB_PATH
-        assert resolved_silver is not None, "SILVER_DUCKDB_PATH must be configured"
-        self.silver_db_path: Path = resolved_silver
-
-        resolved_gold = Path(gold_db_path) if gold_db_path else settings.GOLD_DUCKDB_PATH
-        assert resolved_gold is not None, "GOLD_DUCKDB_PATH must be configured"
-        self.gold_db_path: Path = resolved_gold
 
         # Initialize stages
         self.transformer = BronzeToSilverProcessor(
@@ -80,15 +64,7 @@ class DenuePipelineOrchestrator:
         self.clee_resolver = CLEEResolver(tracker=self.tracker, method="radio")
         self.clee_resolver_h3 = CLEEResolver(tracker=self.tracker, method="h3")
 
-        self.loader = SilverToGoldLoader(
-            tracker=self.tracker,
-            silver_path=self.silver_db_path,
-            gold_path=self.gold_db_path,
-        )
-
         logger.info("DenuePipelineOrchestrator initialized")
-        logger.info(f"   Silver DB: {self.silver_db_path}")
-        logger.info(f"   Gold DB: {self.gold_db_path}")
 
     def run_transform_stage(self, force: bool = False) -> bool:
         """
@@ -126,7 +102,7 @@ class DenuePipelineOrchestrator:
 
         Matches establishments across time periods and generates
         master identifiers (CLEEs) for entity tracking. Results are
-        written back to the Silver DuckDB `clee_propagado_radio` column.
+        written back to the `clee_propagado_radio` column.
 
         Args:
             force: If True, reset all clee_propagado_radio values and re-run from scratch.
@@ -136,7 +112,6 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> clee_propagado_radio)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
-        backup_warehouse(self.silver_db_path, stage="clee-radio")
 
         try:
             success = self.clee_resolver.run(force=force)
@@ -169,7 +144,6 @@ class DenuePipelineOrchestrator:
         """
         logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> clee_propagado_h3)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
-        backup_warehouse(self.silver_db_path, stage="clee-h3")
 
         try:
             success = self.clee_resolver_h3.run(force=force)
@@ -183,35 +157,6 @@ class DenuePipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"CLEE RESOLUTION (h3) stage failed: {e}")
-            raise
-
-    def run_load_stage(self, force: bool = False) -> bool:
-        """
-        Run load stage: Silver DuckDB -> Gold DuckDB.
-
-        Promotes the Silver warehouse to Gold via file copy.
-
-        Args:
-            force: If True, copy even if Gold is up-to-date
-
-        Returns:
-            True if successful, False otherwise
-        """
-        logger.info("Starting LOAD stage (Silver -> Gold)")
-        backup_warehouse(self.gold_db_path, stage="load")
-
-        try:
-            success = self.loader.run(force=force)
-
-            if success:
-                logger.info("LOAD stage completed successfully")
-            else:
-                logger.warning("LOAD stage failed")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"LOAD stage failed: {e}")
             raise
 
     def run_full_pipeline(self, force: bool = False) -> bool:
@@ -233,7 +178,7 @@ class DenuePipelineOrchestrator:
 
         # Etapa 1: Transform (Bronze -> Silver). El ingest deriva la fecha
         # y las celdas H3 en vuelo, asi que no hay etapas sueltas para eso.
-        logger.info("ETAPA 1/2: Transform")
+        logger.info("ETAPA 1/1: Transform")
         transform_success = self.run_transform_stage(force=force)
 
         if not transform_success:
@@ -243,17 +188,8 @@ class DenuePipelineOrchestrator:
         logger.info("")
         logger.info("=" * 60)
 
-        # Etapa 2: Load (Silver -> Gold)
-        logger.info("ETAPA 2/2: Load")
-        load_success = self.run_load_stage(force=force)
-
-        logger.info("")
-        logger.info("=" * 60)
-
-        if transform_success and load_success:
+        if transform_success:
             logger.info("FULL PIPELINE completed successfully!")
-            logger.info(f"   Silver: {self.silver_db_path}")
-            logger.info(f"   Gold: {self.gold_db_path}")
             return True
         else:
             logger.warning("FULL PIPELINE completed with errors")
@@ -283,20 +219,14 @@ class DenuePipelineOrchestrator:
                 self.tracker.get_latest_run_by_type("TRANSFORM", "PROCESS")
             ),
             "latest_normalize_run": _run_dict(self.tracker.get_latest_run_by_type("NORMALIZE")),
-            "latest_load_run": _run_dict(self.tracker.get_latest_run_by_type("LOAD")),
             "latest_clee_resolution_run": _run_dict(
                 self.tracker.get_latest_run_by_type("CLEE_RESOLUTION")
             ),
             "process_metrics": self.tracker.get_process_metrics(),
             "normalize_metrics": self.tracker.get_normalize_metrics(),
             "clee_resolution_metrics": self.tracker.get_clee_resolution_metrics(),
-            "silver_db": str(self.silver_db_path),
-            "gold_db": str(self.gold_db_path),
         }
 
     def __repr__(self) -> str:
         """String representation."""
-        return (
-            f"DenuePipelineOrchestrator(data_root={self.data_root}, "
-            f"silver={self.silver_db_path}, gold={self.gold_db_path})"
-        )
+        return f"DenuePipelineOrchestrator(data_root={self.data_root})"

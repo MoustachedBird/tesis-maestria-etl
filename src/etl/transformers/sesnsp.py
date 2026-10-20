@@ -1,5 +1,5 @@
 """
-Transform SESNSP: CSV consolidado (Bronze) -> Silver DuckDB.
+Transform SESNSP: CSV consolidado (Bronze) -> Silver.
 
 Toma el CSV de incidencia delictiva municipal del corte mas reciente en
 data/bronze/sesnsp/ (formato ancho: 12 columnas de mes) y lo carga en
@@ -16,7 +16,7 @@ Silver en formato largo:
 Cada corte mensual del SESNSP REVISA cifras historicas (las carpetas de un
 mes pasado pueden corregirse), por lo que la tabla de hechos se
 reconstruye completa en cada ingesta en vez de hacerse upsert incremental.
-Todo el unpivot corre dentro de DuckDB (out-of-core); Polars solo se usa
+El unpivot corre en Polars; Polars tambien se usa
 para las combinaciones distintas que se validan contra los catalogos.
 
 Tracking: job `sesnsp_transform`, una process_task por archivo de corte.

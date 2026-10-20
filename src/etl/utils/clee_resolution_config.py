@@ -54,7 +54,7 @@ H3_PARTITION_RES = 5
 
 HOY NINGUN codigo la consume: es el habilitador precomputado del
 particionado de KB por celda gruesa (Fase 4 opcional, todo.md; Fase 5 lo
-reutilizaria como llave de particion en joins DuckDB). Como funcionara la
+reutilizaria como llave de particion espacial en joins). Como funcionara la
 poda: en vez de partir la KB en slices arbitrarios (que obligan a evaluar
 TODOS los targets contra TODAS las particiones), la KB se particionaria
 por h3_cell_5; dado que SPATIAL_RADIUS_M (500m) << arista res-5 (~8.5km),
@@ -176,7 +176,7 @@ if SPATIAL_RADIUS_M > H3_GRID_DISK_K * _H3_RING_COVERAGE_M:
     )
 
 # =============================================================================
-# COLUMNAS PARA RESOLUCION (leidas desde Silver DuckDB)
+# COLUMNAS PARA RESOLUCION (leidas desde Silver)
 # =============================================================================
 
 COLS_NEEDED_FOR_MATCHING = [
@@ -203,7 +203,7 @@ COLS_NEEDED_FOR_MATCHING = [
     "nom_cencom",
     "cod_postal",
 ]
-"""Columnas que se leen del Silver DuckDB para la resolucion.
+"""Columnas que se leen de Silver para la resolucion.
 `nombre_act` se obtiene via JOIN con denue_actividades_economicas."""
 
 SILVER_READ_QUERY = """
@@ -235,7 +235,7 @@ SILVER_READ_QUERY = """
     LEFT JOIN denue_estratos_personal ep ON e.per_ocu_id = ep.id
     LEFT JOIN denue_tipos_asentamiento ta ON e.tipo_asent_id = ta.id
 """
-"""SQL para leer datos del Silver DuckDB con JOINs a catalogos.
+"""SQL para leer de Silver con JOINs a los catalogos.
 
 Los dominios viven como FKs enteros (per_ocu_id/tipo_asent_id); aqui se
 resuelven a sus labels con el MISMO nombre de columna de siempre, asi que

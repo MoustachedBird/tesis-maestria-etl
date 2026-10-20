@@ -48,8 +48,9 @@ from src.etl.utils.entity_resolution import (  # noqa: E402
     set_matching_logger,
 )
 from src.etl.utils.matching import clean_contact_columns  # noqa: E402
-from src.etl.utils.warehouse import connect_configured  # noqa: E402
 from src.shared.config import settings  # noqa: E402
+from src.shared.db.query import fetch_df  # noqa: E402
+from src.shared.db.session import get_engine  # noqa: E402
 from src.shared.logging import get_stage_logger  # noqa: E402
 
 logger = get_stage_logger(__name__, Path("./data/etl_fase7_eval.log"))
@@ -96,11 +97,14 @@ assert "e.cve_ent," in EVAL_READ_QUERY, "SILVER_READ_QUERY cambio de formato; aj
 
 def _period_coverage(conn) -> pl.DataFrame:
     """Cobertura de CLEE oficial por periodo (para elegir refs validas)."""
-    return conn.execute("""
+    return fetch_df(
+        conn,
+        """
         SELECT CAST(period AS VARCHAR) AS period,
                AVG(CASE WHEN clee IS NOT NULL AND clee != '' THEN 1.0 ELSE 0.0 END) AS cobertura
-        FROM establecimientos GROUP BY 1 ORDER BY 1
-    """).pl()
+        FROM silver.establecimientos GROUP BY 1 ORDER BY 1
+        """,
+    )
 
 
 @app.command()
@@ -116,8 +120,9 @@ def extract(
     target). No correr mientras una resolucion escribe en Silver.
     """
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
-    conn = connect_configured(settings.SILVER_DUCKDB_PATH, read_only=True)
-    try:
+    # Solo lectura: la muestra sale de Silver sin tocarla. Aun asi, no
+    # correrlo mientras una resolucion escribe.
+    with get_engine().connect() as conn:
         coverage = _period_coverage(conn)
         logger.info(f"Cobertura CLEE por periodo:\n{coverage}")
 
@@ -134,15 +139,17 @@ def extract(
         if not ref_periods:
             raise typer.BadParameter(f"Sin periodos de referencia futuros a {target_period}.")
 
-        placeholders = ", ".join(["?"] * len(states))
-        base = EVAL_READ_QUERY + f"\n    WHERE e.period = ? AND e.cve_ent IN ({placeholders})"
+        base = (
+            EVAL_READ_QUERY
+            + "\n    WHERE e.period = CAST(:period AS DATE) AND e.cve_ent = ANY(:states)"
+        )
 
-        df_target = conn.execute(base, [target_period, *states]).pl()
+        df_target = fetch_df(conn, base, {"period": target_period, "states": list(states)})
         df_target.write_parquet(EVAL_DIR / "target.parquet")
         logger.info(f"target {target_period}: {df_target.height:,} filas -> target.parquet")
 
         for rp in ref_periods:
-            df_ref = conn.execute(base, [rp, *states]).pl()
+            df_ref = fetch_df(conn, base, {"period": rp, "states": list(states)})
             df_ref.write_parquet(EVAL_DIR / f"ref_{rp}.parquet")
             logger.info(f"ref {rp}: {df_ref.height:,} filas -> ref_{rp}.parquet")
 
@@ -155,8 +162,6 @@ def extract(
         }
         (EVAL_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2))
         logger.info(f"Muestra lista en {EVAL_DIR}")
-    finally:
-        conn.close()
 
 
 def _load_masked(path: Path) -> tuple[pl.DataFrame, pl.DataFrame]:

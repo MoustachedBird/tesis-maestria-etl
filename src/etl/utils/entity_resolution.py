@@ -65,7 +65,7 @@ def set_matching_logger(stage_logger: logging.Logger) -> None:
     constructor pisaria la inyeccion de los demas. Las funciones de este
     modulo resuelven `logger` como global al momento de cada llamada, asi
     que el rebind aplica a todo el motor de inmediato. Los metodos nunca
-    corren en paralelo (DuckDB es single-writer), por lo que un solo
+    corren en paralelo, por lo que un solo
     logger activo basta.
 
     Args:

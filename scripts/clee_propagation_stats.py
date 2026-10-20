@@ -27,7 +27,7 @@ escribe en Silver.
 
 Uso:
     uv run python scripts/clee_propagation_stats.py            # Silver real
-    uv run python scripts/clee_propagation_stats.py --db data/silver/otra.duckdb
+    docker compose run --rm tools python scripts/clee_propagation_stats.py
     uv run python scripts/clee_propagation_stats.py --column clee_propagado_radio
 
 Salida: tabla en el log + JSON en data/eval/propagation_stats/.
@@ -38,17 +38,20 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import duckdb
 import polars as pl
 import typer
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 # Ejecutable directo (uv run python scripts/...): mismo patron que
 # evaluate_masked_clee.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.etl.transformers.clee_resolver import CLEEResolver  # noqa: E402
-from src.etl.utils.warehouse import connect_configured  # noqa: E402
 from src.shared.config import settings  # noqa: E402
+from src.shared.db.base import get_table  # noqa: E402
+from src.shared.db.query import fetch_df  # noqa: E402
+from src.shared.db.session import get_engine  # noqa: E402
 from src.shared.logging import get_stage_logger  # noqa: E402
 
 logger = get_stage_logger(__name__, Path("./data/etl_propagation_stats.log"))
@@ -78,41 +81,30 @@ def _real_identity_predicate(column: str) -> str:
     return f"{column} IS NOT NULL AND NOT starts_with({column}, '{SYNTHETIC_PREFIX}')"
 
 
-def open_source(path: Path) -> duckdb.DuckDBPyConnection:
-    """
-    Abre la fuente a analizar y expone su tabla como `establecimientos`.
+def open_source() -> Connection:
+    """Conexion de lectura a Silver.
 
-    Acepta dos formatos, para poder medir tambien estados PASADOS del
-    warehouse (la comparacion antes/despues de una re-resolucion):
+    Antes aceptaba una ruta: un archivo del warehouse o un parquet con un
+    volcado. Con los datos en un servidor eso dejo de tener sentido --hay
+    una sola Silver y es la que dice la configuracion. Para analizar un
+    volcado suelto, Polars lee el parquet directo sin pasar por aqui.
 
-    - `.duckdb`: el warehouse, siempre en READ-ONLY.
-    - `.parquet`: un volcado de `establecimientos` (p. ej.
-      `data/silver/establecimientos_backup.parquet`, el respaldo previo a
-      una re-resolucion). Se monta como VIEW en una base en memoria, asi
-      que el archivo tampoco se toca.
+    Returns:
+        Connection: conexion abierta; el llamador la cierra.
     """
-    if path.suffix == ".parquet":
-        conn = duckdb.connect(":memory:")
-        conn.execute(f"SET memory_limit='{settings.DUCKDB_MEMORY_LIMIT}'")
-        conn.execute(f"SET threads={settings.DUCKDB_THREADS}")
-        # El path va inline (CREATE VIEW no admite parametros preparados);
-        # se escapan comillas simples para no romper el literal.
-        literal = str(path).replace("'", "''")
-        conn.execute(f"CREATE VIEW establecimientos AS SELECT * FROM read_parquet('{literal}')")
-        return conn
-    return connect_configured(path, read_only=True)
+    return get_engine().connect()
 
 
 def compute_period_metrics(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Connection,
     column: str,
-    table: str = "establecimientos",
+    table: str = "silver.establecimientos",
 ) -> pl.DataFrame:
     """
     Cobertura de la columna de identidad periodo por periodo.
 
     Args:
-        conn: Conexion DuckDB (read-only basta).
+        conn: conexion de lectura.
         column: Columna de identidad (p. ej. clee_propagado_radio).
         table: Tabla de hechos (parametrizable para tests con scratch).
 
@@ -128,7 +120,7 @@ def compute_period_metrics(
         - `tasa_vinculacion`: vinculadas / total.
         - `tasa_cobertura`: asignadas / total.
     """
-    df = conn.execute(f"""
+    df = fetch_df(conn, f"""
         SELECT
             CAST(period AS VARCHAR) AS period,
             COUNT(*) AS total,
@@ -140,7 +132,7 @@ def compute_period_metrics(
         WHERE period IS NOT NULL
         GROUP BY 1
         ORDER BY 1
-    """).pl()
+    """)
 
     return df.with_columns(
         (pl.col("vinculadas") / pl.col("total")).alias("tasa_vinculacion"),
@@ -149,9 +141,9 @@ def compute_period_metrics(
 
 
 def compute_identity_metrics(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Connection,
     column: str,
-    table: str = "establecimientos",
+    table: str = "silver.establecimientos",
 ) -> dict:
     """
     Metricas por IDENTIDAD: nacimientos, cadenas y colisiones.
@@ -176,10 +168,10 @@ def compute_identity_metrics(
       `filas > periodos_distintos`, hay repeticion intra-periodo.
 
     Args:
-        conn: Conexion DuckDB (read-only basta; la temp table vive fuera
+        conn: conexion de lectura (la temp table vive fuera
             de la base).
         column: Columna de identidad.
-        table: Tabla de hechos.
+        table: tabla de hechos, calificada con su schema.
 
     Returns:
         Dict con `identidades` (conteos globales), `cadenas`
@@ -188,8 +180,13 @@ def compute_identity_metrics(
         nacidas por periodo).
     """
     tmp = "_ident_stats"
-    conn.execute(f"""
-        CREATE OR REPLACE TEMP TABLE {tmp} AS
+    # Una temporal con el agregado por identidad: lo consultan cuatro
+    # resumenes distintos y recalcular el GROUP BY sobre 82.9M filas cuatro
+    # veces no tiene sentido. `DROP ... IF EXISTS` antes porque PostgreSQL
+    # no tiene `CREATE OR REPLACE` para tablas.
+    conn.execute(text(f"DROP TABLE IF EXISTS {tmp}"))
+    conn.execute(text(f"""
+        CREATE TEMP TABLE {tmp} AS
         SELECT
             {column} AS identidad,
             starts_with({column}, '{SYNTHETIC_PREFIX}') AS sintetica,
@@ -200,10 +197,10 @@ def compute_identity_metrics(
         FROM {table}
         WHERE {column} IS NOT NULL
         GROUP BY 1, 2
-    """)
+    """))
 
     totales = (
-        conn.execute(f"""
+        fetch_df(conn, f"""
         SELECT
             COUNT(*) AS identidades,
             COUNT(*) FILTER (WHERE sintetica) AS sinteticas,
@@ -212,37 +209,33 @@ def compute_identity_metrics(
             SUM(filas) AS filas,
             AVG(periodos) AS periodos_promedio
         FROM {tmp}
-    """)
-        .pl()
-        .to_dicts()[0]
+    """).to_dicts()[0]
     )
 
-    cadenas = conn.execute(f"""
+    cadenas = fetch_df(conn, f"""
         SELECT periodos, sintetica, COUNT(*) AS identidades, SUM(filas) AS filas
         FROM {tmp} GROUP BY 1, 2 ORDER BY 1, 2
-    """).pl()
+    """)
 
     colisiones = (
-        conn.execute(f"""
+        fetch_df(conn, f"""
         SELECT
             COUNT(*) FILTER (WHERE filas > periodos) AS identidades_con_colision,
             COALESCE(SUM(filas - periodos), 0) AS filas_excedentes
         FROM {tmp}
-    """)
-        .pl()
-        .to_dicts()[0]
+    """).to_dicts()[0]
     )
 
-    nacimientos = conn.execute(f"""
+    nacimientos = fetch_df(conn, f"""
         SELECT nacimiento AS period, COUNT(*) AS identidades_nacidas
         FROM {tmp} WHERE sintetica GROUP BY 1 ORDER BY 1
-    """).pl()
+    """)
 
-    conn.execute(f"DROP TABLE IF EXISTS {tmp}")
+    conn.execute(text(f"DROP TABLE IF EXISTS {tmp}"))
 
     # Desglose por corte: en que periodos se concentran las colisiones
     # (los agregados de arriba dicen cuantas hay, no donde).
-    colisiones_periodo = conn.execute(f"""
+    colisiones_periodo = fetch_df(conn, f"""
         WITH dup AS (
             SELECT period, {column} AS identidad, COUNT(*) AS filas
             FROM {table}
@@ -256,7 +249,7 @@ def compute_identity_metrics(
             SUM(filas) AS filas_involucradas,
             SUM(filas - 1) AS filas_excedentes
         FROM dup GROUP BY 1 ORDER BY 1
-    """).pl()
+    """)
 
     identidades = int(totales["identidades"])
     return {
@@ -284,10 +277,10 @@ def compute_identity_metrics(
 
 
 def compute_agreement(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Connection,
     col_a: str,
     col_b: str,
-    table: str = "establecimientos",
+    table: str = "silver.establecimientos",
 ) -> dict:
     """
     Acuerdo fila a fila entre dos columnas de identidad (radio vs h3).
@@ -305,7 +298,7 @@ def compute_agreement(
     """
     pred_a, pred_b = _real_identity_predicate(col_a), _real_identity_predicate(col_b)
     row = (
-        conn.execute(f"""
+        fetch_df(conn, f"""
         SELECT
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE {col_a} IS NOT DISTINCT FROM {col_b}) AS identicas,
@@ -321,9 +314,7 @@ def compute_agreement(
                    OR (({pred_b}) AND starts_with({col_a}, '{SYNTHETIC_PREFIX}'))
             ) AS real_vs_sintetica
         FROM {table}
-    """)
-        .pl()
-        .to_dicts()[0]
+    """).to_dicts()[0]
     )
 
     total = int(row["total"])
@@ -407,12 +398,6 @@ def _log_period_table(
 
 @app.command()
 def run(
-    db: Path = typer.Option(
-        settings.SILVER_DUCKDB_PATH,
-        "--db",
-        help="Fuente a analizar: .duckdb (READ-ONLY) o .parquet con un "
-        "volcado de establecimientos (snapshot previo). Default: Silver real.",
-    ),
     columns: list[str] = typer.Option(
         DEFAULT_COLUMNS,
         "--column",
@@ -434,25 +419,25 @@ def run(
     """
     Calcula las metricas de exito de propagacion y las escribe a JSON.
 
-    Solo lectura sobre la base indicada. No correr mientras una resolucion
-    este escribiendo en esa misma base (DuckDB no permite lector externo
-    con un escritor activo).
+    Solo lectura. A diferencia de antes, correrlo durante una resolucion ya
+    no es un problema de bloqueo --PostgreSQL admite lectores concurrentes--
+    aunque las cifras saldran de un estado a medio resolver.
     """
-    conn = open_source(db)
+    conn = open_source()
     try:
-        disponibles = {r[0] for r in conn.execute("DESCRIBE establecimientos").fetchall()}
+        disponibles = {c.name for c in get_table("establecimientos").columns}
         faltantes = [c for c in columns if c not in disponibles]
         if faltantes:
-            raise typer.BadParameter(f"Columnas ausentes en {db}: {faltantes}")
+            raise typer.BadParameter(f"Columnas que no existen en la tabla: {faltantes}")
 
         reporte: dict = {
-            "db": str(db),
+            "db": settings.POSTGRES_DB,
             "computed_at": datetime.now().isoformat(),
             "columnas": {},
         }
 
         for column in columns:
-            logger.info(f"Analizando {column} en {db}...")
+            logger.info(f"Analizando {column}...")
             periods = compute_period_metrics(conn, column)
             resumen = summarize_periods(periods)
 
@@ -509,7 +494,7 @@ def run(
         conn.close()
 
     STATS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = out or STATS_DIR / f"stats_{Path(db).stem}.json"
+    out_path = out or STATS_DIR / f"stats_{settings.POSTGRES_DB}.json"
     out_path.write_text(json.dumps(reporte, indent=2, default=str))
     logger.info(f"✅ Metricas escritas en {out_path}")
 

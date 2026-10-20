@@ -72,7 +72,7 @@ def period_to_date(period: str) -> date:
 
 class BronzeToSilverProcessor:
     """
-    Transforms raw DENUE ZIP files (Bronze) into the Silver DuckDB warehouse.
+    Convierte los ZIP de Bronze en particiones de `silver.establecimientos`.
 
     Handles:
     - ZIP file extraction
@@ -350,7 +350,7 @@ class BronzeToSilverProcessor:
         )
 
         # Dedupe DENTRO del archivo: INSERT OR IGNORE solo protege contra
-        # duplicados vs la tabla, no dentro del mismo batch (DuckDB truena
+        # duplicados vs la tabla, no dentro del mismo lote (el COPY falla
         # con PK duplicada intra-INSERT; visto en comercio_al_por_menor
         # 03_2017). Filas con los mismos 5 componentes de id son el mismo
         # registro para el pipeline: se conserva la primera.

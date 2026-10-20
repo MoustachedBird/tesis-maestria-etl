@@ -1,10 +1,19 @@
-"""Tests de las metricas de exito de propagacion (scripts/clee_propagation_stats.py)."""
+"""Metricas de exito de la propagacion de identidad.
+
+El escenario sintetico reproduce los tres regimenes que aparecen en los
+datos reales: cortes con CLEE oficial (resolucion deterministica), cortes
+propagados, e identidades sinteticas que nacen sin pareja. Lo que se mide
+--cadenas, colisiones, nacimientos, acuerdo entre metodos-- es lo que dice
+si la propagacion funciono.
+"""
 
 import sys
+from datetime import date
 from pathlib import Path
 
-import duckdb
+import polars as pl
 import pytest
+from sqlalchemy import text
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
@@ -15,9 +24,14 @@ from clee_propagation_stats import (  # noqa: E402
     summarize_periods,
 )
 
+from src.shared.db.copy import copy_dataframe  # noqa: E402
+from src.shared.db.partitions import create_partition  # noqa: E402
+
+pytestmark = pytest.mark.postgres
+
 
 @pytest.fixture
-def conn():
+def conn(silver_engine):
     """
     Warehouse sintetico con los tres regimenes de la propagacion real.
 
@@ -35,29 +49,38 @@ def conn():
     (NEW_H3-*, nunca literalmente iguales a los de radio) y la fila b3,
     donde h3 asigno C2 y radio C3 (desacuerdo real entre metodos).
     """
-    con = duckdb.connect(":memory:")
-    con.execute("""
-        CREATE TABLE establecimientos (
-            id VARCHAR, period DATE, clee VARCHAR,
-            clee_propagado_radio VARCHAR, clee_propagado_h3 VARCHAR
+    observaciones = [
+        ("a1", date(2022, 1, 1), "C1", "C1", "C1"),
+        ("a2", date(2022, 1, 1), "C2", "C2", "C2"),
+        ("b1", date(2021, 1, 1), "C1", "C1", "C1"),
+        ("b2", date(2021, 1, 1), "C2", "C2", "C2"),
+        ("b3", date(2021, 1, 1), "C3", "C3", "C2"),
+        ("c1", date(2020, 1, 1), None, "C1", "C1"),
+        ("c2", date(2020, 1, 1), None, "NEW_R-1", "NEW_H3-1"),
+        ("d1", date(2019, 1, 1), None, "C1", "C1"),
+        ("d2", date(2019, 1, 1), None, "NEW_R-1", "NEW_H3-1"),
+        ("d3", date(2019, 1, 1), None, "NEW_R-2", "NEW_H3-2"),
+        ("x9", date(2019, 1, 1), None, "C1", "C1"),
+    ]
+    with silver_engine.begin() as con:
+        for corte in {o[1] for o in observaciones}:
+            create_partition(con, corte)
+        copy_dataframe(
+            con,
+            pl.DataFrame(
+                observaciones,
+                schema={
+                    "id": pl.Utf8,
+                    "period": pl.Date,
+                    "clee": pl.Utf8,
+                    "clee_propagado_radio": pl.Utf8,
+                    "clee_propagado_h3": pl.Utf8,
+                },
+                orient="row",
+            ),
+            "establecimientos",
         )
-    """)
-    con.execute("""
-        INSERT INTO establecimientos VALUES
-            ('a1', DATE '2022-01-01', 'C1', 'C1', 'C1'),
-            ('a2', DATE '2022-01-01', 'C2', 'C2', 'C2'),
-            ('b1', DATE '2021-01-01', 'C1', 'C1', 'C1'),
-            ('b2', DATE '2021-01-01', 'C2', 'C2', 'C2'),
-            ('b3', DATE '2021-01-01', 'C3', 'C3', 'C2'),
-            ('c1', DATE '2020-01-01', NULL, 'C1', 'C1'),
-            ('c2', DATE '2020-01-01', NULL, 'NEW_R-1', 'NEW_H3-1'),
-            ('d1', DATE '2019-01-01', NULL, 'C1', 'C1'),
-            ('d2', DATE '2019-01-01', NULL, 'NEW_R-1', 'NEW_H3-1'),
-            ('d3', DATE '2019-01-01', NULL, 'NEW_R-2', 'NEW_H3-2'),
-            ('x9', DATE '2019-01-01', NULL, 'C1', 'C1')
-    """)
-    yield con
-    con.close()
+        yield con
 
 
 @pytest.mark.unit
@@ -86,7 +109,7 @@ class TestPeriodMetrics:
         assert rows["2019-01-01"]["sinteticas"] == 2
 
     def test_cobertura_detecta_filas_sin_resolver(self, conn):
-        conn.execute("UPDATE establecimientos SET clee_propagado_radio = NULL WHERE id = 'd3'")
+        conn.execute(text("UPDATE silver.establecimientos SET clee_propagado_radio = NULL WHERE id = 'd3'"))
         rows = {
             r["period"]: r for r in compute_period_metrics(conn, "clee_propagado_radio").to_dicts()
         }
@@ -112,7 +135,7 @@ class TestSummarizePeriods:
         assert resumen["tasa_cobertura_global"] == 1.0
 
     def test_warehouse_vacio(self, conn):
-        conn.execute("DELETE FROM establecimientos")
+        conn.execute(text("DELETE FROM silver.establecimientos"))
         resumen = summarize_periods(compute_period_metrics(conn, "clee_propagado_radio"))
         assert resumen["total"] == 0
         assert resumen["tasa_vinculacion_propagados"] == 0.0
@@ -168,7 +191,7 @@ class TestIdentityMetrics:
         ]
 
     def test_sin_colisiones_cuando_cada_identidad_es_unica_por_corte(self, conn):
-        conn.execute("DELETE FROM establecimientos WHERE id = 'x9'")
+        conn.execute(text("DELETE FROM silver.establecimientos WHERE id = 'x9'"))
         col = compute_identity_metrics(conn, "clee_propagado_radio")["colisiones"]
         assert col["identidades_con_colision"] == 0
         assert col["filas_excedentes"] == 0
@@ -189,7 +212,7 @@ class TestAgreement:
         assert ac["tasa_acuerdo_semantico"] == pytest.approx(10 / 11)
 
     def test_real_vs_sintetica_se_cuenta_aparte(self, conn):
-        conn.execute("UPDATE establecimientos SET clee_propagado_h3 = 'C2' WHERE id = 'd3'")
+        conn.execute(text("UPDATE silver.establecimientos SET clee_propagado_h3 = 'C2' WHERE id = 'd3'"))
         ac = compute_agreement(conn, "clee_propagado_radio", "clee_propagado_h3")
         assert ac["real_vs_sintetica"] == 1
         assert ac["ambas_sinteticas"] == 2

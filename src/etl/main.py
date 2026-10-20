@@ -234,41 +234,6 @@ def transform(
 
 
 # ---------------------------------------------------------------------------
-# LOAD
-# ---------------------------------------------------------------------------
-@app.command()
-def load(
-    force: bool = typer.Option(
-        False, "--force", "-f", help="Force load even if Gold is up-to-date"
-    ),
-):
-    """
-    STEP 3: Load Silver -> Gold.
-
-    Promotes the Silver DuckDB warehouse to Gold for production use.
-    """
-    console.print("[bold cyan]Starting Loader[/bold cyan]")
-
-    try:
-        from src.etl.transformers.denue import DenuePipelineOrchestrator
-
-        transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
-        success = transformer.run_load_stage(force=force)
-
-        if success:
-            console.print("[bold green]Load completed successfully.[/bold green]")
-        else:
-            console.print("[bold yellow]Load failed. Check logs.[/bold yellow]")
-            raise typer.Exit(code=1)
-
-    except typer.Exit:
-        raise
-    except Exception as e:
-        console.print(f"[bold red]Load failed: {escape(str(e))}[/bold red]")
-        raise typer.Exit(code=1)
-
-
-# ---------------------------------------------------------------------------
 # PIPELINE
 # ---------------------------------------------------------------------------
 @app.command()
