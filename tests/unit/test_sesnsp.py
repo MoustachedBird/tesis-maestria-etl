@@ -1,24 +1,27 @@
 """Tests for the SESNSP loader/transformer (crime incidence ingestion)."""
 
+from datetime import date
 from pathlib import Path
 
-import duckdb
 import polars as pl
 import pytest
+from sqlalchemy import func, insert, select
 
 from src.etl.loaders.sesnsp import (
+    DELITOS_TABLE,
     SEED_DELITOS_FILE,
     build_delitos_rows,
     delitos_seed_path,
-    ensure_tables,
     validate_delitos_del_csv,
     validate_municipios_del_csv,
 )
+from src.etl.transformers.catalogs import CatalogoDesactualizado
 from src.etl.transformers.sesnsp import (
     SesnspProcessor,
     cut_sort_key,
     detect_csv_encoding,
 )
+from src.shared.db.base import get_table
 
 # Header real del CSV consolidado del SESNSP (formato ancho)
 CSV_HEADER = (
@@ -52,17 +55,6 @@ def _write_sample_csv(path: Path, encoding: str = "latin-1") -> None:
     path.write_text("\n".join(rows), encoding=encoding)
 
 
-def _bootstrap_geography(conn: duckdb.DuckDBPyConnection) -> None:
-    """Catalogos geograficos minimos para satisfacer las FKs."""
-    conn.execute("CREATE TABLE denue_entidades (cve_ent VARCHAR PRIMARY KEY, entidad VARCHAR)")
-    conn.execute(
-        "CREATE TABLE denue_municipios (cve_ent VARCHAR, cve_mun VARCHAR, municipio VARCHAR, "
-        "PRIMARY KEY (cve_ent, cve_mun))"
-    )
-    conn.execute("INSERT INTO denue_entidades VALUES ('01', 'Aguascalientes')")
-    conn.execute("INSERT INTO denue_municipios VALUES ('01', '001', 'AGUASCALIENTES')")
-
-
 def _seed_delitos(tmp_path: Path) -> Path:
     """Escribe un seed del catalogo con las 2 combinaciones de muestra."""
     catalogo = _sample_delitos().with_row_index("id", offset=1).with_columns(
@@ -71,19 +63,6 @@ def _seed_delitos(tmp_path: Path) -> Path:
     path = tmp_path / SEED_DELITOS_FILE
     catalogo.write_parquet(path)
     return path
-
-
-def _tabla_delitos_sembrada(conn: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
-    """Crea sesnsp_delitos y la siembra desde el seed, como la migracion."""
-    from src.etl.loaders.sesnsp import SESNSP_DELITOS_DDL
-
-    _seed_delitos(tmp_path)
-    conn.execute(SESNSP_DELITOS_DDL)
-    for row in build_delitos_rows(tmp_path):
-        conn.execute(
-            "INSERT INTO sesnsp_delitos VALUES (?, ?, ?, ?, ?)",
-            [row["id"], row["bien_juridico"], row["tipo"], row["subtipo"], row["modalidad"]],
-        )
 
 
 @pytest.mark.unit
@@ -110,18 +89,39 @@ class TestDelitosSeedEsFuenteDeVerdad:
             build_delitos_rows(tmp_path)
 
 
+@pytest.fixture
+def catalogos(silver_engine, tmp_path):
+    """Conexion con el catalogo de delitos y la geografia minima sembrados.
+
+    Las tablas vienen del modelo --el mismo esquema que crea la migracion--
+    y el catalogo de delitos, del seed, igual que en produccion.
+    """
+    _seed_delitos(tmp_path)
+    with silver_engine.begin() as conn:
+        conn.execute(
+            insert(get_table(DELITOS_TABLE)), build_delitos_rows(tmp_path)
+        )
+        conn.execute(
+            insert(get_table("denue_entidades")),
+            [{"cve_ent": "01", "entidad": "Aguascalientes"}],
+        )
+        conn.execute(
+            insert(get_table("denue_municipios")),
+            [{"cve_ent": "01", "cve_mun": "001", "municipio": "AGUASCALIENTES"}],
+        )
+        yield conn
+
+
+@pytest.mark.postgres
 @pytest.mark.unit
 class TestLinkeoDelCorte:
-    """Cada corte anual se valida contra los catalogos, como un negocio."""
+    """Cada corte se valida contra los catalogos, como un negocio del DENUE."""
 
-    def test_delitos_del_catalogo_pasan(self, tmp_path):
-        conn = duckdb.connect()
-        _tabla_delitos_sembrada(conn, tmp_path)
-        validate_delitos_del_csv(conn, _sample_delitos())  # no debe lanzar
+    def test_delitos_del_catalogo_pasan(self, catalogos):
+        validate_delitos_del_csv(catalogos, _sample_delitos())
 
-    def test_delito_nuevo_se_reporta_para_darlo_de_alta(self, tmp_path):
-        conn = duckdb.connect()
-        _tabla_delitos_sembrada(conn, tmp_path)
+    def test_delito_nuevo_se_reporta_para_darlo_de_alta(self, catalogos):
+        """El SESNSP agrega delitos entre cortes; hay que darlos de alta."""
         nuevo = pl.DataFrame(
             {
                 "bien_juridico": ["La libertad personal"],
@@ -130,22 +130,18 @@ class TestLinkeoDelCorte:
                 "modalidad": ["Secuestro extorsivo"],
             }
         )
-        with pytest.raises(ValueError, match="fuera del catalogo sesnsp_delitos"):
-            validate_delitos_del_csv(conn, nuevo)
+        with pytest.raises(CatalogoDesactualizado, match="sesnsp_delitos"):
+            validate_delitos_del_csv(catalogos, nuevo)
 
-    def test_municipio_del_catalogo_pasa(self):
-        conn = duckdb.connect()
-        _bootstrap_geography(conn)
+    def test_municipio_del_catalogo_pasa(self, catalogos):
         claves = pl.DataFrame({"cve_ent": ["01"], "cve_mun": ["001"]})
-        validate_municipios_del_csv(conn, claves)  # no debe lanzar
+        validate_municipios_del_csv(catalogos, claves)
 
-    def test_municipio_ausente_se_reporta(self):
+    def test_municipio_ausente_se_reporta(self, catalogos):
         """Incluye los sinteticos 998/999 si no estan en el seed geografico."""
-        conn = duckdb.connect()
-        _bootstrap_geography(conn)
         claves = pl.DataFrame({"cve_ent": ["01"], "cve_mun": ["998"]})
-        with pytest.raises(ValueError, match="fuera del catalogo denue_municipios"):
-            validate_municipios_del_csv(conn, claves)
+        with pytest.raises(CatalogoDesactualizado, match="denue_municipios"):
+            validate_municipios_del_csv(catalogos, claves)
 
 
 @pytest.mark.unit
@@ -218,70 +214,64 @@ class TestDetectEncoding:
         assert detect_csv_encoding(path) == "utf-8"
 
 
+@pytest.mark.postgres
 @pytest.mark.unit
 class TestLoadCsv:
-    """SesnspProcessor._load_csv(): unpivot ancho -> largo con FKs."""
+    """`_load_csv`: el CSV ancho se vuelve filas con FK y fecha."""
 
-    def _run(self, tmp_path, encoding: str) -> duckdb.DuckDBPyConnection:
-        """Ejecuta la carga completa sobre una BD en memoria.
+    def _cargar(self, catalogos, tmp_path, encoding: str) -> int:
+        """Corre la carga completa y devuelve las filas escritas.
 
-        El catalogo de delitos se siembra antes desde el parquet, como hace
-        `make db-migrate`: el transform ya no lo descubre del CSV.
+        El catalogo de delitos ya esta sembrado por el fixture, como hace
+        la migracion: el transform no lo descubre del CSV.
         """
-        conn = duckdb.connect()
-        _bootstrap_geography(conn)
-        ensure_tables(conn)
-        _tabla_delitos_sembrada(conn, tmp_path)
         csv_path = tmp_path / "corte.csv"
         _write_sample_csv(csv_path, encoding=encoding)
 
         processor = SesnspProcessor.__new__(SesnspProcessor)
         processor.seeds_dir = tmp_path
-        new_delitos, rows = processor._load_csv(conn, csv_path)
-        assert new_delitos == 0  # el catalogo no se modifica aqui
-        assert rows == 24  # 2 filas anchas x 12 meses
-        return conn
+        nuevos, filas = processor._load_csv(catalogos, csv_path)
+        assert nuevos == 0, "el catalogo no se modifica aqui"
+        assert filas == 24, "2 filas anchas x 12 meses"
+        return filas
 
-    def test_unpivot_values_and_dates(self, tmp_path):
-        conn = self._run(tmp_path, "latin-1")
+    def _carpetas(self, conn, subtipo: str, fecha: str) -> int:
+        """Carpetas registradas para un delito en un mes."""
+        hechos = get_table("sesnsp_incidencia_municipal")
+        delitos = get_table(DELITOS_TABLE)
+        return conn.execute(
+            select(hechos.c.carpetas)
+            .select_from(hechos.join(delitos, delitos.c.id == hechos.c.delito_id))
+            .where(delitos.c.subtipo == subtipo, hechos.c.fecha == date.fromisoformat(fecha))
+        ).scalar_one()
 
-        assert conn.execute(
-            """
-            SELECT carpetas FROM sesnsp_incidencia_municipal i
-            JOIN sesnsp_delitos d ON d.id = i.delito_id
-            WHERE d.subtipo = 'Homicidio doloso' AND i.fecha = DATE '2020-01-01'
-            """
-        ).fetchone() == (2,)
-        assert conn.execute(
-            """
-            SELECT carpetas FROM sesnsp_incidencia_municipal i
-            JOIN sesnsp_delitos d ON d.id = i.delito_id
-            WHERE d.subtipo = 'Robo a negocio' AND i.fecha = DATE '2020-12-01'
-            """
-        ).fetchone() == (1,)
+    def test_cada_mes_queda_en_su_fecha(self, catalogos, tmp_path):
+        """El unpivot tiene que mandar cada columna al mes correcto."""
+        self._cargar(catalogos, tmp_path, "latin-1")
+        assert self._carpetas(catalogos, "Homicidio doloso", "2020-01-01") == 2
+        assert self._carpetas(catalogos, "Robo a negocio", "2020-12-01") == 1
 
-    def test_geographic_keys_zero_padded(self, tmp_path):
-        conn = self._run(tmp_path, "latin-1")
-        assert conn.execute(
-            "SELECT DISTINCT cve_ent, cve_mun FROM sesnsp_incidencia_municipal"
-        ).fetchall() == [("01", "001")]
+    def test_las_claves_geograficas_van_con_ceros(self, catalogos, tmp_path):
+        """El SESNSP las publica como enteros; las FKs las exigen con ceros."""
+        self._cargar(catalogos, tmp_path, "latin-1")
+        hechos = get_table("sesnsp_incidencia_municipal")
+        assert catalogos.execute(
+            select(hechos.c.cve_ent, hechos.c.cve_mun).distinct()
+        ).all() == [("01", "001")]
 
-    def test_utf8_csv_loads_identically(self, tmp_path):
-        conn = self._run(tmp_path, "utf-8")
-        total = conn.execute("SELECT SUM(carpetas) FROM sesnsp_incidencia_municipal").fetchone()[0]
+    def test_utf8_carga_identico(self, catalogos, tmp_path):
+        """El corte llega en latin-1 o utf-8 segun quien lo publique."""
+        self._cargar(catalogos, tmp_path, "utf-8")
+        hechos = get_table("sesnsp_incidencia_municipal")
+        total = catalogos.execute(select(func.sum(hechos.c.carpetas))).scalar_one()
         assert total == 2 + 1 + 3 + 5 + 4 + 1
 
-    def test_rebuild_replaces_previous_load(self, tmp_path):
-        conn = duckdb.connect()
-        _bootstrap_geography(conn)
-        ensure_tables(conn)
-        _tabla_delitos_sembrada(conn, tmp_path)
-        csv_path = tmp_path / "corte.csv"
-        _write_sample_csv(csv_path)
+    def test_recargar_reemplaza_en_vez_de_acumular(self, catalogos, tmp_path):
+        """Cada corte revisa cifras historicas: la tabla se reconstruye."""
+        self._cargar(catalogos, tmp_path, "latin-1")
+        self._cargar(catalogos, tmp_path, "latin-1")
 
-        processor = SesnspProcessor.__new__(SesnspProcessor)
-        processor.seeds_dir = tmp_path
-        processor._load_csv(conn, csv_path)
-        _, rows = processor._load_csv(conn, csv_path)  # segundo corte, mismo archivo
-
-        assert rows == 24  # sin duplicados: rebuild, no append
+        hechos = get_table("sesnsp_incidencia_municipal")
+        assert catalogos.execute(
+            select(func.count()).select_from(hechos)
+        ).scalar_one() == 24

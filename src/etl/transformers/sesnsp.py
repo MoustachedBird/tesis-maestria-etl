@@ -28,15 +28,18 @@ import re
 from datetime import date
 from pathlib import Path
 
+import polars as pl
+from sqlalchemy import Engine, delete, select
+
 from src.etl.loaders.sesnsp import (
     DELITO_KEY_COLUMNS,
+    DELITOS_TABLE,
     validate_delitos_del_csv,
     validate_municipios_del_csv,
 )
-from src.etl.utils.backup import backup_warehouse
-from src.etl.utils.warehouse import connect_configured
 from src.meta.tracker import MetadataTracker
-from src.shared.config import settings
+from src.shared.db.base import get_table
+from src.shared.db.copy import copy_dataframe
 from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
@@ -148,19 +151,28 @@ class SesnspProcessor:
         self,
         data_root: Path,
         tracker: MetadataTracker | None = None,
-        silver_db_path: Path | None = None,
+        engine: Engine | None = None,
     ):
         """
         Args:
-            data_root: Raiz de datos (contiene bronze/, silver/, seeds/).
+            data_root: Raiz de datos (contiene bronze/ y seeds/).
             tracker: MetadataTracker; por default, uno nuevo.
-            silver_db_path: Silver DuckDB (default: settings).
+            engine: conexion a la base; por default la del proyecto.
         """
         self.data_root = Path(data_root)
         self.bronze_dir = self.data_root / "bronze" / "sesnsp"
         self.seeds_dir = self.data_root / "seeds"
         self.tracker = tracker or MetadataTracker()
-        self.warehouse_path = Path(silver_db_path or settings.SILVER_DUCKDB_PATH)
+        self._engine = engine
+
+    @property
+    def engine(self) -> Engine:
+        """Engine de la base, resuelto la primera vez que se usa."""
+        if self._engine is None:
+            from src.shared.db.session import get_engine
+
+            self._engine = get_engine()
+        return self._engine
 
     def _find_latest_csv(self) -> Path | None:
         """CSV del corte mas reciente en Bronze.
@@ -181,91 +193,125 @@ class SesnspProcessor:
         """True si este mismo archivo ya tiene una process_task SUCCESS."""
         return self.tracker.has_successful_process_task(csv_path.name, self.TARGET_TABLE)
 
+    def _leer_csv(self, csv_path: Path) -> pl.DataFrame:
+        """Lee el CSV ancho del corte y deriva sus claves.
+
+        El SESNSP publica un archivo ancho: una fila por municipio y delito,
+        con doce columnas de mes. Aqui solo se leen y se normalizan las
+        claves; el paso a formato largo va aparte.
+
+        `cve_mun` sale modulo 1000 porque el SESNSP concatena entidad y
+        municipio en un solo numero.
+
+        Args:
+            csv_path: archivo del corte.
+
+        Returns:
+            pl.DataFrame: ancho, con cve_ent, cve_mun, anio y los delitos.
+        """
+        encoding = detect_csv_encoding(csv_path)
+        logger.info(f"   Encoding detectado: {encoding}")
+
+        crudo = pl.read_csv(
+            csv_path,
+            encoding=encoding,
+            infer_schema_length=20_000,
+            null_values=["", "NA", "ND"],
+        )
+
+        meses = [nombre for nombre, _ in MONTH_COLUMNS]
+        return crudo.select(
+            pl.col("Año").cast(pl.Int32, strict=False).alias("anio"),
+            pl.col("Clave_Ent")
+            .cast(pl.Int32, strict=False)
+            .cast(pl.Utf8)
+            .str.pad_start(2, "0")
+            .alias("cve_ent"),
+            (pl.col("Cve. Municipio").cast(pl.Int32, strict=False) % 1000)
+            .cast(pl.Utf8)
+            .str.pad_start(3, "0")
+            .alias("cve_mun"),
+            *[
+                pl.col(origen).str.strip_chars().alias(destino)
+                for origen, destino in CSV_DELITO_COLUMNS.items()
+            ],
+            # `strict=False` y no un cast duro: si un corte futuro pone un
+            # token no numerico en un mes, la celda queda NULL y se filtra
+            # despues, en vez de tumbar el corte entero.
+            *[pl.col(m).cast(pl.Int32, strict=False).alias(m) for m in meses],
+        )
+
+    def _a_formato_largo(self, ancho: pl.DataFrame, delitos: pl.DataFrame) -> pl.DataFrame:
+        """Pasa de doce columnas de mes a una fila por mes.
+
+        Args:
+            ancho: salida de `_leer_csv`.
+            delitos: catalogo, con su `id` y la clave natural.
+
+        Returns:
+            pl.DataFrame: listo para el COPY, con delito_id y fecha.
+        """
+        meses = {nombre: numero for nombre, numero in MONTH_COLUMNS}
+
+        largo = ancho.unpivot(
+            on=list(meses),
+            index=["anio", "cve_ent", "cve_mun", *CSV_DELITO_COLUMNS.values()],
+            variable_name="mes_nombre",
+            value_name="carpetas",
+        ).drop_nulls("carpetas")
+
+        return (
+            largo.with_columns(
+                mes=pl.col("mes_nombre").replace_strict(meses, return_dtype=pl.Int32)
+            )
+            .join(delitos, on=DELITO_KEY_COLUMNS, how="inner")
+            .select(
+                "cve_ent",
+                "cve_mun",
+                pl.col("id").alias("delito_id"),
+                pl.date("anio", "mes", 1).alias("fecha"),
+                "carpetas",
+            )
+        )
+
     def _load_csv(self, conn, csv_path: Path) -> tuple[int, int]:
         """
         Valida los linkeos del corte y reconstruye la tabla de hechos.
 
+        Se reconstruye completa en cada corte porque el SESNSP revisa cifras
+        historicas: el corte de junio corrige meses de hace anos. Un
+        incremental dejaria las correcciones fuera.
+
+        Args:
+            conn: conexion con transaccion abierta por el llamador.
+            csv_path: archivo del corte.
+
         Returns:
-            (siempre 0 -- el catalogo ya no se modifica aqui,
-             filas_hechos_cargadas)
+            tuple: (0 -- el catalogo no se modifica aqui, filas cargadas).
         """
-        encoding = detect_csv_encoding(csv_path)
-        logger.info(f"   Encoding detectado: {encoding}")
-        csv_relation = (
-            f"read_csv('{csv_path}', encoding='{encoding}', header=true, sample_size=20000)"
-        )
+        ancho = self._leer_csv(csv_path)
 
-        # 1. Linkeo del corte contra los catalogos (sembrados en la
-        # migracion desde los parquet): cada delito y cada municipio del CSV
-        # debe existir ya, igual que un negocio se valida contra SCIAN o
-        # tipo de asentamiento. Un valor nuevo se reporta para darlo de alta
-        # en el seed, no se auto-inventa un id.
-        delito_select = ", ".join(
-            f'trim("{src}") AS {dst}' for src, dst in CSV_DELITO_COLUMNS.items()
-        )
-        distinct_delitos = conn.execute(f"SELECT DISTINCT {delito_select} FROM {csv_relation}").pl()
-        validate_delitos_del_csv(conn, distinct_delitos)
+        # Linkeo contra los catalogos, que la migracion sembro desde los
+        # parquet: un delito o municipio nuevo se reporta para darlo de
+        # alta, no se auto-inventa.
+        validate_delitos_del_csv(conn, ancho.select(DELITO_KEY_COLUMNS).unique())
+        validate_municipios_del_csv(conn, ancho.select(["cve_ent", "cve_mun"]).unique())
 
-        distinct_municipios = conn.execute(
-            f"""
-            SELECT DISTINCT
-                lpad(CAST(CAST("Clave_Ent" AS INTEGER) AS VARCHAR), 2, '0') AS cve_ent,
-                lpad(CAST(CAST("Cve. Municipio" AS INTEGER) % 1000 AS VARCHAR), 3, '0') AS cve_mun
-            FROM {csv_relation}
-            """
-        ).pl()
-        validate_municipios_del_csv(conn, distinct_municipios)
-        new_delitos = 0
-
-        # 2. Hechos: rebuild completo (cada corte revisa cifras historicas).
-        # TRY_CAST (no CAST): un mes vacio ya llega como NULL de read_csv, pero
-        # si un corte pusiera un token no numerico en un mes futuro (p. ej.
-        # "ND"), CAST abortaria el INSERT entero; TRY_CAST lo vuelve NULL y el
-        # WHERE carpetas IS NOT NULL lo filtra, sin tumbar el corte completo.
-        month_casts = ", ".join(
-            f'TRY_CAST("{name}" AS INTEGER) AS "{name}"' for name, _ in MONTH_COLUMNS
-        )
-        month_names = ", ".join(f'"{name}"' for name, _ in MONTH_COLUMNS)
-        month_map_values = ", ".join(f"('{name}', {num})" for name, num in MONTH_COLUMNS)
-
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute(f"DELETE FROM {self.TARGET_TABLE}")
+        catalogo = get_table(DELITOS_TABLE)
+        delitos = pl.DataFrame(
             conn.execute(
-                f"""
-                INSERT INTO {self.TARGET_TABLE}
-                WITH ancho AS (
-                    SELECT
-                        CAST("Año" AS INTEGER) AS anio,
-                        lpad(CAST(CAST("Clave_Ent" AS INTEGER) AS VARCHAR), 2, '0') AS cve_ent,
-                        lpad(CAST(CAST("Cve. Municipio" AS INTEGER) % 1000 AS VARCHAR), 3, '0')
-                            AS cve_mun,
-                        {delito_select},
-                        {month_casts}
-                    FROM {csv_relation}
-                ),
-                largo AS (
-                    UNPIVOT ancho ON {month_names} INTO NAME mes_nombre VALUE carpetas
-                )
-                SELECT
-                    l.cve_ent,
-                    l.cve_mun,
-                    d.id AS delito_id,
-                    make_date(l.anio, m.mes, 1) AS fecha,
-                    l.carpetas
-                FROM largo l
-                JOIN sesnsp_delitos d USING ({", ".join(DELITO_KEY_COLUMNS)})
-                JOIN (VALUES {month_map_values}) AS m(mes_nombre, mes) USING (mes_nombre)
-                WHERE l.carpetas IS NOT NULL
-                """
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+                select(catalogo.c["id"], *[catalogo.c[c] for c in DELITO_KEY_COLUMNS])
+            ).all(),
+            schema=["id", *DELITO_KEY_COLUMNS],
+            orient="row",
+        )
 
-        rows_loaded = conn.execute(f"SELECT COUNT(*) FROM {self.TARGET_TABLE}").fetchone()[0]
-        return new_delitos, rows_loaded
+        largo = self._a_formato_largo(ancho, delitos)
+
+        hechos = get_table(self.TARGET_TABLE)
+        conn.execute(delete(hechos))
+        copy_dataframe(conn, largo, self.TARGET_TABLE)
+        return 0, largo.height
 
     def run(self, force: bool = False) -> bool:
         """
@@ -289,9 +335,9 @@ class SesnspProcessor:
             logger.info(f"✨ Corte ya procesado: {csv_path.name}. Nada por transformar.")
             return True
 
-        # Respaldo antes de escribir (no-op si otra etapa del mismo comando
-        # ya lo hizo): esta etapa hace DELETE + INSERT de la tabla completa.
-        backup_warehouse(self.warehouse_path, stage="sesnsp")
+        # No hace falta respaldar nada antes de escribir: el DELETE y el
+        # COPY van en una transaccion, asi que un fallo deja la tabla como
+        # estaba.
 
         run_id = self.tracker.create_run(
             job_name=self.JOB_NAME,
@@ -309,12 +355,13 @@ class SesnspProcessor:
         self.tracker.start_process_task(task_id)
         logger.info(f"📦 Procesando corte SESNSP: {csv_path.name}...")
 
-        conn = connect_configured(self.warehouse_path)
         try:
             # El esquema y los catalogos (delitos, geografia) los crea y
-            # siembra `make db-migrate` desde los seeds parquet; aqui solo
-            # se cargan hechos y se validan sus linkeos.
-            new_delitos, rows_loaded = self._load_csv(conn, csv_path)
+            # siembra la migracion desde los seeds parquet; aqui solo se
+            # cargan hechos y se validan sus linkeos. Todo en una
+            # transaccion: el DELETE y el COPY se ven juntos o no se ven.
+            with self.engine.begin() as conn:
+                new_delitos, rows_loaded = self._load_csv(conn, csv_path)
 
             self.tracker.complete_process_task(
                 task_id,
@@ -326,7 +373,7 @@ class SesnspProcessor:
                 run_id=run_id,
                 task_id=task_id,
                 source_location=str(csv_path),
-                target_location=f"{self.warehouse_path}::{self.TARGET_TABLE}",
+                target_location=f"silver.{self.TARGET_TABLE}",
                 source_type="FILE",
                 target_type="TABLE",
                 bytes_processed=csv_path.stat().st_size,
@@ -340,5 +387,3 @@ class SesnspProcessor:
             self.tracker.complete_process_task(task_id, TaskStatus.FAILED, error_message=str(e))
             self.tracker.complete_run(run_id, JobStatus.FAILED, error_summary=str(e))
             return False
-        finally:
-            conn.close()
