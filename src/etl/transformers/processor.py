@@ -1,21 +1,32 @@
-"""
-Transform Stage: ZIP → Silver DuckDB
+"""Ingest: los ZIP de Bronze se vuelven una particion de Silver.
 
-Extracts data from raw ZIP files (Bronze), cleans and normalizes it,
-and loads it into the Silver DuckDB warehouse.
+**La unidad de carga es el corte, no el archivo.** Un corte del DENUE son
+decenas de ZIP (uno por sector y entidad) que juntos forman un periodo, y
+ese periodo es una particion de `silver.establecimientos`. Se leen todos,
+se concatenan, se cargan en una tabla aparte y esa tabla se engancha de
+golpe. Mientras dura, Silver no ve nada; al terminar, lo ve todo.
 
-This module contains the core transformation logic, integrated with
-MetadataTracker for comprehensive observability.
+Eso hace del corte la unidad de recuperacion: uno que salio mal se
+desengancha y se rehace sin tocar los otros diecinueve. El precio es que
+`--force` ya no opera por archivo --reprocesar un ZIP suelto no tiene
+sentido si la particion se construye entera-- sino por periodo.
+
+La fecha de alta y las celdas H3 vienen calculadas desde `enrich.py`, antes
+del COPY. Eran dos etapas aparte que hacian UPDATE sobre la tabla ya
+cargada; aqui salen gratis.
 """
 
 import zipfile
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+from sqlalchemy import Engine
 
-from src.etl.db.indexes import suspended_indexes
-from src.etl.loaders.denue import EstablecimientoWriter
+from src.etl.transformers.catalogs import resolve as resolve_catalogs
+from src.etl.transformers.enrich import add_h3_cells, normalize_fecha_alta
 from src.etl.utils.denue_schema import (
     COLUMN_ALIASES,
     DOMAIN_VALUE_ALIASES,
@@ -24,12 +35,39 @@ from src.etl.utils.denue_schema import (
     REQUIRED_COLUMNS,
 )
 from src.meta.tracker import MetadataTracker
-from src.shared.config import settings
+from src.shared.db.copy import copy_dataframe
+from src.shared.db.partitions import drop_partition, existing_partitions, partition_name
+from src.shared.db.staging import staging_partition
 from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
 # Logging de stage centralizado (sin basicConfig: no toca el root logger)
 logger = get_stage_logger(__name__, Path("./data/etl_process.log"))
+
+#: Tabla que el ingest escribe. Se registra en `process_tasks.target_table`.
+TARGET_TABLE = "establecimientos"
+
+
+def period_to_date(period: str) -> date:
+    """Fecha del corte a partir de como INEGI nombra sus directorios.
+
+    Los cortes vienen como `MM_AAAA` --mes primero-- y alguno antiguo como
+    `AAAA` suelto. Ambos se llevan al primer dia del mes, que es el grano
+    real del dato y la clave de particion.
+
+    Args:
+        period: nombre del corte, p. ej. "11_2024" o "2015".
+
+    Returns:
+        date: primer dia del corte.
+
+    Raises:
+        ValueError: si el nombre no es ninguno de los dos formatos.
+    """
+    if "_" in period:
+        mes, ano = period.split("_", 1)
+        return date(int(ano), int(mes), 1)
+    return date(int(period), 1, 1)
 
 
 class BronzeToSilverProcessor:
@@ -48,28 +86,27 @@ class BronzeToSilverProcessor:
         self,
         data_root: Path,
         tracker: MetadataTracker,
-        silver_db_path: Path | None = None,
+        engine: Engine | None = None,
     ):
         """
-        Initialize transform stage.
-
         Args:
-            data_root: Root data directory
-            tracker: MetadataTracker instance for job/task tracking
-            silver_db_path: Path to Silver DuckDB (default: from settings)
+            data_root: raiz de datos; de ahi cuelga `bronze/`.
+            tracker: registro de corridas y tareas.
+            engine: conexion a la base; por default la del proyecto. Se
+                inyecta en los tests para apuntar a la de pruebas.
         """
         self.data_root = Path(data_root)
         self.tracker = tracker
+        self._engine = engine
 
-        if silver_db_path is not None:
-            self.warehouse_path = Path(silver_db_path)
-        else:
-            self.warehouse_path = settings.SILVER_DUCKDB_PATH  # type: ignore[assignment]
+    @property
+    def engine(self) -> Engine:
+        """Engine de la base, resuelto la primera vez que se usa."""
+        if self._engine is None:
+            from src.shared.db.session import get_engine
 
-        # Ensure Silver directory exists
-        self.warehouse_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self.datastore = EstablecimientoWriter(self.warehouse_path)
+            self._engine = get_engine()
+        return self._engine
 
     def _normalize_text_col(self, col_name: str):
         """
@@ -134,23 +171,6 @@ class BronzeToSilverProcessor:
             )
             .str.strip_chars()
         )
-
-    def _reset_fact_table(self, force: bool = False):
-        """Vacia la tabla de hechos cuando se pide reprocesar todo.
-
-        NO siembra catalogos ni crea tablas: el esquema y los seeds son
-        responsabilidad de las migraciones (`make db-migrate`), que es el
-        unico lugar donde se cargan. Aqui solo se limpia el contenido para
-        que `--force` reprocese los 943 archivos sobre una tabla vacia.
-
-        Se usa DELETE y no DROP a proposito: dropear la tabla la recrearia
-        sin los indices que definio la migracion.
-        """
-        if not force:
-            return
-        logger.warning("MODO FORCE: vaciando la tabla de hechos...")
-        with self.datastore._get_connection() as conn:
-            conn.execute(f"DELETE FROM {self.datastore.table_id}")
 
     def _clean_raw_data(self, zip_path: Path, period: str) -> tuple[pl.DataFrame, dict[str, Any]]:
         """
@@ -339,140 +359,171 @@ class BronzeToSilverProcessor:
         if pre_dedupe != df.height:
             logs["stats"]["rows_dropped_dup_id"] = pre_dedupe - df.height
 
+        # La fecha y las celdas H3 se derivan aqui, con los datos todavia
+        # en memoria: eran dos etapas que hacian UPDATE sobre la tabla ya
+        # cargada (ver enrich.py).
+        df = add_h3_cells(normalize_fecha_alta(df))
+
         logs["stats"]["rows_final"] = df.height
         return df, logs
 
-    def process_zip(self, zip_path: Path, period: str) -> tuple[str, str, int]:
-        """
-        Process a single ZIP file.
+    def read_zip(self, zip_path: Path, period: str) -> pl.DataFrame:
+        """Lee un ZIP y devuelve sus filas limpias y enriquecidas.
+
+        No escribe nada: quien carga es `ingest_period`, una vez por corte
+        con los ZIP de todo el periodo juntos.
 
         Args:
-            zip_path: Path to ZIP file
-            period: Data period
+            zip_path: archivo a leer.
+            period: nombre del corte al que pertenece.
 
         Returns:
-            Tuple of (status, message, row_count)
+            pl.DataFrame: filas listas para el COPY.
         """
-        try:
-            df, logs = self._clean_raw_data(zip_path, period)
-            self.datastore.upsert(df)
+        df, logs = self._clean_raw_data(zip_path, period)
+        if renombrados := logs["schema_changes"].get("duplicates_renamed"):
+            logger.info(f"      columnas renombradas: {', '.join(renombrados)}")
+        if descartadas := logs["stats"].get("rows_dropped_invalid_req"):
+            logger.warning(f"      {descartadas} filas sin columnas requeridas, descartadas")
+        return df
 
-            # Build message
-            msg = f"Exito: {df.height} registros."
-            if renamed := logs["schema_changes"].get("duplicates_renamed"):
-                msg += f" | Renombrados: {', '.join(renamed)}"
-            if dropped := logs["stats"].get("rows_dropped_invalid_req"):
-                msg += f" | Descartados: {dropped} filas por columnas requeridas vacías"
+    def ingest_period(self, run_id: str, period: str, descargas: list[dict]) -> int:
+        """Carga un corte completo como una particion nueva.
 
-            return "DONE", msg, df.height
+        Lee todos los ZIP del periodo, los concatena y los engancha de una
+        sola vez. Cada archivo deja su propia `process_task` --ahi vive el
+        linaje y el conteo por archivo-- pero la escritura es una.
 
-        except Exception as e:
-            error_msg = str(e)
-            return "ERROR", f"Error en procesamiento: {error_msg}", 0
+        Si el corte ya tenia particion, se elimina antes: la particion se
+        construye entera, no se completa.
+
+        Args:
+            run_id: corrida a la que pertenece.
+            period: nombre del corte.
+            descargas: descargas exitosas del corte, con `source_path`.
+
+        Returns:
+            int: filas cargadas.
+
+        Raises:
+            Exception: lo que falle al leer o cargar. El contexto de
+                staging deja Silver intacta antes de propagarlo.
+        """
+        fecha = period_to_date(period)
+        marcos: list[pl.DataFrame] = []
+
+        for descarga in descargas:
+            zip_path = Path.cwd() / descarga["source_path"]
+            task_id = self.tracker.create_process_task(
+                run_id=run_id,
+                task_name=zip_path.name,
+                source_path=descarga["source_path"],
+                period=period,
+                target_table=TARGET_TABLE,
+            )
+            self.tracker.start_process_task(task_id)
+
+            if not zip_path.exists():
+                self.tracker.complete_process_task(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    error_message=f"el archivo no esta en disco: {zip_path}",
+                )
+                logger.warning(f"   falta en disco: {zip_path.name}")
+                continue
+
+            try:
+                df = self.read_zip(zip_path, period)
+            except Exception as exc:
+                self.tracker.complete_process_task(
+                    task_id=task_id, status=TaskStatus.FAILED, error_message=str(exc)
+                )
+                raise
+
+            marcos.append(df)
+            self.tracker.complete_process_task(
+                task_id=task_id,
+                status=TaskStatus.SUCCESS,
+                rows_extracted=df.height,
+                file_size_bytes=zip_path.stat().st_size,
+            )
+
+        if not marcos:
+            logger.warning(f"   corte {period} sin archivos legibles, se omite")
+            return 0
+
+        corte = pl.concat(marcos, how="diagonal_relaxed")
+        logger.info(f"   {corte.height:,} filas de {len(marcos)} archivos, cargando...")
+
+        with self.engine.begin() as conn:
+            # Validar y traducir dentro de la transaccion: los catalogos se
+            # leen del mismo estado al que se va a escribir.
+            corte = resolve_catalogs(conn, corte)
+
+            # La particion se construye entera: si habia una, se va.
+            if partition_name(fecha) in existing_partitions(conn):
+                logger.info(f"   la particion de {period} ya existia, se reconstruye")
+                drop_partition(conn, fecha)
+
+            with staging_partition(conn, fecha) as destino:
+                copy_dataframe(conn, corte, destino.table, destino.schema)
+
+        return corte.height
 
     def run(self, force: bool = False) -> bool:
-        """
-        Run transform pipeline using MetadataTracker.
-
-        Processes Bronze ZIPs into Silver DuckDB warehouse.
+        """Carga los cortes que falten, o todos con `force`.
 
         Args:
-            force: If True, reprocess all files regardless of status
+            force: reconstruir todos los cortes, no solo los pendientes.
 
         Returns:
-            True if successful, False otherwise
+            bool: True si ningun corte fallo.
         """
-        if force:
-            logger.warning("⚠️ MODO FORCE ACTIVADO: Se re-procesarán todos los archivos en disco.")
-            self._reset_fact_table(force=True)
-
-        # Create job run
         run_id = self.tracker.create_run(
-            job_name="denue_transform",
-            job_type="TRANSFORM",
-            trigger_type="MANUAL",
+            job_name="denue_transform", job_type="TRANSFORM", trigger_type="MANUAL"
         )
 
-        # Get pending tasks
-        tasks = self.tracker.get_pending_process_tasks(include_failed=True) if not force else []
+        # Todas las descargas exitosas, agrupadas por corte: aunque solo
+        # falte un archivo de un periodo, la particion se rehace completa.
+        por_corte: dict[str, list[dict]] = defaultdict(list)
+        for descarga in self.tracker.get_all_successful_downloads():
+            if descarga["period"]:
+                por_corte[descarga["period"]].append(descarga)
 
-        # If force mode, get all successful downloads
         if force:
-            tasks = self.tracker.get_all_successful_downloads()
+            logger.warning("MODO FORCE: se reconstruyen todos los cortes")
+            pendientes = sorted(por_corte)
+        else:
+            con_trabajo = {
+                t["period"]
+                for t in self.tracker.get_pending_process_tasks(include_failed=True)
+                if t["period"]
+            }
+            pendientes = sorted(con_trabajo & por_corte.keys())
 
-        if not tasks:
-            logger.info("✨ Silver actualizado. Nada por transformar.")
+        if not pendientes:
+            logger.info("Silver al dia, nada por transformar.")
             self.tracker.complete_run(run_id, JobStatus.SUCCESS)
             return True
 
-        logger.info(f"⚙️ Iniciando pipeline para {len(tasks)} archivos...")
-        session_total_rows = 0
-        tasks_succeeded = 0
-        tasks_failed = 0
+        logger.info(f"{len(pendientes)} corte(s) por cargar: {', '.join(pendientes)}")
+        total = 0
+        fallidos: list[str] = []
 
-        # Los indices de la tabla de hechos se suspenden mientras dura la
-        # carga y se restituyen al terminar (tambien si falla): mantener
-        # ART fila por fila sobre decenas de millones de INSERTs es ordenes
-        # de magnitud mas lento. No hay paso manual que recordar.
-        with self.datastore._get_connection() as index_conn, suspended_indexes(index_conn):
-            for idx, task_info in enumerate(tasks, start=1):
-                zip_path = Path.cwd() / task_info["source_path"]
+        for i, period in enumerate(pendientes, start=1):
+            logger.info(f"[{i}/{len(pendientes)}] corte {period}")
+            try:
+                total += self.ingest_period(run_id, period, por_corte[period])
+            except Exception as exc:
+                # Un corte que falla no detiene a los demas: su particion
+                # no se engancho, asi que Silver sigue consistente.
+                fallidos.append(period)
+                logger.error(f"   corte {period} fallido, Silver sin cambios: {exc}")
 
-                if not zip_path.exists():
-                    logger.warning(
-                        f"   ⚠️ [{idx}/{len(tasks)}] Archivo no encontrado físicamente: {zip_path.name}"
-                    )
-                    continue
+        estado = JobStatus.SUCCESS if not fallidos else JobStatus.PARTIAL
+        self.tracker.complete_run(run_id, estado)
 
-                # Create process task (use relative path to match download_tasks.target_path for JOIN)
-                task_id = self.tracker.create_process_task(
-                    run_id=run_id,
-                    task_name=zip_path.name,
-                    source_path=task_info["source_path"],
-                    period=task_info.get("period"),
-                    target_table="denue_establecimientos",
-                )
-
-                logger.info(
-                    f"📦 [{idx}/{len(tasks)}] Procesando: {zip_path.name} (Periodo: {task_info.get('period')})..."
-                )
-
-                self.tracker.start_process_task(task_id)
-
-                # Process the file
-                status, message, row_count = self.process_zip(zip_path, task_info.get("period", ""))
-
-                # Update task
-                if status == "DONE":
-                    self.tracker.complete_process_task(
-                        task_id=task_id,
-                        status=TaskStatus.SUCCESS,
-                        rows_loaded=row_count,
-                        file_size_bytes=zip_path.stat().st_size if zip_path.exists() else None,
-                    )
-                    session_total_rows += row_count
-                    tasks_succeeded += 1
-                    logger.info(f"   ✅ Éxito: {row_count:,} registros integrados.")
-                else:
-                    self.tracker.complete_process_task(
-                        task_id=task_id,
-                        status=TaskStatus.FAILED,
-                        error_message=message,
-                    )
-                    tasks_failed += 1
-                    logger.error(f"   ❌ Fallo en archivo {zip_path.name}: {message}")
-
-            # Checkpoint warehouse
-            with self.datastore._get_connection() as conn:
-                conn.execute("CHECKPOINT;")
-
-        # Complete job run
-        final_status = JobStatus.SUCCESS if tasks_failed == 0 else JobStatus.PARTIAL
-        self.tracker.complete_run(run_id, final_status)
-
-        logger.info(
-            f"✨ Transform terminado. Total sesión: {session_total_rows:,} registros integrados en Silver."
-        )
-        logger.info(f"   📊 Resumen: {tasks_succeeded} exitosos, {tasks_failed} fallidos")
-
-        return tasks_failed == 0
+        logger.info(f"Ingest terminado: {total:,} filas en {len(pendientes) - len(fallidos)} corte(s)")
+        if fallidos:
+            logger.error(f"   cortes fallidos: {', '.join(fallidos)}")
+        return not fallidos

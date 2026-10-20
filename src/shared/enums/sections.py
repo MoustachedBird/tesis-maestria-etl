@@ -16,15 +16,12 @@ class Section(StrEnum):
     Los valores llevan guion (``normalize-dates``) porque son exactamente lo
     que el usuario teclea en la línea de comandos.
 
-    Nota: ``normalize_dates`` y ``h3_cells`` desaparecen al migrar a
-    PostgreSQL —el ``COPY`` normaliza la fecha y calcula las celdas H3 en
-    vuelo, así que no quedan pasos que ejecutar (ver `arquitectura.md` §4.2
-    y §4.4). Se conservan hasta que esos stages se reescriban.
+    ``normalize-dates`` y ``h3-cells`` ya no existen: el ingest deriva la
+    fecha y las celdas H3 antes del ``COPY`` (ver `transformers/enrich.py`),
+    así que no quedan pasos sueltos que ejecutar.
     """
 
     ingest = "ingest"
-    normalize_dates = "normalize-dates"
-    h3_cells = "h3-cells"
     clee_radio = "clee-radio"
     clee_h3 = "clee-h3"
     sesnsp = "sesnsp"
@@ -35,8 +32,6 @@ class Section(StrEnum):
 
 DENUE_ATOMIC: tuple[Section, ...] = (
     Section.ingest,
-    Section.normalize_dates,
-    Section.h3_cells,
     Section.clee_radio,
     Section.clee_h3,
 )

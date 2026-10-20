@@ -65,8 +65,6 @@ def _run_sesnsp_extract(*, force: bool) -> None:
 def _run_denue_transform(
     *,
     ingest: bool,
-    normalize_dates: bool,
-    h3_cells: bool,
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
     force: bool,
@@ -80,12 +78,6 @@ def _run_denue_transform(
     if ingest:
         console.print("[bold blue]   Running: ingest[/bold blue]")
         success = transformer.run_transform_stage(force=force)
-    if normalize_dates and success:
-        console.print("[bold blue]   Running: normalize-dates[/bold blue]")
-        success = transformer.run_normalize_dates_stage(force=force)
-    if h3_cells and success:
-        console.print("[bold blue]   Running: h3-cells[/bold blue]")
-        success = transformer.run_h3_cells_stage(force=force)
     if clee_resolution_radio and success:
         console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
         success = transformer.run_clee_resolution_stage(force=force)
@@ -156,16 +148,6 @@ def transform(
         True, "--denue/--no-denue", help="Run the DENUE Bronze->Silver pipeline"
     ),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
-    normalize_dates: bool = typer.Option(
-        True,
-        "--normalize-dates/--no-normalize-dates",
-        help="Normalize fecha_alta dates in Silver",
-    ),
-    h3_cells: bool = typer.Option(
-        True,
-        "--h3-cells/--no-h3-cells",
-        help="Backfill H3 cells (h3_cell_9/h3_cell_5) from coordinates",
-    ),
     clee_resolution_radio: bool = typer.Option(
         True,
         "--clee-resolution-radio/--no-clee-resolution-radio",
@@ -185,8 +167,8 @@ def transform(
         None,
         "--only",
         help=(
-            "Run ONLY these sections (repeatable): ingest, normalize-dates, h3-cells, "
-            "clee-radio, clee-h3, sesnsp (+ groups denue, clee). Overrides --no-* defaults."
+            "Run ONLY these sections (repeatable): ingest, clee-radio, clee-h3, "
+            "sesnsp (+ groups denue, clee). Overrides --no-* defaults."
         ),
     ),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
@@ -199,20 +181,19 @@ def transform(
     allowlist with --only (e.g. --only clee-radio --only sesnsp); nothing needs
     to be passed for the full run.
 
-    DENUE sub-steps (ordered): ingest -> normalize-dates -> h3-cells ->
-    clee-resolution-radio -> clee-resolution-h3, each gated by its flag
-    (--no-denue skips the whole DENUE block).
+    DENUE sub-steps (ordered): ingest -> clee-resolution-radio ->
+    clee-resolution-h3, each gated by its flag (--no-denue skips the whole
+    DENUE block). El ingest deriva la fecha y las celdas H3 en vuelo, asi
+    que ya no hay pasos sueltos para eso.
     SESNSP: CSV consolidado -> sesnsp_incidencia_municipal (--no-sesnsp skips).
     """
     selected = _expand_only(only)
     if selected is not None:
         ingest = Section.ingest in selected
-        normalize_dates = Section.normalize_dates in selected
-        h3_cells = Section.h3_cells in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
         sesnsp = Section.sesnsp in selected
-        denue = ingest or normalize_dates or h3_cells or clee_resolution_radio or clee_resolution_h3
+        denue = ingest or clee_resolution_radio or clee_resolution_h3
 
     if force:
         console.print("[bold orange3]   FORCE MODE: Reprocessing all data[/bold orange3]")
@@ -225,8 +206,6 @@ def transform(
             overall_ok = (
                 _run_denue_transform(
                     ingest=ingest,
-                    normalize_dates=normalize_dates,
-                    h3_cells=h3_cells,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
                     force=force,
@@ -301,12 +280,6 @@ def pipeline(
     ),
     denue: bool = typer.Option(True, "--denue/--no-denue", help="Include the DENUE source"),
     ingest: bool = typer.Option(True, "--ingest/--no-ingest", help="Ingest raw CSVs into Silver"),
-    normalize_dates: bool = typer.Option(
-        True, "--normalize-dates/--no-normalize-dates", help="Normalize fecha_alta dates"
-    ),
-    h3_cells: bool = typer.Option(
-        True, "--h3-cells/--no-h3-cells", help="Backfill H3 cells from coordinates"
-    ),
     clee_resolution_radio: bool = typer.Option(
         True,
         "--clee-resolution-radio/--no-clee-resolution-radio",
@@ -323,7 +296,7 @@ def pipeline(
         None,
         "--only",
         help=(
-            "Run ONLY these sections (repeatable): ingest, normalize-dates, h3-cells, "
+            "Run ONLY these sections (repeatable): ingest, "
             "clee-radio, clee-h3, sesnsp, load (+ groups denue, clee). Overrides --no-*."
         ),
     ),
@@ -342,13 +315,11 @@ def pipeline(
     selected = _expand_only(only)
     if selected is not None:
         ingest = Section.ingest in selected
-        normalize_dates = Section.normalize_dates in selected
-        h3_cells = Section.h3_cells in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
         sesnsp = Section.sesnsp in selected
         load_gold = Section.load in selected
-        denue = ingest or normalize_dates or h3_cells or clee_resolution_radio or clee_resolution_h3
+        denue = ingest or clee_resolution_radio or clee_resolution_h3
 
     console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
     console.print("=" * 60)
@@ -372,8 +343,6 @@ def pipeline(
             overall_ok = (
                 _run_denue_transform(
                     ingest=ingest,
-                    normalize_dates=normalize_dates,
-                    h3_cells=h3_cells,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
                     force=force,

@@ -14,8 +14,6 @@ from pathlib import Path
 
 from src.etl.loaders.loader import SilverToGoldLoader
 from src.etl.transformers.clee_resolver import CLEEResolver
-from src.etl.transformers.date_normalizer import DateNormalizer
-from src.etl.transformers.h3_backfill import H3CellBackfiller
 from src.etl.transformers.processor import BronzeToSilverProcessor
 from src.etl.utils.backup import backup_warehouse
 from src.meta.tracker import MetadataTracker
@@ -76,7 +74,6 @@ class DenuePipelineOrchestrator:
         self.transformer = BronzeToSilverProcessor(
             data_root=self.data_root,
             tracker=self.tracker,
-            silver_db_path=self.silver_db_path,
         )
 
         # Un resolver por metodo (misma maquinaria, distinta columna destino).
@@ -91,16 +88,6 @@ class DenuePipelineOrchestrator:
             method="h3",
         )
 
-        self.date_normalizer = DateNormalizer(
-            tracker=self.tracker,
-            silver_db_path=self.silver_db_path,
-        )
-
-        self.h3_backfiller = H3CellBackfiller(
-            tracker=self.tracker,
-            silver_db_path=self.silver_db_path,
-        )
-
         self.loader = SilverToGoldLoader(
             tracker=self.tracker,
             silver_path=self.silver_db_path,
@@ -113,20 +100,19 @@ class DenuePipelineOrchestrator:
 
     def run_transform_stage(self, force: bool = False) -> bool:
         """
-        Run transform stage: ZIP -> Silver DuckDB.
+        Run transform stage: ZIP -> Silver.
 
-        Extracts raw ZIP files, cleans and normalizes data,
-        and loads it into the Silver DuckDB warehouse.
+        La unidad es el corte: cada periodo se carga como una particion
+        nueva, con la fecha y las celdas H3 ya derivadas.
 
         Args:
-            force: If True, reprocess all files regardless of status
+            force: reconstruir todos los cortes, no solo los pendientes
 
         Returns:
             True if successful, False otherwise
         """
         logger.info("Starting TRANSFORM stage (Bronze -> Silver)")
-        logger.info(f"   Mode: {'FORCE (reprocess all)' if force else 'INCREMENTAL'}")
-        backup_warehouse(self.silver_db_path, stage="ingest")
+        logger.info(f"   Mode: {'FORCE (reconstruye todos los cortes)' if force else 'INCREMENTAL'}")
 
         try:
             success = self.transformer.run(force=force)
@@ -140,71 +126,6 @@ class DenuePipelineOrchestrator:
 
         except Exception as e:
             logger.error(f"TRANSFORM stage failed: {e}")
-            raise
-
-    def run_normalize_dates_stage(self, force: bool = False) -> bool:
-        """
-        Run normalize-dates stage: fecha_alta_str -> fecha_alta_date.
-
-        Parses raw date strings in Silver DuckDB into proper DATE columns,
-        handling 6 known INEGI formats. Operates per-period with metadata
-        tracking.
-
-        Args:
-            force: If True, re-normalize all periods regardless of status
-
-        Returns:
-            True if successful, False otherwise
-        """
-        logger.info("Starting NORMALIZE-DATES stage (Silver DuckDB)")
-        logger.info(f"   Mode: {'FORCE (re-normalize all)' if force else 'INCREMENTAL'}")
-        backup_warehouse(self.silver_db_path, stage="normalize-dates")
-
-        try:
-            success = self.date_normalizer.run(force=force)
-
-            if success:
-                logger.info("NORMALIZE-DATES stage completed successfully")
-            else:
-                logger.warning("NORMALIZE-DATES stage completed with errors")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"NORMALIZE-DATES stage failed: {e}")
-            raise
-
-    def run_h3_cells_stage(self, force: bool = False) -> bool:
-        """
-        Run H3-cells stage: backfill h3_cell_9 / h3_cell_5 from coordinates.
-
-        Computes H3 cell indexes (blocking res 9, partition res 5) for rows
-        with valid coordinates, directly in Silver DuckDB via the h3
-        community extension. Incremental: only rows with NULL h3_cell_9.
-
-        Args:
-            force: If True, recompute cells for all rows with valid coords
-                   (only needed if the H3 resolution changes).
-
-        Returns:
-            True if successful, False otherwise
-        """
-        logger.info("Starting H3-CELLS stage (Silver DuckDB)")
-        logger.info(f"   Mode: {'FORCE (recompute all)' if force else 'INCREMENTAL'}")
-        backup_warehouse(self.silver_db_path, stage="h3-cells")
-
-        try:
-            success = self.h3_backfiller.run(force=force)
-
-            if success:
-                logger.info("H3-CELLS stage completed successfully")
-            else:
-                logger.warning("H3-CELLS stage completed with errors")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"H3-CELLS stage failed: {e}")
             raise
 
     def run_clee_resolution_stage(self, force: bool = False) -> bool:
@@ -318,45 +239,26 @@ class DenuePipelineOrchestrator:
         logger.info("Starting FULL PIPELINE (Transform -> Normalize-Dates -> H3-Cells -> Load)")
         logger.info("=" * 60)
 
-        # Stage 1: Transform (Bronze -> Silver)
-        logger.info("STAGE 1/4: Transform")
+        # Etapa 1: Transform (Bronze -> Silver). El ingest deriva la fecha
+        # y las celdas H3 en vuelo, asi que no hay etapas sueltas para eso.
+        logger.info("ETAPA 1/2: Transform")
         transform_success = self.run_transform_stage(force=force)
 
         if not transform_success:
-            logger.error("Pipeline halted: Transform stage failed")
+            logger.error("Pipeline detenido: la etapa Transform fallo")
             return False
 
         logger.info("")
         logger.info("=" * 60)
 
-        # Stage 2: Normalize Dates (Silver DuckDB)
-        logger.info("STAGE 2/4: Normalize-Dates")
-        normalize_success = self.run_normalize_dates_stage(force=force)
-
-        if not normalize_success:
-            logger.warning("Normalize-Dates stage had errors, continuing...")
-
-        logger.info("")
-        logger.info("=" * 60)
-
-        # Stage 3: H3 Cells (Silver DuckDB)
-        logger.info("STAGE 3/4: H3-Cells")
-        h3_success = self.run_h3_cells_stage(force=force)
-
-        if not h3_success:
-            logger.warning("H3-Cells stage had errors, continuing to Load...")
-
-        logger.info("")
-        logger.info("=" * 60)
-
-        # Stage 4: Load (Silver -> Gold)
-        logger.info("STAGE 4/4: Load")
+        # Etapa 2: Load (Silver -> Gold)
+        logger.info("ETAPA 2/2: Load")
         load_success = self.run_load_stage(force=force)
 
         logger.info("")
         logger.info("=" * 60)
 
-        if transform_success and normalize_success and h3_success and load_success:
+        if transform_success and load_success:
             logger.info("FULL PIPELINE completed successfully!")
             logger.info(f"   Silver: {self.silver_db_path}")
             logger.info(f"   Gold: {self.gold_db_path}")

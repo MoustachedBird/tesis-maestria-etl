@@ -5,21 +5,20 @@ Cubre la normalizacion a esquema relacional por ids:
     contenido leido de los parquet de data/seeds.
   - Los ids salen del seed parquet (fuente de verdad), no de enums.
   - Relationships FK-driven en Establecimiento navegan a los catalogos.
-  - Los FOREIGN KEYs son reales: DuckDB rechaza ids fuera de catalogo.
-  - validate_integrity() sigue dando fail-fast por labels en el ingest.
+  - Los FOREIGN KEYs son reales: un id fuera de catalogo se rechaza.
+
+El fail-fast por etiquetas del ingest vive en test_catalogs.py.
 """
 
 from datetime import date
 
 import polars as pl
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.utils.denue_schema import DOMAIN_ID_COLUMNS, DOMAIN_VALUE_ALIASES
-from src.shared.db.base import DEFAULT_SCHEMA, Base
 from src.shared.db.models import (
     ActividadEconomica,
     Establecimiento,
@@ -187,74 +186,6 @@ class TestEstablecimientoLinks:
         with pytest.raises(DBAPIError):
             linked_session.commit()
         linked_session.rollback()
-
-
-@pytest.mark.unit
-class TestIngestDomainGuard:
-    """validate_integrity() sigue siendo el fail-fast por labels del ingest."""
-
-    def _conn_with_catalogs(self, tmp_path):
-        """Writer + conexion con los catalogos creados y sembrados.
-
-        Las tablas las crea el modelo (igual que la migracion) y las filas
-        salen de los seeds parquet del repo, que son la fuente de verdad.
-        """
-        import duckdb
-
-        from src.etl.loaders.denue import EstablecimientoWriter
-        from src.etl.loaders.dominios import TABLES as DOM_TABLES
-        from src.etl.loaders.dominios import load_seeds as load_dominios_seeds
-        from src.etl.loaders.estratos import TABLE_NAME as EST_TABLE
-        from src.etl.loaders.estratos import load_seeds as load_estratos_seeds
-        from src.shared.db.base import get_table
-        from src.shared.db.models import Establecimiento  # noqa: F401
-
-        db = tmp_path / "guard.duckdb"
-        engine = create_engine(f"duckdb:///{db}")
-        names = [t for t, *_ in DOM_TABLES] + [EST_TABLE]
-        Base.metadata.create_all(engine, tables=[get_table(n) for n in names])
-        with engine.begin() as seeding:
-            load_dominios_seeds(seeding)
-            load_estratos_seeds(seeding)
-        engine.dispose()
-
-        # `validate_integrity` consulta los catalogos con SQL propio del
-        # writer, que todavia espera una conexion nativa.
-        writer = EstablecimientoWriter(db)
-        conn = duckdb.connect(str(db))
-        conn.execute(f"SET schema='{DEFAULT_SCHEMA}'")
-        return writer, conn
-
-    def test_rejects_out_of_domain_value(self, tmp_path):
-        writer, conn = self._conn_with_catalogs(tmp_path)
-        df = pl.DataFrame({"per_ocu": ["0 A 5 PERSONAS", "VALOR INVENTADO"]})
-        with pytest.raises(ValueError, match="per_ocu"):
-            writer.validate_integrity(conn, df)
-
-    def test_accepts_domain_and_nulls(self, tmp_path):
-        writer, conn = self._conn_with_catalogs(tmp_path)
-        df = pl.DataFrame(
-            {
-                "per_ocu": ["0 A 5 PERSONAS", None],
-                "tipo_vial": ["CALLE DE RODAJE", "GLORIETA"],
-                "tipounieco": ["FIJO", "SEMIFIJO"],
-            }
-        )
-        writer.validate_integrity(conn, df)  # no debe lanzar
-
-    def test_new_catalog_row_accepted_without_code_change(self, tmp_path):
-        """El punto del refactor: un valor de dominio nuevo se habilita
-        agregandolo a la TABLA (via seed), sin tocar codigo Python."""
-        writer, conn = self._conn_with_catalogs(tmp_path)
-        df = pl.DataFrame({"tipo_asent": ["INVENTADO NUEVO"]})
-        with pytest.raises(ValueError, match="tipo_asent"):
-            writer.validate_integrity(conn, df)
-
-        conn.execute(
-            "INSERT INTO denue_tipos_asentamiento VALUES "
-            "(999, 'INVENTADO NUEVO', 'alta de un corte nuevo')"
-        )
-        writer.validate_integrity(conn, df)  # ahora pasa, sin cambiar codigo
 
 
 @pytest.mark.unit
