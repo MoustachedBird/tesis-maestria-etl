@@ -212,6 +212,31 @@ def seed_duckdb(conn, table_name: str, df: pl.DataFrame) -> int:
     ).fetchone()[0]
 
 
+def _qualified(table_name: str) -> str:
+    """Nombre calificado con su schema, tomado del modelo ORM.
+
+    El SQL de siembra iba sin calificar y en DuckDB resolvia por el
+    `SET schema='silver'` de `connect_configured`. En PostgreSQL el
+    `search_path` por default es `"$user", public`, asi que
+    `SELECT ... FROM denue_entidades` no encuentra nada aunque
+    `silver.denue_entidades` exista --que es como fallo la primera
+    migracion contra una base real (2026-10-20).
+
+    El schema sale del metadata y no de una constante para que no pueda
+    divergir del modelo, y para no tener que reintroducir un `SET
+    search_path`: calificar es justamente lo que permite retirar ese
+    andamio (arquitectura.md §Fase 2, "tres andamios de transicion").
+
+    Args:
+        table_name: nombre sin calificar, p. ej. `denue_entidades`.
+
+    Returns:
+        str: p. ej. `"silver"."denue_entidades"`.
+    """
+    table = _table(table_name)
+    return f'"{table.schema}"."{table.name}"'
+
+
 def seed_sqlalchemy(
     connection, table_name: str, df: pl.DataFrame, truncate: bool = True
 ) -> int:
@@ -223,7 +248,7 @@ def seed_sqlalchemy(
 
     Args:
         connection: SQLAlchemy connection.
-        table_name: Tabla destino.
+        table_name: Tabla destino, sin calificar (se resuelve su schema).
         df: Filas ya validadas.
         truncate: Si True, vacia la tabla antes de reescribir en caso de
             diferencia.
@@ -232,13 +257,14 @@ def seed_sqlalchemy(
         Numero de filas del catalogo.
     """
     cols = df.columns
-    existing = connection.execute(text(f"SELECT {', '.join(cols)} FROM {table_name}")).fetchall()
+    target = _qualified(table_name)
+    existing = connection.execute(text(f"SELECT {', '.join(cols)} FROM {target}")).fetchall()
     if [tuple(r) for r in existing] != df.rows():
         if truncate:
-            connection.execute(text(f"DELETE FROM {table_name}"))
+            connection.execute(text(f"DELETE FROM {target}"))
         params = ", ".join(f":{c}" for c in cols)
         connection.execute(
-            text(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({params})"),
+            text(f"INSERT INTO {target} ({', '.join(cols)}) VALUES ({params})"),
             df.to_dicts(),
         )
         print(f"   Loaded {df.height:,} rows into {table_name}")
