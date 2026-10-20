@@ -737,24 +737,17 @@ Qué puede salir mal, por probabilidad:
 3. **Tipos sin equivalente exacto.** `Double` y `DateTime(timezone=True)`
    compilan bien, pero solo se han verificado compilando, no ejecutando.
 
-**Qué queda de DuckDB y dónde muere.** La capa de configuración ya es
-mono-motor; lo que sigue abriendo archivos no pasa por ella:
+**Qué quedaba de DuckDB.** Esta tabla se mantuvo mientras la migración
+avanzaba; la Fase 4 la cerró por completo. No queda código que abra un
+archivo de base de datos: `connect_configured`, `backup.py`, los seis stages
+y las variables `DUCKDB_*` se eliminaron con sus últimos consumidores.
 
-| Qué | Dónde | Muere en |
-|---|---|---|
-| ~~`indexes.py`~~ | capa de acceso | ✅ **Fase 3** — reescrito sobre `pg_indexes` |
-| `connect_configured` | capa de acceso | **Fase 4** — los stages son sus únicos consumidores |
-| `backup.py` | capa de acceso | **Fase 9** — su razón de ser (R3) desaparece |
-| 6 stages: ingest, normalize-dates, h3-cells, las 2 CLEE, sesnsp | `src/etl/` | **Fase 4** |
-| 2 clases de test (`TestEstablecimientoLinks`, `TestCicloDeVida`) | `tests/` | marcadas `postgres` y saltadas; se migran con su sujeto |
-| 5 archivos de test con `duckdb.connect` crudo | `tests/` | **Fase 4**, con los stages que prueban |
-| `DUCKDB_*`, `WAREHOUSE_BACKUP_ENABLED` en `.env` | config | **Fase 4**, con los stages |
-
-**Tres andamios de transición** introducidos a propósito, todos marcados
-para retirarse en la Fase 4: el listener `before_create` que emite
-`CREATE SCHEMA IF NOT EXISTS`, el `SET schema='silver'` de
-`connect_configured` (el SQL crudo de los stages aún no está calificado) y
-el re-export plano de los modelos de `silver`.
+**De los tres andamios de transición** que esta fase introdujo a propósito,
+dos se retiraron con la Fase 4: el `SET schema='silver'` de
+`connect_configured` (el SQL de los stages ya va calificado) y el re-export
+plano de los modelos. Queda el listener `before_create` que emite
+`CREATE SCHEMA IF NOT EXISTS`, que es el que permite a los tests montar un
+schema desechable sin pasar por Alembic.
 
 ### Fase 3 — Capa de acceso sin DuckDB ⚠️ CÓDIGO LISTO, VALIDACIÓN PENDIENTE (2026-10-19)
 
@@ -862,24 +855,78 @@ preexistentes, cero nuevos.
 `silver.establecimientos` tiene sus 20 particiones, y el contexto de
 staging deja Silver intacta cuando la carga falla a la mitad.
 
-### Fase 4 — Stages sobre Postgres
+### Fase 4 — Stages sobre Postgres ⚠️ CÓDIGO LISTO, VALIDACIÓN PENDIENTE (2026-10-20)
 
-La fase más grande (§4.5). Un stage por commit, desarrollando **con 1–2
-periodos** y dejando la reconstrucción completa para el final.
+Ejecutada en seis commits. **No queda una sola línea que abra un archivo de
+base de datos** — y no por reescribir comentarios, sino porque no queda
+código que lo haga.
 
-- [ ] `ingest`: ZIP → Polars → `COPY` a staging → partición. Normaliza la
-      fecha en vuelo (absorbe `normalize-dates`, §4.2).
-- [ ] `h3-cells`: **se elimina como stage** — el `COPY` ya trae
-      `h3_cell_9`/`h3_cell_5` calculados en Python (§4.4).
-- [ ] `clee-resolution-radio` y `clee-resolution-h3`: lecturas por partición,
-      escrituras por partición. **La lógica de matching no se modifica.**
-- [ ] `sesnsp`: `COPY` directo.
-- [ ] `build-entidades`: escribe `gold.establecimientos` (§2.3.1).
-- [ ] Mantener el contrato del CLI: `extract`/`transform`/`load`/`pipeline`
-      corren todo por default, se aíslan con `--only`/`--no-*`.
+- [x] **`ingest`**: ZIP → Polars → `COPY` a staging → `ATTACH PARTITION`.
+      **La unidad de carga pasó a ser el corte, no el archivo.** Un periodo
+      son decenas de ZIP que juntos forman una partición; se leen todos, se
+      concatenan y se enganchan de golpe. Un corte que falla no detiene a
+      los demás: su partición no se enganchó, así que Silver sigue
+      consistente.
+
+      Consecuencia aceptada: `--force` opera por periodo. Reprocesar un ZIP
+      suelto no tiene sentido si la partición se construye entera.
+
+      Tampoco hace falta suspender índices durante la carga —se escribe en
+      una tabla sin enganchar, que no tiene ninguno—, lo que elimina el otro
+      gran motivo de complejidad del ingest viejo.
+- [x] **`normalize-dates` y `h3-cells` se eliminan como stages.** Eran dos
+      `UPDATE` sobre la tabla ya cargada: reescribir 82.9M filas dos veces
+      después de escribirlas una. Ahora `transformers/enrich.py` las deriva
+      antes del `COPY`, con los datos todavía en memoria. Son funciones
+      puras, así que sus 37 tests corren sin servidor — importa, porque ahí
+      vive la interpretación de los seis formatos de fecha de INEGI y un
+      formato mal leído no da error: da 14.5M de fechas en NULL.
+- [x] **`clee-resolution-radio` y `clee-resolution-h3`**: solo se migró la
+      capa de acceso. **La lógica de matching no se tocó**, byte por byte.
+      Fue posible porque la frontera ya estaba limpia: diez métodos tocaban
+      la base y el resto es Polars y numpy.
+
+      El `UPDATE` masivo va por tabla temporal + `COPY` + `UPDATE ... FROM`,
+      y **lleva el periodo en el `WHERE`**: sin él recorrería las veinte
+      particiones para tocar una.
+- [x] **`sesnsp`**: el unpivot ancho→largo pasa de SQL de DuckDB a Polars.
+      La tabla se sigue reconstruyendo completa —cada corte revisa cifras
+      históricas— pero ahora el `DELETE` y el `COPY` van en una transacción.
+- [x] **`build-entidades`**: la dimensión N3 sobre Postgres. `DELETE` +
+      `INSERT` en vez de `DROP` + `CREATE`, porque dropear la tabla la
+      recrearía sin los índices de la migración.
+- [x] **Mantener el contrato del CLI**, con dos cambios obligados: ya no hay
+      secciones `normalize-dates` ni `h3-cells` (no existen los pasos), y
+      `load` se retira hasta que la Fase 5 defina qué significa derivar Gold.
+      `pipeline` pasa a ser una etapa, no dos.
 - [ ] **Reconstrucción completa desde Bronze**, los 20 periodos. Con `nohup`
-      o `systemd-run --user` para que sobreviva al cierre de la sesión SSH
-      (el `caffeinate` de macOS ya no aplica).
+      o `systemd-run --user` para que sobreviva al cierre de la sesión SSH.
+
+**Lo que se eliminó por quedarse sin consumidor:**
+
+| Qué | Por qué |
+|---|---|
+| `utils/warehouse.py` | `connect_configured` y compañía: el último punto donde se abría un archivo |
+| `utils/backup.py` | respaldaba el archivo antes de cada etapa. Con transacciones reales, una etapa que falla no deja nada que restaurar |
+| `loaders/denue.py` | el `INSERT` fila por fila con upsert |
+| `loaders/loader.py` | el `load` copiaba un archivo que ya no existe |
+| `transformers/date_normalizer.py`, `h3_backfill.py` | 649 líneas de `UPDATE` que `enrich.py` hace en vuelo |
+| 7 campos de `Settings` | `SILVER_DUCKDB_PATH`, `GOLD_DUCKDB_PATH`, `DUCKDB_THREADS`, `DUCKDB_MEMORY_LIMIT`, `WAREHOUSE_BACKUP_ENABLED`, `SILVER_DIR`, `GOLD_DIR` |
+
+Lo único que sigue siendo archivo es la **entrada**: los ZIP de Bronze y los
+seeds versionados.
+
+**Los dos scripts de verificación también se migraron**, que importa porque
+son el juez de la fase: `eval-masked-clee` mide el 97.72% F1 y
+`propagation-stats` la cobertura de identidad. `propagation-stats` pierde
+`--db`: aceptaba un archivo o un parquet, y con una sola Silver en un
+servidor la fuente dejó de ser un parámetro.
+
+**Verificado contra PostgreSQL 17 real:** 325 passed, 0 skipped. La suite
+completa bajó de 58s a 14s al dejar de levantar bases en memoria.
+
+**⚠️ PENDIENTE:** nada de esto ha procesado un ZIP real. Falta el criterio
+de aceptación, que requiere Bronze completo.
 
 **Criterio de aceptación — qué significa "correcto" corriendo en limpio.**
 No hay DuckDB de referencia al lado (el proyecto de la Mac se queda intacto
@@ -911,7 +958,6 @@ hechos (punto 1); lo resuelto debe quedar *cerca y mejor*.
 Punto de orden: la prueba 2 conviene correrla **antes** de la reconstrucción
 completa, sobre la muestra. Descubrir una regresión del matching después de
 horas de rebuild es evitable.
-
 
 ### Fase 5 — Gold, implementada por primera vez
 
