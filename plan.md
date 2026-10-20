@@ -126,7 +126,7 @@ Por eso:
   propio** (p. ej. `"AS"`), para que sus `NEW_*` no colisionen con los de
   las otras dos columnas.
 - Beneficio gratis: `scripts/clee_propagation_stats.py:69` deriva
-  `DEFAULT_COLUMNS` del registry, así que `make propagation-stats` cubre
+  `DEFAULT_COLUMNS` del registry, así que `docker compose run --rm tools python scripts/clee_propagation_stats.py` cubre
   la columna nueva sin tocar el script.
 - Migración de alembic para la columna. Sin índice, como
   `clee_propagado_h3`.
@@ -196,7 +196,7 @@ dimensión fechada y congelada que se pueda citar, porque recalcularla
 ad-hoc contra un Silver mutable hace que los números cambien en silencio
 cada vez que se re-resuelve. Para entonces la semántica ya estará
 decidida. (También es parte del contrato Silver→Gold: "Gold la hereda en
-`make load`".)
+`docker compose run --rm etl load`".)
 
 ---
 
@@ -363,7 +363,7 @@ Mientras ninguno aplique, la recomendación es **(1) + (2)**, no (3).
   coherentes, no uno roto, pero los números del 2026-07-30 en
   `findings.md` (81.09% de propagación, 6.3M colisiones) describen el
   Silver viejo.
-- **`make build-entidades` sigue pendiente** desde la re-resolución de
+- **`docker compose run --rm etl build-entidades` sigue pendiente** desde la re-resolución de
   julio, y ahora además con lógica de primer-match.
 - Los nombres de columna **no dicen** qué regla de decisión usan; esa
   distinción vive en git y en `findings.md`. Si se re-resuelve, `radio` y

@@ -1,84 +1,106 @@
-# SME Survival Analysis - Backend Core
+# ETL Core — supervivencia de MiPyMEs
 
-This repository contains the business logic, data engineering pipelines, and the REST API for the thesis project regarding the mortality and survival analysis of Small and Medium Enterprises (SMEs) in Mexico, utilizing microdata from INEGI.
+Pipeline de datos y API para el análisis de mortalidad y supervivencia de micro,
+pequeñas y medianas empresas en México, sobre microdatos del DENUE (INEGI)
+cruzados con incidencia delictiva municipal (SESNSP).
 
-## Architecture
+El diseño completo está en [`arquitectura.md`](arquitectura.md); las reglas
+permanentes del repo, en [`AGENTS.md`](AGENTS.md).
 
-The project follows a simplified Hexagonal Architecture (Src Layout) to decouple scientific logic from web infrastructure.
+## Cómo corre
 
-- **Language:** Python 3.12+
-- **Package Manager:** uv
-- **API Framework:** FastAPI
-- **Data Engine:** DuckDB (OLAP SQL) + Polars (High-performance DataFrames)
-- **Storage Format:** Apache Parquet (Partitioned by year)
+**Todo en contenedor.** No hay Makefile ni ejecución nativa: `uv` y el entorno
+virtual existen solo dentro de las imágenes, y `docker-compose.yml` es la única
+interfaz. Lo único que hace falta en la máquina es Docker y git.
 
-## Project Structure
+```bash
+git clone <url> && cd etl-core
+cp .env.example .env     # y poner POSTGRES_PASSWORD y POSTGRES_RO_PASSWORD
 
-    tesi-etl/
-    ├── data/                   # Datos locales (solo para desarrollo/pruebas)
-    │   ├── bronze/                # Datos de entrada sin procesar
-    │   └── silver/          # Resultados finales antes de la carga
-    │   └── gold/           
-    │   └── seeds/         
-    ├── src/                    # Código fuente principal
-    │   ├── __init__.py
-    │   ├── main.py             # Orquestador/Punto de entrada
-    │   ├── extract/            # Módulos de extracción (APIs, DBs, CSVs)
-    │   ├── transform/          # Lógica de negocio y limpieza
-    │   ├── load/               # Módulos de carga (Data Warehouse, S3)
-    │   └── utils/              # Funciones compartidas (loggers, conexiones)
-    ├── tests/                  # Pruebas unitarias y de integración
-    ├── config/                 # Archivos de configuración (YAML, JSON, .env)
-    ├── logs/                   # Archivos de registro de ejecución
-    ├── requirements.txt        # Dependencias del proyecto
-    └── README.md               # Documentación
+docker compose build
+docker compose up -d     # Postgres → migraciones → API
+```
 
-## Installation & Setup
+`up` deja la base creada, migrada y sembrada: el servicio `migrate` espera el
+healthcheck de Postgres, aplica Alembic y sale. Es idempotente, así que
+re-levantar el stack no hace nada.
 
-### Prerequisites
-- Python 3.12 or higher
-- [uv](https://github.com/astral-sh/uv) (An extremely fast Python package installer and resolver)
+La API queda en `http://localhost:8000/docs`.
 
-### Steps
+### Comandos
 
-1. **Clone the repository:**
+```bash
+# ETL (one-shot)
+docker compose run --rm etl extract                      # → Bronze
+docker compose run --rm etl transform                    # Bronze → Silver
+docker compose run --rm etl transform --only clee-radio  # aislar un paso
+docker compose run --rm etl pipeline                     # todo
 
-       git clone <your-gitea-url>/backend-core.git
-       cd backend-core
+# Herramientas (one-shot)
+docker compose run --rm tools pytest
+docker compose run --rm tools python -m scripts.smoke_fase3
+docker compose run --rm tools alembic current --verbose
+docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/
 
-2. **Install dependencies:**
-   This project uses uv for dependency management.
+# Base de datos
+docker compose exec postgres psql -U etl_rw -d mipymes
+docker compose logs -f postgres
+docker compose down          # conserva los datos
+docker compose down -v       # BORRA el volumen
+```
 
-       uv sync
+Los comandos globales (`extract`, `transform`, `load`, `pipeline`) corren
+**todo** por default; se aíslan secciones con `--only` o `--no-*`. El
+inventario completo de flags está en `AGENTS.md`.
 
-3. **Environment Variables:**
-   Create a .env file in the root directory based on the example:
+## Stack
 
-       cp .env.example .env
+| | |
+|---|---|
+| Lenguaje | Python 3.12 |
+| Almacenamiento | PostgreSQL 17 — una base, tres schemas (`silver`, `gold`, `meta`) |
+| Driver | psycopg3; escrituras masivas con `COPY ... FROM STDIN` |
+| DataFrames | Polars |
+| API | FastAPI |
+| Migraciones | Alembic (multi-schema) |
+| Orquestación | Docker Compose |
 
-## Data Management (Local Data Lake)
+`silver.establecimientos` está particionada por `period`: un corte del DENUE es
+una partición, lo que hace del periodo la unidad de recuperación — un corte mal
+cargado se recarga sin tocar los demás.
 
-**IMPORTANT:** Raw INEGI microdata and processed .parquet files are **NOT** included in this repository due to size and privacy constraints.
+## Imágenes
 
-The expected local structure is:
-- /data/raw/: Place original CSV files from INEGI here.
-- /data/processed/: Optimized Parquet files will be generated here.
-- /data/models/: Serialized ML models (.pkl/.onnx).
+Dos targets desde un solo `Dockerfile.etl`:
 
-To run the ETL pipeline (raw -> parquet conversion):
+| Target | Lleva | Para qué | Arquitectura |
+|---|---|---|---|
+| `tools` | deps + pytest/ruff | migraciones, tests, scripts, API | portable (arm64 y amd64) |
+| `etl` | lo anterior + Chrome | el pipeline | amd64 |
 
-    uv run python -m src.tesis_core.interface.cli.etl --input data/raw --output data/processed
+Chrome solo está en `etl` porque lo usa el scraping de DENUE (Selenium, dos
+archivos). Así los tests y las migraciones no cargan un navegador de ~500 MB
+que no usan, y `tools` construye en cualquier arquitectura.
 
-## Running the Server
+## Estructura
 
-To start the API in development mode:
+```
+src/
+├── shared/      # config, logging, enums, capa de BD (Base, sesión, modelos,
+│                #   copy, staging, partitions)
+├── etl/         # extractores, transformadores, loaders, CLI
+├── meta/        # linaje y metadatos de corridas
+└── api/         # FastAPI
+alembic/         # migraciones (baseline único sobre los 3 schemas)
+scripts/         # evaluación del matching CLEE, smoke tests
+tests/
+data/seeds/      # catálogos versionados en git (9 parquet)
+```
 
-    uv run fastapi dev src/tesis_core/interface/api/main.py
+Bronze, Silver y Gold no están en el repo: Bronze se re-descarga con
+`extract`, y Silver y Gold viven en Postgres.
 
-Interactive documentation will be available at: http://localhost:8000/docs
+## Datos
 
-## Testing
-
-To execute unit and integration tests:
-
-    uv run pytest
+Los microdatos no se versionan. `data/` entra por bind mount y solo
+`data/seeds/` está en git — son los catálogos que siembra la migración.

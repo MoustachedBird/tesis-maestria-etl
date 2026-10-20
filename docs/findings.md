@@ -75,7 +75,7 @@ sensibilidad — pendiente.
 
 **Artefactos**: `data/eval/fase7_masked_clee/{results,manifest}.parquet`
 + `metrics.json` (no committed, regenerable con
-`make eval-masked-clee-extract && make eval-masked-clee`).
+`docker compose run --rm tools python scripts/evaluate_masked_clee.py extract && docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate`).
 
 ---
 
@@ -132,7 +132,7 @@ dos saltos siguiente.
 
 ### Experimento de dos saltos: el encadenamiento casi no cuesta
 
-`make eval-masked-clee-chain` (subcomando `chain`): se enmascara TAMBIÉN
+`docker compose run --rm tools python scripts/evaluate_masked_clee.py chain` (subcomando `chain`): se enmascara TAMBIÉN
 el intermedio 2021-11, se resuelve nearest-first contra las oficiales
 2022-05+ (sus no-match reciben `NEW_CHAIN-*`), y el target 05_2021 se
 resuelve usando ese intermedio RESUELTO como primera referencia — el
@@ -174,7 +174,7 @@ que cuesta saltar 4 años de distancia temporal.
 
 ## 2026-07-30 — Línea base de cobertura de la propagación (post re-resolución nearest-first)
 
-**Método**: `scripts/clee_propagation_stats.py` (`make propagation-stats`),
+**Método**: `scripts/clee_propagation_stats.py` (`docker compose run --rm tools python scripts/clee_propagation_stats.py`),
 lectura read-only del Silver real tras terminar las dos re-corridas con
 `--force` y nearest-first: radio (2026-07-25 10:38 → 2026-07-26 03:19) y
 H3 (2026-07-26 → 2026-07-27 04:56). Mide **cobertura** sobre las 82.9M
@@ -243,7 +243,7 @@ tuvo oportunidad porque el pre-filtro espacial la descarta antes).
 Un establecimiento aparece UNA vez por corte, así que una identidad
 repetida dentro del mismo corte es error duro. Comprobado que la fuente
 no lo trae: el `clee` oficial tiene **0 colisiones** en 9.58M identidades
-(`make propagation-stats ARGS="--column clee --no-agreement"`).
+(`docker compose run --rm tools python scripts/clee_propagation_stats.py ARGS="--column clee --no-agreement"`).
 
 | Columna | Identidades con colisión | Filas excedentes |
 |---|---|---|
@@ -310,7 +310,7 @@ ahorro se concentra en los cortes 2017-2018, los que más saltos de cadena
 acumulan. Lección de método: la cobertura por fila (81.09%) y las
 colisiones (6.32M) son ahora la línea base contra la que se compara
 cualquier cambio futuro de la propagación — se regeneran con
-`make propagation-stats`.
+`docker compose run --rm tools python scripts/clee_propagation_stats.py`.
 
 ---
 
@@ -930,8 +930,8 @@ mandar a un modelo es mucho más chica de lo que parecía al inicio.
   corte temprano al techo (`PERFECT_RAZON_SCORE` / `PERFECT_NAME_SCORE`)
   debería absorber buena parte, pero no está medido.
 - **Re-resolver Silver** con `argmax` (ambas columnas) y re-correr
-  `make propagation-stats`. Ojo con la trampa del respaldo: no lanzar dos
-  `--force` seguidos. Pendiente derivado: `make build-entidades`.
+  `docker compose run --rm tools python scripts/clee_propagation_stats.py`. Ojo con la trampa del respaldo: no lanzar dos
+  `--force` seguidos. Pendiente derivado: `docker compose run --rm etl build-entidades`.
 - Las **50 filas donde el correcto puntea más alto pero no era candidato**
   apuntan a generación de candidatos (radio de 500 m / disco H3), no a la
   cascada. Vale aislar si son mudanzas de más de 500 m o un defecto del

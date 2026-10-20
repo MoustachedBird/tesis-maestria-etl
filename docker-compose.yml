@@ -1,15 +1,35 @@
 # ============================================================================
 # ETL Core — stack de contenedores (arquitectura.md §2.1)
 # ============================================================================
-# Un solo entorno de ejecución: la workstation Linux (48 hilos / 125 GiB,
-# inventario en docs/entorno_linux.md). Los límites de recursos vienen del
-# .env para no fijar números de una máquina en el compose.
+# Este archivo es la ÚNICA interfaz de ejecución del proyecto. No hay Makefile
+# ni ejecución nativa: todo corre en contenedor, en la workstation Linux
+# (48 hilos / 125 GiB, inventario en docs/entorno_linux.md) y en cualquier
+# máquina de desarrollo. Los límites de recursos vienen del .env para no fijar
+# números de una máquina aquí.
 #
-#   docker compose up -d postgres     # levanta solo la base
-#   docker compose run --rm etl ...   # corrida manual del pipeline (profile)
+# ── Levantar el stack ───────────────────────────────────────────────────────
+#   docker compose build                 # construye las imágenes
+#   docker compose up -d                 # Postgres + migraciones. Base lista.
+#   docker compose down                  # detiene (conserva los datos)
+#   docker compose down -v               # BORRA el volumen de datos
 #
-# El servicio `etl` está bajo el profile `manual`: es un one-shot de CLI, no
-# un daemon, así que `docker compose up` no debe arrancarlo.
+# ── Pipeline (one-shot, profile `manual`) ───────────────────────────────────
+#   docker compose run --rm etl extract
+#   docker compose run --rm etl transform --only clee-radio
+#   docker compose run --rm etl pipeline
+#
+# ── Herramientas (one-shot, profile `tools`) ────────────────────────────────
+#   docker compose run --rm tools pytest
+#   docker compose run --rm tools python -m scripts.smoke_fase3
+#   docker compose run --rm tools alembic current --verbose
+#   docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/
+#
+# ── Base de datos ───────────────────────────────────────────────────────────
+#   docker compose exec postgres psql -U etl_rw -d mipymes
+#   docker compose logs -f postgres
+#
+# Los servicios one-shot van bajo profile para que `up` no los arranque:
+# `docker compose run` activa el profile de su servicio automáticamente.
 
 services:
   postgres:
@@ -79,6 +99,36 @@ services:
       retries: 5
       start_period: 30s
 
+  # Migraciones: one-shot, no daemon. Es un servicio y no un target del
+  # Makefile para que el encadenamiento viva donde vive el resto de la
+  # topologia: `docker compose up -d` espera el healthcheck de postgres,
+  # aplica el baseline y sale. La base queda lista con UN comando.
+  # Alembic es idempotente, asi que re-levantar el stack no hace nada.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.etl
+      target: tools
+    image: tesis-etl-tools:local
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+
+    command: ["alembic", "upgrade", "head"]
+
+    volumes:
+      - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+      # Los seeds que siembra el baseline.
+      - ./data:/app/data
+
   etl:
     profiles: ["manual"]
     build:
@@ -88,8 +138,8 @@ services:
     image: tesis-etl:local
 
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
     env_file: .env
     environment:
@@ -114,13 +164,13 @@ services:
           cpus: "${CPUS_ETL:-16}"
           memory: ${MEM_ETL:-32g}
 
-  # Herramientas: migraciones, tests y scripts. Mismo codigo, imagen con las
-  # dependencias de desarrollo. Existe porque en la workstation Linux nada
-  # corre nativo -- `uv run alembic` en el host no es una opcion ahi.
+  # Herramientas one-shot: tests y scripts de validacion. Sin Chrome, asi que
+  # corre igual en la workstation (amd64) y en la Mac (arm64) -- no hace falta
+  # un modo "nativo" aparte.
   #
-  #   docker compose run --rm tools alembic upgrade head
   #   docker compose run --rm tools pytest
   #   docker compose run --rm tools python -m scripts.smoke_fase3
+  #   docker compose run --rm tools ruff check src/
   #
   # El entrypoint de la imagen es `uv run`, asi que el comando va tal cual.
   tools:
@@ -128,12 +178,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.etl
-      target: dev
-    image: tesis-etl-dev:local
+      target: tools
+    image: tesis-etl-tools:local
 
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
     env_file: .env
     environment:
@@ -160,6 +210,40 @@ services:
         limits:
           cpus: "${CPUS_TOOLS:-8}"
           memory: ${MEM_TOOLS:-8g}
+
+  # API de consulta. Daemon, no one-shot, asi que no lleva profile: entra con
+  # `docker compose up`. Usa la imagen `tools` porque fastapi es dependencia
+  # del proyecto; la Fase 6 le da su propio Dockerfile sin Selenium ni
+  # rapidfuzz y lo baja al rol de solo lectura `api_ro`.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.etl
+      target: tools
+    image: tesis-etl-tools:local
+    restart: unless-stopped
+
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+
+    command: ["fastapi", "run", "src/api/main.py", "--host", "0.0.0.0", "--port", "8000"]
+
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    volumes:
+      - ./src:/app/src
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPUS_API:-4}"
+          memory: ${MEM_API:-4g}
 
 volumes:
   pgdata:

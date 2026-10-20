@@ -1,35 +1,20 @@
 # ============================================================================
-# Imagen del ETL — dos etapas sobre una base comun
+# Imagen del ETL — base portable + Chrome solo donde hace falta
 # ============================================================================
-# En la workstation Linux NADA corre nativo: el pipeline, las migraciones, los
-# tests y los scripts se ejecutan todos en contenedor. Por eso hay dos
-# objetivos:
+# Chrome lo usan DOS archivos (`utils/browser.py`, `utils/denue_scraping.py`),
+# ambos del scraping de DENUE. Tenerlo en la base obligaba a que las
+# migraciones y los tests cargaran un navegador amd64 de ~500 MB que no usan,
+# y de paso volvia la imagen inconstruible en arm64 --o sea, en la Mac de
+# desarrollo. Por eso Chrome vive solo en la etapa que lo necesita:
 #
-#   --target etl  (default)  pipeline y migraciones. Sin dependencias de dev.
-#   --target dev             + pytest/ruff + tests/ + scripts/, para validar.
-#
-# El codigo va COPIADO en `etl` (imagen reproducible para correr el pipeline) y
-# MONTADO en `dev` desde compose (ciclo de edicion sin rebuild).
+#   --target tools   migraciones, pytest, scripts. Portable (arm64 y amd64).
+#   --target etl     el pipeline. Lleva Chrome; amd64.
 
-# ─── Base: sistema, Chrome y dependencias de runtime ────────────────────────
+# ─── base: interprete y dependencias del proyecto ───────────────────────────
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-# Chrome para el scraping de DENUE. amd64 unicamente, que es lo que corre la
-# workstation; en arm64 habria que cambiar a chromium (arquitectura.md §2.3.3).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget gnupg unzip curl ca-certificates \
-    && mkdir -p /etc/apt/keyrings \
-    && wget -q -O /etc/apt/keyrings/google-chrome.asc \
-        https://dl-ssl.google.com/linux/linux_signing_key.pub \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] \
-http://dl.google.com/linux/chrome/deb/ stable main" \
-        > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -41,33 +26,38 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# ─── etl: lo que corre el pipeline y las migraciones ────────────────────────
+# ─── tools: migraciones, tests y scripts ────────────────────────────────────
+# Sin Chrome, asi que construye y corre en cualquier arquitectura. El codigo
+# se monta desde compose en vez de copiarse: re-correr los tests tras editar
+# no debe costar un rebuild.
+FROM base AS tools
+
+RUN uv sync --frozen
+
+# `uv run` como entrypoint deja que compose pase la herramienta como
+# argumento: `alembic upgrade head`, `pytest`, `python -m scripts.smoke_fase3`.
+ENTRYPOINT ["uv", "run"]
+CMD ["pytest"]
+
+# ─── etl: el pipeline, con el navegador del scraping ────────────────────────
 FROM base AS etl
+
+# amd64 unicamente, que es lo que corre la workstation; en arm64 habria que
+# cambiar a chromium (arquitectura.md §2.3.3).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget gnupg ca-certificates \
+    && mkdir -p /etc/apt/keyrings \
+    && wget -q -O /etc/apt/keyrings/google-chrome.asc \
+        https://dl-ssl.google.com/linux/linux_signing_key.pub \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] \
+http://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
 
 # Todo src/ de una vez: etl, meta y api dependen de src/shared (copiarlos por
 # separado dejaba la imagen sin el paquete compartido).
 COPY src/ ./src/
-# Alembic entra a la imagen porque `make db-migrate` tambien corre en
-# contenedor; sin esto no habria con que migrar.
-COPY alembic/ ./alembic/
-COPY alembic.ini ./
 
 ENTRYPOINT ["uv", "run", "python", "-m", "src.etl.main"]
-
-# ─── dev: validacion (pytest, smoke, ruff, alembic a mano) ──────────────────
-FROM base AS dev
-
-# Ahora si las de desarrollo.
-RUN uv sync --frozen
-
-COPY src/ ./src/
-COPY alembic/ ./alembic/
-COPY tests/ ./tests/
-COPY scripts/ ./scripts/
-COPY alembic.ini pytest.ini .coveragerc ./
-
-# Sin ENTRYPOINT fijo al CLI del ETL: aqui se invocan herramientas distintas.
-# `uv run` como entrypoint deja que compose pase `pytest`, `alembic upgrade
-# head` o `python -m scripts.smoke_fase3` como argumentos.
-ENTRYPOINT ["uv", "run"]
-CMD ["pytest"]

@@ -24,7 +24,7 @@ desarrollo canónica.
 sin confirmación explícita del usuario.** Los cambios de esquema se
 preparan en código (migración Alembic + modelo ORM + DDL en el
 loader/writer correspondiente) y se aplican en un paso controlado
-(`make db-migrate`) que ejecuta el usuario. Esto aplica también a
+(`docker compose up -d migrate`) que ejecuta el usuario. Esto aplica también a
 operaciones "solo aditivas" (CREATE TABLE, INSERT en catálogos): el paso
 de aplicación sobre las bases reales lo decide el usuario.
 
@@ -61,8 +61,8 @@ normalize-dates, resolución CLEE, build-entidades, load) se lanza con
 `caffeinate -dims` antepuesto:**
 
 ```bash
-caffeinate -dims make transform ARGS="..."
-caffeinate -dims make pipeline ARGS="..."
+caffeinate -dims docker compose run --rm etl transform ARGS="..."
+caffeinate -dims docker compose run --rm etl pipeline ARGS="..."
 ```
 
 Razón: las corridas duran horas/días y un reposo a medio camino las
@@ -97,7 +97,7 @@ build-entidades). No hay paso manual que recordar.
 - Un archivo por base: `data/silver/mipymes.backup.duckdb`. Cada comando
   **sobreescribe** el anterior — es "el estado justo antes de esta
   corrida", no un historial.
-- **Uno por comando, no por etapa**: `make transform` corre varias etapas
+- **Uno por comando, no por etapa**: `docker compose run --rm etl transform` corre varias etapas
   y el respaldo se hace una sola vez, antes de la primera escritura, para
   que revertir devuelva al estado previo al comando completo.
 - En APFS es un **clon copy-on-write**: medido sobre el Silver real de
@@ -153,7 +153,7 @@ de FK que no distingue el nivel:
 
 **Un valor suelto**: agregarlo al parquet correspondiente en `data/seeds/`
 (nombres de localidad SIEMPRE en MAYÚSCULAS, ordenado por su PK) y correr
-`make db-migrate`. No se toca código.
+`docker compose up -d migrate`. No se toca código.
 
 **Un corte completo** (decenas o cientos de altas): escanear los CSV del
 periodo y anexar de golpe las que falten. Caso real: el corte **2026-05
@@ -167,13 +167,13 @@ del catálogo (evita dos ids para un concepto). Caso real: `tipo_asent`
 `"OTRO"` ≡ `"OTRA (ESPECIFICAR)"` desde 2026-05.
 
 Un seed mal formado (PK duplicada, NULL en columna obligatoria) se detiene
-en `make db-migrate` con el archivo y los valores ofensores.
+en `docker compose up -d migrate` con el archivo y los valores ofensores.
 
 ---
 
 ## Normalize-Dates Step
 
-The DENUE transform pipeline has 5 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution-radio -> clee-resolution-h3** (see "Comando único global" below for how they combine with SESNSP in one `make transform`).
+The DENUE transform pipeline has 5 ordered sub-steps: **ingest -> normalize-dates -> h3-cells -> clee-resolution-radio -> clee-resolution-h3** (see "Comando único global" below for how they combine with SESNSP in one `docker compose run --rm etl transform`).
 
 The `normalize-dates` step parses `fecha_alta_str` (raw string from INEGI) into `fecha_alta_date` (DATE type, format `YYYY-MM-01`) directly in the Silver DuckDB via SQL UPDATE, one period at a time.
 
@@ -222,7 +222,7 @@ uv run python -m src_etl.main transform
 
 ## H3 Cells: `h3_cell_9` and `h3_cell_5`
 
-Two BIGINT columns on `establecimientos` (Silver; Gold inherits on `make load`)
+Two BIGINT columns on `establecimientos` (Silver; Gold inherits on `docker compose run --rm etl load`)
 hold precomputed H3 cell indexes derived from `latitud`/`longitud`. Valid H3
 indexes always fit in a signed BIGINT (high bit is 0).
 
@@ -345,10 +345,10 @@ Defined in `clee_resolution_config.py` with full docstrings:
 
 ```bash
 # h3-cells stage only (incremental: rows with NULL h3_cell_9)
-make transform ARGS="--only h3-cells"
+docker compose run --rm etl transform ARGS="--only h3-cells"
 
 # Recompute ALL rows with valid coords (drop ix_estab_h3_9 first, see above)
-make transform ARGS="--only h3-cells --force"
+docker compose run --rm etl transform ARGS="--only h3-cells --force"
 ```
 
 ---
@@ -588,11 +588,11 @@ H3 method carry a distinct prefix suffix so they never collide with radio's.
 Aísla la sección CLEE apagando el resto (ver "Comando único global"):
 
 ```bash
-make transform ARGS="--only clee-radio"           # radio/BallTree -> clee_propagado_radio
-make transform ARGS="--only clee-h3"              # H3 blocking -> clee_propagado_h3
-make transform ARGS="--only clee"                 # ambas propagaciones
-make transform ARGS="--only clee-radio --force"   # reset ONLY radio (+ su KB cache) y re-resolver
-make transform ARGS="--only clee-h3 --force"      # reset ONLY h3 (+ su KB cache) y re-resolver
+docker compose run --rm etl transform ARGS="--only clee-radio"           # radio/BallTree -> clee_propagado_radio
+docker compose run --rm etl transform ARGS="--only clee-h3"              # H3 blocking -> clee_propagado_h3
+docker compose run --rm etl transform ARGS="--only clee"                 # ambas propagaciones
+docker compose run --rm etl transform ARGS="--only clee-radio --force"   # reset ONLY radio (+ su KB cache) y re-resolver
+docker compose run --rm etl transform ARGS="--only clee-h3 --force"      # reset ONLY h3 (+ su KB cache) y re-resolver
 ```
 
 `--force` is per-method: it NULLs only the active method's column and clears
@@ -639,7 +639,7 @@ uv run python -m src_etl.main transform --only clee-radio
 uv run python -m src_etl.main transform --only clee-radio --force
 
 # Or via Makefile
-make transform ARGS="--only clee-radio"
+docker compose run --rm etl transform ARGS="--only clee-radio"
 
 # Full transform (DENUE completo + SESNSP, todo prendido por default)
 uv run python -m src_etl.main transform
@@ -717,13 +717,13 @@ SESNSP se aísla con `--only sesnsp` sobre el comando global (ya NO hay targets
 `extract-sesnsp` / `transform-sesnsp`; ver "Comando único global"):
 
 ```bash
-make extract   ARGS="--only sesnsp"           # CKAN discovery + descarga a data/bronze/sesnsp/
-make transform ARGS="--only sesnsp"           # CSV mas reciente -> Silver (catalogo + hechos)
-make transform ARGS="--only sesnsp --force"   # reprocesar el corte ya cargado
-# make extract / make transform SIN flags ya incluyen SESNSP.
+docker compose run --rm etl extract   ARGS="--only sesnsp"           # CKAN discovery + descarga a data/bronze/sesnsp/
+docker compose run --rm etl transform ARGS="--only sesnsp"           # CSV mas reciente -> Silver (catalogo + hechos)
+docker compose run --rm etl transform ARGS="--only sesnsp --force"   # reprocesar el corte ya cargado
+# docker compose run --rm etl extract / docker compose run --rm etl transform SIN flags ya incluyen SESNSP.
 ```
 
-`make load` no necesita nada especial: copia el archivo Silver completo a
+`docker compose run --rm etl load` no necesita nada especial: copia el archivo Silver completo a
 Gold, tablas SESNSP incluidas. Log del stage: `data/etl_sesnsp.log`.
 
 ### Cruce negocios ↔ crimen (ejemplo)
@@ -770,11 +770,11 @@ re-resolución CLEE con el código actual (los ids `NEW_*` van a cambiar).
   que ya garantiza esos dominios; agregar FKs solo encarecería el
   INSERT masivo sin aportar integridad nueva.
 - **Se construye en Silver** (no en Gold pese a que N3 originalmente lo
-  proponía ahí): `make load` la copia a Gold sin lógica adicional, igual
+  proponía ahí): `docker compose run --rm etl load` la copia a Gold sin lógica adicional, igual
   que el resto del esquema.
 
 ```bash
-make build-entidades   # correr DESPUES de clee-resolution-radio --force
+docker compose run --rm etl build-entidades   # correr DESPUES de clee-resolution-radio --force
 # equivalente: uv run python -m src_etl.main build-entidades
 ```
 
@@ -809,10 +809,10 @@ completo diseñado en `todo.md` sección "Protocolo de evaluación".
   parquets, nunca abre Silver en modo escritura.
 
 ```bash
-make eval-masked-clee-extract   # lectura Silver -> parquets
-make eval-masked-clee           # nearest-first (produccion) -> *_nearest
-make eval-masked-clee ARGS="--ref-order newest"   # orden legado, para comparar
-make eval-masked-clee-chain     # dos saltos: target via intermedio resuelto
+docker compose run --rm tools python scripts/evaluate_masked_clee.py extract   # lectura Silver -> parquets
+docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate           # nearest-first (produccion) -> *_nearest
+docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate ARGS="--ref-order newest"   # orden legado, para comparar
+docker compose run --rm tools python scripts/evaluate_masked_clee.py chain     # dos saltos: target via intermedio resuelto
 ```
 
 Salidas en `data/eval/fase7_masked_clee/`: `results*.parquet` (fila por
@@ -837,9 +837,9 @@ columnas `clee_propagado_*` tal como quedaron en el warehouse real (82.9M
 filas, ~15 s, siempre READ-ONLY).
 
 ```bash
-make propagation-stats                                     # radio + h3 del Silver
-make propagation-stats ARGS="--column clee --no-agreement" # baseline: colisiones de la fuente
-make propagation-stats ARGS="--db data/silver/otra.duckdb" # otra base o un .parquet de respaldo
+docker compose run --rm tools python scripts/clee_propagation_stats.py                                     # radio + h3 del Silver
+docker compose run --rm tools python scripts/clee_propagation_stats.py ARGS="--column clee --no-agreement" # baseline: colisiones de la fuente
+docker compose run --rm tools python scripts/clee_propagation_stats.py ARGS="--db data/silver/otra.duckdb" # otra base o un .parquet de respaldo
 ```
 
 Qué reporta (por corte y agregado, JSON en
@@ -972,107 +972,96 @@ etl-core/
 
 ## Build Commands
 
-> **Dónde corre qué.** La Mac es entorno de desarrollo y ahí se corre
-> nativo. **En la workstation Linux NADA corre nativo**: no hay `uv` ni venv
-> en el host, todo pasa por Docker. El Makefile enruta con `DOCKER=1`:
->
-> ```bash
-> export DOCKER=1        # una vez por sesión SSH en la Linux
-> make setup             # construye las dos etapas de la imagen
-> make db-up             # Postgres
-> make db-migrate        # alembic DENTRO del contenedor `tools`
-> make test              # pytest DENTRO del contenedor `tools`
-> ```
->
-> Sin `DOCKER=1` los mismos targets usan `uv run` en el host, que es el
-> flujo de la Mac. Los comandos sueltos de abajo son la variante nativa;
-> en la Linux se invocan vía `docker compose run --rm tools <comando>`.
+Todo corre en contenedor. **No hay Makefile ni ejecución nativa**: `uv` y el
+venv solo existen dentro de las imágenes, y `docker-compose.yml` es la única
+interfaz. El inventario completo está más abajo en "Comandos".
 
 ```bash
-# Environment
-uv sync                                    # Install all dependencies
+docker compose build                 # construye las imágenes
+docker compose up -d                 # Postgres + migraciones + API
 
-# Run CLI
-uv run python -m src_etl.main             # Main CLI entry point
-uv run fastapi dev src_api/main.py        # Dev server (FastAPI)
-
-# Linting
-uv run ruff check src_etl/ src_metadata/ src_api/ tests/        # Lint
-uv run ruff check src_etl/ src_metadata/ src_api/ tests/ --fix   # Auto-fix
-uv run ruff format src_etl/ src_metadata/ src_api/ tests/        # Format
-
-# Testing
-uv run pytest                              # All tests
-uv run pytest -m unit                      # Unit only
-uv run pytest -m "not slow"                # Skip slow
-uv run pytest -m "db and not slow"         # DB tests, skip slow
-uv run pytest -vv                          # Verbose
+docker compose run --rm etl pipeline                      # ETL
+docker compose run --rm tools pytest                      # tests
+docker compose run --rm tools ruff check src/ tests/      # lint
+docker compose exec postgres psql -U etl_rw -d mipymes    # SQL
 ```
+
+Dos imágenes desde un solo `Dockerfile.etl`:
+
+| Target | Lleva | Para qué | Arquitectura |
+|---|---|---|---|
+| `tools` | deps del proyecto + pytest/ruff | migraciones, tests, scripts, API | portable (arm64 y amd64) |
+| `etl` | lo anterior + Chrome | el pipeline (el scraping de DENUE usa Selenium) | amd64 |
+
+Chrome vive solo en `etl` porque lo usan dos archivos (`utils/browser.py`,
+`utils/denue_scraping.py`). Tenerlo en la base obligaba a que tests y
+migraciones cargaran un navegador de ~500 MB que no usan, y volvía la imagen
+inconstruible en arm64.
 
 ---
 
-## Makefile Targets — inventario completo
+## Comandos — inventario completo
 
-**Todos** los targets del `Makefile`, qué corren por debajo y si aceptan
-`ARGS`. Solo los marcados con ✅ reenvían `ARGS="..."` al CLI; en el resto
-`ARGS` se ignora en silencio (si necesitas flags ahí, invoca el módulo
-directo con `uv run python -m src_etl.main ...`).
+`docker-compose.yml` es la **única** interfaz de ejecución: no hay Makefile ni
+ejecución nativa. Los servicios one-shot (`etl`, `tools`) van bajo profile para
+que `up` no los arranque; `docker compose run` activa su profile solo.
 
-### ETL (comandos globales — sin `ARGS` corren TODO)
+Los flags del CLI van directo al final del comando, sin `ARGS=`:
 
-| Target | Equivale a | `ARGS` | Notas |
-|---|---|---|---|
-| `make extract` | `main extract` | ✅ | DENUE (Selenium) + SESNSP (CKAN) → Bronze |
-| `make transform` | `main transform` | ✅ | 5 sub-pasos DENUE + SESNSP → Silver |
-| `make load` | `main load` | ✅ | Silver → Gold (solo acepta `--force`) |
-| `make pipeline` | `main pipeline` | ✅ | `[Extract →] Transform → Load` |
-| `make pipeline-steps` | `extract transform load` | ❌ | Encadena los 3 targets sin flags |
-| `make pipeline-full` | `setup extract transform load` | ❌ | Igual + `uv sync` primero |
-| `make retry` | `main retry` | ❌ | **Placeholder**: hoy solo imprime un aviso |
-| `make validate` | — | ❌ | **Placeholder** ("coming soon") |
+```bash
+docker compose run --rm etl transform --only clee-radio --force
+```
 
-### Dimensión N3 y evaluación Fase 7
+### Levantar y bajar el stack
 
-| Target | Equivale a | `ARGS` | Notas |
-|---|---|---|---|
-| `make build-entidades` | `main build-entidades` | ❌ | Correr DESPUÉS de la resolución CLEE |
-| `make eval-masked-clee-extract` | `scripts/evaluate_masked_clee.py extract` | ✅ | Silver read-only → parquets en `data/eval/` |
-| `make eval-masked-clee` | `… evaluate` | ✅ | Default `--ref-order nearest` (producción) |
-| `make eval-masked-clee-chain` | `… chain` | ✅ | Experimento de dos saltos |
-| `make propagation-stats` | `scripts/clee_propagation_stats.py` | ✅ | Cobertura/salud de `clee_propagado_*`; Silver read-only |
+| Comando | Qué hace |
+|---|---|
+| `docker compose build` | Construye las imágenes (`tools` y `etl`) |
+| `docker compose up -d` | Postgres → migraciones → API. Deja la base lista y migrada |
+| `docker compose down` | Detiene todo, **conserva** el volumen de datos |
+| `docker compose down -v` | **Destructivo**: borra el volumen `etl-pgdata` |
+| `docker compose logs -f postgres` | Sigue los logs de la base |
+
+### ETL (comandos globales — sin flags corren TODO)
+
+| Comando | Notas |
+|---|---|
+| `docker compose run --rm etl extract` | DENUE (Selenium) + SESNSP (CKAN) → Bronze |
+| `docker compose run --rm etl transform` | 5 sub-pasos DENUE + SESNSP → Silver |
+| `docker compose run --rm etl load` | Silver → Gold (solo acepta `--force`) |
+| `docker compose run --rm etl pipeline` | `[Extract →] Transform → Load` |
+| `docker compose run --rm etl build-entidades` | Dimensión N3; correr DESPUÉS de la resolución CLEE |
+| `docker compose run --rm etl retry` | **Placeholder**: hoy solo imprime un aviso |
+
+### Evaluación Fase 7
+
+| Comando | Notas |
+|---|---|
+| `docker compose run --rm tools python scripts/evaluate_masked_clee.py extract` | Silver read-only → parquets en `data/eval/` |
+| `docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate` | Default `--ref-order nearest` (producción) |
+| `docker compose run --rm tools python scripts/evaluate_masked_clee.py chain` | Experimento de dos saltos |
+| `docker compose run --rm tools python scripts/clee_propagation_stats.py` | Cobertura/salud de `clee_propagado_*`; Silver read-only |
 
 ### Base de datos y migraciones
 
-| Target | Qué hace |
+| Comando | Qué hace |
 |---|---|
-| `make db-migrate` | `alembic upgrade head` |
-| `make db-downgrade` | `alembic downgrade -1` |
-| `make db-reset` | **Destructivo**: `downgrade base` + `upgrade head` (pide confirmación interactiva) |
-| `make db-status` | `alembic current --verbose` + historial + salud de índices (presentes/faltantes) |
+| `docker compose up -d migrate` | `alembic upgrade head`. Lo hace solo `docker compose up -d` |
+| `docker compose run --rm tools alembic current --verbose` | Revisión aplicada + historial |
+| `docker compose run --rm tools alembic downgrade -1` | Revierte una revisión |
+| `docker compose exec postgres psql -U etl_rw -d mipymes` | Sesión psql |
+| `docker compose exec postgres createdb -U etl_rw mipymes_test` | Base de pruebas (idempotente: falla si ya existe) |
 
-### Metadata, logs y limpieza
+### Tests y calidad
 
-| Target | Qué hace |
+| Comando | Qué hace |
 |---|---|
-| `make metadata-query` | Últimos 5 job runs de `data/metadata.duckdb` (JSON) |
-| `make metadata-stats` | `DenueTransformer.get_pipeline_status()` (JSON) |
-| `make logs` | Contenido de `logs/downloads/latest/` + últimas 20 líneas de `app.log` |
-| `make clean` | Borra `__pycache__/` y `*.pyc` |
-| `make clean-logs` | Borra `logs/downloads/run_*` con más de 7 días |
-
-### Tests, calidad y entorno
-
-| Target | Qué hace |
-|---|---|
-| `make test` | `pytest` completo |
-| `make test-unit` / `test-integration` / `test-db` | `pytest -m unit` / `-m integration` / `-m db` |
-| `make test-fast` | `pytest -m "unit and not slow"` |
-| `make test-verbose` | `pytest -vv` |
-| `make test-cov` | Coverage HTML+term → `htmlcov/index.html` |
-| `make lint` / `lint-fix` / `format` | `ruff check` / `check --fix` / `format` sobre `src_etl src_metadata src_api tests` |
-| `make setup` / `make dev` | `uv sync` (dev = setup + mensaje) |
-| `make api` | `fastapi dev src_api/main.py` |
-| `make help` | Lista autogenerada de targets (default goal) |
+| `docker compose run --rm tools pytest` | Suite completa |
+| `docker compose run --rm tools pytest -m unit` | Solo unitarios (`-m integration`, `-m db` análogos) |
+| `docker compose run --rm tools pytest -m postgres` | Los que exigen servidor; se saltan solos sin él |
+| `docker compose run --rm tools pytest --cov=src --cov-report=html` | Coverage → `htmlcov/index.html` |
+| `docker compose run --rm tools python -m scripts.smoke_fase3` | Valida la Fase 3 contra Postgres |
+| `docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/` | Lint (`--fix` para corregir, `ruff format` para formatear) |
 
 ### Inventario de flags del CLI (`uv run python -m src_etl.main <cmd>`)
 
@@ -1124,11 +1113,11 @@ sección se **desactiva** con su flag `--no-*` (vía `ARGS="..."`). Ya no existe
 `--source` **ni** targets tipo `extract-sesnsp` / `clee-resolution-radio`:
 **todo se hace con el comando global + flags**.
 
-- `make extract` → DENUE **+** SESNSP (Bronze).
-- `make transform` → DENUE (`ingest → normalize-dates → h3-cells →
+- `docker compose run --rm etl extract` → DENUE **+** SESNSP (Bronze).
+- `docker compose run --rm etl transform` → DENUE (`ingest → normalize-dates → h3-cells →
   clee-resolution-radio → clee-resolution-h3`) **+** SESNSP
   (`sesnsp_incidencia_municipal`), todo en una sola corrida.
-- `make pipeline` → Transform global **+** Load (agrega `--extract` para
+- `docker compose run --rm etl pipeline` → Transform global **+** Load (agrega `--extract` para
   incluir la descarga; extract va OFF por default porque re-scrapea INEGI).
 
 Hay **dos modos** para elegir secciones (se pasan por `ARGS="..."`):
@@ -1160,58 +1149,58 @@ fuente completa, y `--only load` en extract/transform no corre nada).
 
 ```bash
 # Solo SESNSP (antes extract-sesnsp / transform-sesnsp):
-make extract   ARGS="--only sesnsp"
-make transform ARGS="--only sesnsp"
+docker compose run --rm etl extract   ARGS="--only sesnsp"
+docker compose run --rm etl transform ARGS="--only sesnsp"
 
 # Poblar Silver SIN propagar CLEE (radio ni h3), incluye SESNSP:
-caffeinate -dims make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3"
+caffeinate -dims docker compose run --rm etl transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3"
 
 # Solo CLEE radio (antes clee-resolution-radio); +" --force" para re-resolver:
-caffeinate -dims make transform ARGS="--only clee-radio"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-radio"
 
 # Solo CLEE H3 (antes clee-resolution-h3):
-caffeinate -dims make transform ARGS="--only clee-h3"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-h3"
 
 # Ambas propagaciones CLEE:
-caffeinate -dims make transform ARGS="--only clee"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee"
 
 # Solo backfill H3 cells (antes h3-backfill):
-make transform ARGS="--only h3-cells"
+docker compose run --rm etl transform ARGS="--only h3-cells"
 ```
 
 **Combinaciones frecuentes** (fin a fin):
 
 ```bash
 # Rebuild TOTAL desde cero (descarga incluida), una sola orden:
-caffeinate -dims make pipeline ARGS="--extract --force"
+caffeinate -dims docker compose run --rm etl pipeline ARGS="--extract --force"
 
 # Rebuild de Silver+Gold SIN volver a scrapear INEGI (default de pipeline):
-caffeinate -dims make pipeline ARGS="--force"
+caffeinate -dims docker compose run --rm etl pipeline ARGS="--force"
 
 # Silver completo pero SIN el track de comparación H3 (ahorra ~14h):
-caffeinate -dims make transform ARGS="--no-clee-resolution-h3"
+caffeinate -dims docker compose run --rm etl transform ARGS="--no-clee-resolution-h3"
 
 # Re-resolver CLEE radio y reconstruir lo que depende de esa columna:
-caffeinate -dims make transform ARGS="--only clee-radio --force"
-make build-entidades && make load
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-radio --force"
+docker compose run --rm etl build-entidades && docker compose run --rm etl load
 
 # Solo promover Silver -> Gold dentro del comando global:
-make pipeline ARGS="--only load"          # equivalente a `make load`
+docker compose run --rm etl pipeline ARGS="--only load"          # equivalente a `docker compose run --rm etl load`
 
 # Preparar Silver para análisis sin tocar CLEE (ingest + fechas + H3):
-make transform ARGS="--only ingest --only normalize-dates --only h3-cells"
+docker compose run --rm etl transform ARGS="--only ingest --only normalize-dates --only h3-cells"
 
 # Ciclo de evaluación Fase 7 completo (no toca Silver en escritura):
-make eval-masked-clee-extract
-make eval-masked-clee                              # nearest (producción)
-make eval-masked-clee ARGS="--ref-order newest"    # orden legado, comparación
-make eval-masked-clee-chain                        # dos saltos
+docker compose run --rm tools python scripts/evaluate_masked_clee.py extract
+docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate                              # nearest (producción)
+docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate ARGS="--ref-order newest"    # orden legado, comparación
+docker compose run --rm tools python scripts/evaluate_masked_clee.py chain                        # dos saltos
 
 # Antes de cualquier corrida larga: verificar esquema e índices
-make db-status
+docker compose run --rm tools alembic current --verbose
 ```
 
-> Nota de costo: con el default "todo ON", `make transform` corre la
+> Nota de costo: con el default "todo ON", `docker compose run --rm etl transform` corre la
 > propagación CLEE **radio y H3** (la H3 es un track de comparación). Son
 > horas cada una; si solo necesitas producción, pasa
 > `--no-clee-resolution-h3`.
@@ -1241,14 +1230,14 @@ secciones aplica:
 
 ```bash
 # Force SIN re-ingestar (refresca fechas + celdas H3 + SESNSP sobre el Silver actual):
-caffeinate -dims make transform ARGS="--only normalize-dates --only h3-cells --only sesnsp --force"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only normalize-dates --only h3-cells --only sesnsp --force"
 
 # Transform completo SIN propagación CLEE, en force (OJO: incluye ingest -> borra la tabla):
-caffeinate -dims make transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3 --force"
+caffeinate -dims docker compose run --rm etl transform ARGS="--no-clee-resolution-radio --no-clee-resolution-h3 --force"
 
 # Re-resolver UNA sola propagación (la otra columna queda intacta):
-caffeinate -dims make transform ARGS="--only clee-radio --force"
-caffeinate -dims make transform ARGS="--only clee-h3 --force"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-radio --force"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-h3 --force"
 ```
 
 **Excepción de índices — `h3-cells --force`**: `h3_backfill.py` es el
@@ -1259,7 +1248,7 @@ completo, soltar el índice a mano vale un orden de magnitud:
 
 ```bash
 duckdb data/silver/mipymes.duckdb "DROP INDEX ix_estab_h3_9"
-caffeinate -dims make transform ARGS="--only h3-cells --force"
+caffeinate -dims docker compose run --rm etl transform ARGS="--only h3-cells --force"
 duckdb data/silver/mipymes.duckdb "CREATE INDEX ix_estab_h3_9 ON establecimientos(h3_cell_9)"
 ```
 
@@ -1355,7 +1344,7 @@ Aplica a **todo catálogo que tenga seed**, DENUE y SESNSP por igual:
 `sesnsp_delitos` también se siembra desde su parquet en la migración, y el
 transform de cada corte anual solo **valida y enlaza** contra él.
 
-**Dar de alta un valor nuevo = editar el parquet y correr `make db-migrate`.
+**Dar de alta un valor nuevo = editar el parquet y correr `docker compose up -d migrate`.
 No se toca código.** Aplica a los 4 catálogos de dominio, SCIAN, los 3
 niveles de geografía y los estratos de personal (cuyas cotas
 `empleados_min/max` y `categoria` también son columnas del parquet, no
@@ -1377,7 +1366,7 @@ error nombra archivo, tabla, columnas y ejemplos de los valores ofensores.
 Verificado corrompiendo cada seed a propósito: PK duplicada (SCIAN), PK
 compuesta duplicada (localidades), UNIQUE de columna (tipos de vialidad),
 UNIQUE compuesto de tabla (`uq_sesnsp_delito`) y NULL en columna NOT NULL
-(entidades) — los cinco hacen fallar `make db-migrate` nombrando archivo,
+(entidades) — los cinco hacen fallar `docker compose up -d migrate` nombrando archivo,
 tabla, columnas y valores.
 
 Sin esto un duplicado desaparecía en silencio, porque la siembra usa
@@ -1449,7 +1438,7 @@ en un `finally`, así que vuelven también si la etapa falla con excepción.
 - Si el proceso muere de golpe (kill -9, corte de luz) quedan ausentes: la
   base sigue siendo **correcta**, solo consulta más lento, y la siguiente
   corrida los restituye porque `ensure_indexes()` es idempotente.
-- `make db-status` reporta cuántos hay presentes y cuáles faltan.
+- `docker compose run --rm tools alembic current --verbose` reporta cuántos hay presentes y cuáles faltan.
 
 Contexto de por qué importa: una consulta de trayectoria sobre 77M filas
 **sin índices** tomó 83 ms (DuckDB es columnar, escanea rápido); mantener
@@ -1549,14 +1538,15 @@ una tabla que producción nunca tuvo. Corregido a `Double`.
 
 ### Seed Loading
 
-Los seeds se cargan **durante `make db-migrate`**, que es el único lugar
-donde ocurre (no hay `make db-seed`; se eliminó). Orden por jerarquía de
+Los seeds se cargan **dentro de la migración** (servicio `migrate`, que
+`docker compose up -d` encadena), y ese es el único lugar donde ocurre: no
+hay un comando de siembra aparte. Orden por jerarquía de
 FKs: `entidades` → `municipios` → `localidades` → `actividades_economicas`
 → catálogos de dominio → estratos.
 
 ```bash
-make db-migrate          # crea el esquema Y siembra los catálogos
-make db-status           # revisión: migración aplicada + salud de índices
+docker compose up -d migrate          # crea el esquema Y siembra los catálogos
+docker compose run --rm tools alembic current --verbose           # revisión: migración aplicada + salud de índices
 ```
 
 Los loaders **no crean tablas ni toleran su ausencia**: si la tabla no
@@ -1806,22 +1796,22 @@ docker compose run etl pipeline
 
 ```bash
 # Setup from scratch
-uv sync && make db-migrate
+uv sync && docker compose up -d migrate
 
 # Daily development
-make test                        # Run tests (180 should pass)
-make lint                        # Check code quality
+docker compose run --rm tools pytest                        # Run tests (180 should pass)
+docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/                        # Check code quality
 
 # Run ETL
-make extract                     # Step 1: Download from INEGI
-make transform                   # Step 2: ZIP -> Silver DuckDB
-make load                        # Step 3: Silver -> Gold DuckDB
+docker compose run --rm etl extract                     # Step 1: Download from INEGI
+docker compose run --rm etl transform                   # Step 2: ZIP -> Silver DuckDB
+docker compose run --rm etl load                        # Step 3: Silver -> Gold DuckDB
 # OR
-make pipeline                    # All three steps
+docker compose run --rm etl pipeline                    # All three steps
 
 # Check status
-make metadata-stats              # Pipeline statistics
-make db-status                   # Migration status
+docker compose run --rm tools python -m src.etl.main status              # Pipeline statistics
+docker compose run --rm tools alembic current --verbose                   # Migration status
 duckdb data/metadata.duckdb "SHOW TABLES"
 ```
 

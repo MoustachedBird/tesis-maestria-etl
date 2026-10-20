@@ -342,7 +342,7 @@ Dos observaciones clave:
 Fase 7 mide *precisión* sobre una muestra con ground truth. La otra mitad
 de la pregunta ("¿cuánto se propagó de verdad?") se mide sobre las 82.9M
 filas reales con `scripts/clee_propagation_stats.py`
-(`make propagation-stats`, read-only, ~15 s). Tablas completas por corte
+(`docker compose run --rm tools python scripts/clee_propagation_stats.py`, read-only, ~15 s). Tablas completas por corte
 en `docs/findings.md` (entrada 2026-07-30); resumen:
 
 | Métrica (tras re-correr ambos métodos con nearest-first) | Valor |
@@ -395,7 +395,7 @@ precision 71.3% → 95.9% (Fase 7) e identidades `NEW_*` nacidas 933,577 →
 1. ~~**Re-resolución completa**~~ **hecha**: radio (2026-07-25 10:38 →
    2026-07-26 03:19, ~16h41m) y H3 (2026-07-26 → 2026-07-27 04:56).
    Ambas columnas quedaron con nearest-first; cobertura medida arriba.
-   Pendiente derivado: `make build-entidades` (la dimensión
+   Pendiente derivado: `docker compose run --rm etl build-entidades` (la dimensión
    `entidades_economicas` se construyó con los valores legados).
 2. **Repetir el protocolo con target `11_2022`** (referencias a ambos
    lados) para medir sensibilidad del hallazgo a la posición del target

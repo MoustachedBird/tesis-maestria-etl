@@ -99,7 +99,7 @@ flowchart TB
         end
     end
 
-    USER(["Usuario<br/>make pipeline"]) -->|docker compose run| ETL
+    USER(["Usuario<br/>docker compose run --rm etl pipeline"]) -->|docker compose run| ETL
     USER -->|POST /ops/runs| API
     API -->|INSERT meta.run_requests| PG
     SCHED -->|poll cola + cron| PG
@@ -354,7 +354,7 @@ Tres formas de disparar una corrida, una sola ruta de ejecución:
 ```
   cron semanal (scheduler)  ─┐
   POST /ops/runs (API)      ─┼──> meta.run_requests ──> scheduler toma ──> src.etl.main
-  make pipeline (CLI)       ─┘      (cola en la DB)      el advisory lock
+  docker compose run --rm etl pipeline (CLI)       ─┘      (cola en la DB)      el advisory lock
                                                           de Postgres
 ```
 
@@ -451,7 +451,7 @@ class Layer(str, Enum):
 | D5 | **Cron semanal en contenedor `scheduler` + cola en tabla + advisory lock** | Manual y automático por la misma ruta; el API nunca toca el socket de Docker. §2.5 |
 | D6 | **`establecimientos` particionada por `period`** | La unidad de recuperación pasa de 49.6 GiB a un corte. §2.4 |
 | D7 | **La tabla de gold se llama `establecimientos`**, no `entidades_economicas` | El schema ya distingue la capa; el grano distinto se protege con tres salvaguardas. §2.3.1 |
-| D8 | **Solo se migra el código.** Sin retrocompatibilidad, sin migración de datos; el proyecto de la Mac queda intacto | El pipeline nuevo arranca en limpio: `make extract` re-descarga Bronze (el scraping recorre el histórico completo de INEGI) y los seeds están en git. Ningún insumo hay que trasladar ni respaldar. §5 |
+| D8 | **Solo se migra el código.** Sin retrocompatibilidad, sin migración de datos; el proyecto de la Mac queda intacto | El pipeline nuevo arranca en limpio: `docker compose run --rm etl extract` re-descarga Bronze (el scraping recorre el histórico completo de INEGI) y los seeds están en git. Ningún insumo hay que trasladar ni respaldar. §5 |
 | D9 | **El pipeline corre 100% en la workstation Linux**; las Mac quedan fuera de la ejecución | Threadripper 7960X (48 hilos) + 125 GiB + NVMe, sin VM intermedia. Un solo entorno amd64: nada de multi-arch ni límites por máquina. Inventario en `docs/entorno_linux.md`. La GPU no participa. §2.3.2, §2.3.3 |
 
 ---
@@ -577,9 +577,9 @@ trasladar ni que respaldar:
 
 | Insumo | Cómo llega a la Linux |
 |---|---|
-| **Bronze** (9.1 GiB, 484 ZIPs) | `make extract` lo descarga. El scraping lee **toda** la tabla `tblDescargaArchivos_denue` de INEGI sin filtrar por periodo: de ahí salieron los 20 cortes actuales (2015 → 2026-05), así que el histórico sigue publicado |
+| **Bronze** (9.1 GiB, 484 ZIPs) | `docker compose run --rm etl extract` lo descarga. El scraping lee **toda** la tabla `tblDescargaArchivos_denue` de INEGI sin filtrar por periodo: de ahí salieron los 20 cortes actuales (2015 → 2026-05), así que el histórico sigue publicado |
 | **`data/seeds/`** (456 KB) | **Versionado en git** — 9 parquet trackeados; llega con el `git clone` |
-| **`data/eval/`** (584 MB) | Se regenera con `make eval-masked-clee-extract` desde el Silver nuevo |
+| **`data/eval/`** (584 MB) | Se regenera con `docker compose run --rm tools python scripts/evaluate_masked_clee.py extract` desde el Silver nuevo |
 
 Los números de referencia para verificar la reconstrucción ya están escritos
 en este documento (§1 y §Fase 4), así que tampoco hay que extraer un baseline
@@ -604,33 +604,42 @@ y **no hay datos que trasladar ni preparar** — ver el recuadro de §5.
 - [ ] Opcional, prioridad baja: `chromium` en vez de `google-chrome-stable`
       en `Dockerfile.etl` (§2.3.3). En amd64 el actual funciona.
 
-**Regla de ejecución (2026-10-19): en la workstation Linux NADA corre
-nativo.** No hay `uv` ni venv en el host — el pipeline, las migraciones, los
-tests y los scripts de validación corren todos en contenedor. Eso obligó a
-tres cambios:
+**Regla de ejecución (2026-10-19): todo corre en contenedor, sin
+excepciones.** No hay Makefile ni ejecución nativa en ninguna máquina;
+`docker-compose.yml` es la única interfaz. Tres cambios:
 
-- **`Dockerfile.etl` pasa a dos etapas.** `--target etl` para pipeline y
-  migraciones (sin dependencias de dev), `--target dev` para pytest, ruff y
-  los scripts. La imagen ahora incluye `alembic/` y `alembic.ini`, sin los
-  cuales `make db-migrate` no podía correr dentro del contenedor.
-- **Servicio `tools` en el compose** (profile `tools`), que monta el código
-  en vez de hornearlo: editar y re-correr los tests no cuesta un rebuild.
-- **El Makefile enruta por `DOCKER=1`.** `make test` sigue siendo `uv run
-  pytest` en la Mac; `DOCKER=1 make test` es `docker compose run --rm tools
-  pytest`. En la Linux se exporta `DOCKER=1` una vez por sesión.
+- **Chrome sale de la base de la imagen.** Lo usan dos archivos
+  (`utils/browser.py`, `utils/denue_scraping.py`), ambos del scraping de
+  DENUE. Tenerlo abajo obligaba a que migraciones y tests cargaran un
+  navegador amd64 de ~500 MB que no usan, y volvía la imagen inconstruible
+  en arm64 — o sea, en la máquina de desarrollo. Ahora `Dockerfile.etl`
+  tiene dos targets: `tools` (portable) y `etl` (= base + Chrome, amd64).
+- **La orquestación vive en el compose.** `migrate` es un servicio one-shot
+  encadenado con `service_completed_successfully`, así que
+  `docker compose up -d` espera el healthcheck de Postgres, aplica el
+  baseline y deja la base lista. Un comando, no una secuencia que alguien
+  tenga que recordar.
+- **Se elimina el `Makefile`.** La versión anterior de esta sección proponía
+  un flag `DOCKER=1` que eligiera entre `uv run` y `docker compose run`.
+  Era una segunda fuente de verdad sobre una topología que el compose ya
+  describe. Las ~139 referencias a `make X` en la documentación se
+  migraron a su comando equivalente.
 
 **Un bug que esto destapó:** `Dockerfile.etl` **nunca pudo construirse**.
 Hacía `uv sync --group etl --frozen` y ese grupo no existe en
 `pyproject.toml` — `uv` falla con "Group `etl` is not defined". Nadie lo
 había notado porque la imagen jamás se había construido. Ahora es
-`--frozen --no-dev`, que es lo que se quería decir.
+`--frozen --no-dev`, que es lo que se quería decir. Segundo bug del mismo
+tipo: el keyring de Chrome se escribía en `/etc/apt/keyrings`, que no
+existe en `python:3.12-slim`.
 
 Se agrega también un `.dockerignore`: sin él el contexto de build arrastra
 `data/` (cientos de MB entre Bronze y eval) y `.venv` en cada `docker build`.
 
-**Criterio de aceptación:** el repo clonado en la Linux construye **las dos
-etapas** de la imagen, y `DOCKER=1 make db-migrate && DOCKER=1 make test`
-corren sin que exista un intérprete de Python en el host.
+**Criterio de aceptación:** sobre un clon limpio, `docker compose build` y
+`docker compose up -d` dejan la base migrada, y
+`docker compose run --rm tools pytest` corre la suite — todo sin que exista
+un intérprete de Python en el host.
 
 ### Fase 1 — Paquete `src/shared` ✅ COMPLETA (2026-10-08)
 
@@ -660,7 +669,7 @@ verificación.
   paquete compartido no tiene dependencias salientes.
 - Ruff: **44 errores, todos preexistentes** (32 `W293`, 10 `W291`, 2
   `F841`). Bajó de 47 porque los 3 `UP042` eran los `(str, Enum)` que la
-  fase eliminó. Nota: el criterio original decía "`make lint` limpio", que
+  fase eliminó. Nota: el criterio original decía "`docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/` limpio", que
   **no era alcanzable** — el repo ya tenía esos errores antes de la fase.
   Limpiarlos es trabajo aparte, no de esta migración.
 
@@ -668,7 +677,7 @@ verificación.
 
 1. `Dockerfile.etl` copiaba `src/etl`, `src/meta` y `src/api` por separado,
    lo que habría dejado la imagen sin `src/shared`. Ahora copia `src/`.
-2. `make metadata-stats` importaba `DenueTransformer`, clase que no existe
+2. `docker compose run --rm tools python -m src.etl.main status` importaba `DenueTransformer`, clase que no existe
    (es `DenuePipelineOrchestrator`); ya fallaba en `HEAD`.
 3. `PROJECT_ROOT` de `main.py` usaba `parents[1]`, correcto en `src_etl/`
    pero no en `src/etl/`: apuntaba a `src/` y dejaba `BRONZE_DIR` en una
@@ -694,8 +703,9 @@ verificación.
 - [x] **Un solo motor en la capa de configuración.** Fuera
       `DATABASE_BACKEND`, `SILVER_DATABASE_URL`, `_get_duckdb_url`,
       `DuckDBImpl` y las ramas por backend de `session.py` y `alembic/env.py`.
-      Tener el flag era un riesgo real: en `duckdb`, `make db-migrate`
-      aplicaba el baseline sobre el archivo en vez del contenedor.
+      Tener el flag era un riesgo real: con `DATABASE_BACKEND=duckdb`, el
+      comando de migración aplicaba el baseline sobre el archivo local en
+      vez de sobre el contenedor.
 - [ ] **`establecimientos` particionada por `period`** — se pasa a la Fase 3,
       donde vive el helper de staging que la usa (§2.4).
 
@@ -709,11 +719,11 @@ DELETE CASCADE`); `_safe_identifier` rechaza
 **⚠️ PENDIENTE — validar en la workstation Linux:**
 
 ```bash
-cp .env.example .env    # y poner los dos passwords
-make db-up              # levanta Postgres y espera el healthcheck
-make db-migrate         # aplica b0000baseline
-make db-config          # confirma que el tuning quedó aplicado
-make psql               # \dn debe listar silver, gold, meta
+cp .env.example .env     # y poner los dos passwords
+docker compose build
+docker compose up -d     # Postgres (healthcheck) → migrate (b0000baseline) → api
+docker compose exec postgres psql -U etl_rw -d mipymes -c 'SHOW shared_buffers'
+docker compose exec postgres psql -U etl_rw -d mipymes   # \dn → silver, gold, meta
 ```
 
 Qué puede salir mal, por probabilidad:
@@ -881,13 +891,13 @@ algoritmo:
    **82,896,801 filas** en **20 periodos** (§1), partiendo de los mismos 484
    ZIPs. El ingest es determinista: un desvío aquí es un bug, y el
    particionado dice en qué periodo.
-2. **El eval de matching enmascarado** (`make eval-masked-clee`), que es el
+2. **El eval de matching enmascarado** (`docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate`), que es el
    juez real del algoritmo: debe dar **97.72% F1**. Verifica lo único que no
    se puede re-derivar de los datos — que la lógica de resolución se
    comporte igual con otro motor de almacenamiento debajo. Requiere
-   regenerar la muestra con `make eval-masked-clee-extract` una vez que haya
+   regenerar la muestra con `docker compose run --rm tools python scripts/evaluate_masked_clee.py extract` una vez que haya
    Silver.
-3. **`make propagation-stats`** con cobertura completa de
+3. **`docker compose run --rm tools python scripts/clee_propagation_stats.py`** con cobertura completa de
    `clee_propagado_*`.
 
 **Matiz importante para no perseguir fantasmas:** los conteos de *identidades
@@ -974,7 +984,7 @@ excluirlas o tratarlas aparte sin un `LIKE 'NEW_%'` en cada consulta.
       dejar la dimensión vacía a media corrida.
 - [ ] Renombrar `entidades_economicas` → `establecimientos` y moverla de
       `silver` a `gold` (§2.3.1). Hoy vive en `silver` con la justificación
-      explícita de que "`make load` copia el archivo completo" —
+      explícita de que "`docker compose run --rm etl load` copia el archivo completo" —
       justificación que **desaparece** en esta arquitectura, porque ya no hay
       copia de archivo.
 - [ ] Aplicar las tres salvaguardas de §2.3.1: `search_path = ''` en
@@ -1023,7 +1033,7 @@ ETL y `GET /ops/runs` devuelve el historial migrado en la Fase 4.
       registra `SKIPPED` con el `run_id` que lo tiene (§2.5).
 - [ ] `POST /api/v1/ops/runs` → `INSERT` en la cola (nunca toca Docker).
 - [ ] Servicio `scheduler` en compose; `etl` bajo `profiles: [manual]`.
-- [ ] `make pipeline` → `docker compose run --rm etl pipeline`.
+- [ ] `docker compose run --rm etl pipeline` → `docker compose run --rm etl pipeline`.
 
 **Criterio de aceptación:** con `ETL_SCHEDULE_CRON` a un minuto futuro, la
 corrida arranca sola y queda en `meta.job_runs` con
@@ -1052,19 +1062,19 @@ corrida arranca sola y queda en `meta.job_runs` con
 - [ ] Estrategia nueva: `pg_dump -n gold` + `-n meta` (chicos, frecuentes) y
       recuperación de `silver` por partición desde Bronze. Documentar el
       RTO por escenario.
-- [ ] `make db-backup` / `make db-restore`.
+- [ ] Servicios `backup` / `restore` en el compose, one-shot como `migrate`.
 - [ ] Reescribir las secciones afectadas de `AGENTS.md`: motor, schemas,
       contenedores, scheduler, respaldo. Varias reglas permanentes cambian de
       significado (`DUCKDB_MEMORY_LIMIT`, el respaldo rotativo, "no correr
       migraciones sobre los `.duckdb`").
 - [ ] `.env` / `.env.example` / `AGENTS.md` con las variables nuevas (§6),
       según la regla de configuración del proyecto.
-- [ ] Límites de servicio (`cpus`, `mem_limit`, `shm_size`) parametrizados
+- [x] Límites de servicio (`cpus`, `mem_limit`, `shm_size`) parametrizados
       desde `.env`, no fijos en el compose (§2.3.2, §6).
 
-**Criterio de aceptación:** un `git clone` + `docker compose up` +
-`make db-migrate` + `make pipeline` funciona en la workstation Linux
-siguiendo solo el README.
+**Criterio de aceptación:** un `git clone` + `docker compose build` +
+`docker compose up -d` + `docker compose run --rm etl pipeline` funciona en la
+workstation Linux siguiendo solo el README.
 
 ---
 
