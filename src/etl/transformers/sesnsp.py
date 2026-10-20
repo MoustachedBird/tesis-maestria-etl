@@ -153,13 +153,13 @@ class SesnspProcessor:
         """
         Args:
             data_root: Raiz de datos (contiene bronze/, silver/, seeds/).
-            tracker: MetadataTracker (default: data/metadata.duckdb).
+            tracker: MetadataTracker; por default, uno nuevo.
             silver_db_path: Silver DuckDB (default: settings).
         """
         self.data_root = Path(data_root)
         self.bronze_dir = self.data_root / "bronze" / "sesnsp"
         self.seeds_dir = self.data_root / "seeds"
-        self.tracker = tracker or MetadataTracker(self.data_root / "metadata.duckdb")
+        self.tracker = tracker or MetadataTracker()
         self.warehouse_path = Path(silver_db_path or settings.SILVER_DUCKDB_PATH)
 
     def _find_latest_csv(self) -> Path | None:
@@ -179,16 +179,7 @@ class SesnspProcessor:
 
     def _already_processed(self, csv_path: Path) -> bool:
         """True si este mismo archivo ya tiene una process_task SUCCESS."""
-        with self.tracker._get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT 1 FROM process_tasks
-                WHERE task_name = ? AND target_table = ? AND status = 'SUCCESS'
-                LIMIT 1
-                """,
-                [csv_path.name, self.TARGET_TABLE],
-            ).fetchone()
-        return row is not None
+        return self.tracker.has_successful_process_task(csv_path.name, self.TARGET_TABLE)
 
     def _load_csv(self, conn, csv_path: Path) -> tuple[int, int]:
         """

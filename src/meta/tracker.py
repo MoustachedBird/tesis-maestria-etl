@@ -1,84 +1,101 @@
 """
-Metadata tracker for job execution and task management.
+Registro de corridas, tareas y linaje del pipeline.
 
-Implements industry-standard patterns from Apache Airflow and Prefect
-for tracking ETL job execution, task instances, and data lineage.
+Escribe en el schema `meta` de la misma base que los datos, a traves de los
+modelos ORM de `shared/db/models/meta.py`. Que viva en la misma base no es un
+detalle de despliegue: permite que el historial haga JOIN con lo que
+describe (`meta.process_tasks` -> `silver.establecimientos` por periodo), que
+es la razon de no tener una base de metadatos aparte.
+
+Las cuatro familias de tarea --descarga, proceso, resolucion CLEE y
+normalizacion-- comparten el mismo ciclo: se crean PENDING, pasan a RUNNING
+con su `start_time` y terminan con un estado final, una duracion y sus
+metricas propias. Ese ciclo se implementa una vez en `_create_task`,
+`_start_task` y `_complete_task`; los metodos publicos solo dicen de que
+tabla se trata y que metricas lleva.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-import duckdb
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session, sessionmaker
 
-from src.meta.models import (
-    DownloadResult,
-    ErrorType,
-    JobStatus,
-    TaskStatus,
+from src.shared.db.models.meta import (
+    CleeResolutionTask,
+    DataLineage,
+    DownloadTask,
+    JobRun,
+    NormalizeTask,
+    ProcessTask,
 )
-from src.meta.schema import QUERIES, get_schema_ddl
+from src.shared.enums import ErrorType, JobStatus, TaskStatus
+
+#: Tipo de tarea que se escribe en `download_tasks.task_type`. Unico valor
+#: en uso: la tabla nacio preparada para VALIDATE y CLEANUP que nunca se
+#: implementaron.
+DOWNLOAD_TASK_TYPE = "DOWNLOAD"
+
+
+def _as_dict(obj) -> dict[str, Any]:
+    """Fila ORM como diccionario plano.
+
+    El contrato publico del tracker son diccionarios, no entidades ORM: los
+    stages lo consumen asi y el API los serializa directo.
+
+    Args:
+        obj: instancia de un modelo declarativo.
+
+    Returns:
+        dict: columnas y valores de la fila.
+    """
+    return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
 
 class MetadataTracker:
     """
-    Manages job execution metadata following ETL industry standards.
+    Ciclo de vida de corridas y tareas del pipeline.
 
-    Provides:
-    - Job run lifecycle management
-    - Task instance tracking
-    - Performance metrics collection
-    - Error tracking and classification
-    - Retry coordination
-    - Data lineage recording
-
-    Thread-safe for concurrent task execution.
+    Cada metodo abre y cierra su propia transaccion, de modo que lo que se
+    registra sobrevive aunque la etapa que lo invoco falle despues. Es
+    deliberado: el historial de una corrida fallida es justamente lo que se
+    quiere conservar.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, session_factory: sessionmaker[Session] | None = None):
         """
-        Initialize metadata tracker.
-
         Args:
-            db_path: Path to metadata.duckdb file
+            session_factory: fabrica de sesiones; por default la del
+                proyecto. Se inyecta en los tests para apuntar a la base
+                de pruebas.
         """
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        if session_factory is None:
+            from src.shared.db.session import get_session_factory
+
+            session_factory = get_session_factory()
+        self._session_factory = session_factory
 
     @contextmanager
-    def _get_connection(self):
-        """Get database connection with proper cleanup."""
-        conn = duckdb.connect(str(self.db_path))
+    def _session(self) -> Iterator[Session]:
+        """Sesion con commit al salir y rollback ante excepcion."""
+        session = self._session_factory()
         try:
-            yield conn
-            # Explicitly commit transaction to ensure data is written
-            try:
-                conn.commit()
-            except Exception:
-                # Ignore commit errors, may not have active transaction
-                pass
+            yield session
+            session.commit()
         except Exception:
-            # Rollback on error (only if transaction is active)
-            try:
-                conn.rollback()
-            except Exception:
-                # Ignore rollback errors
-                pass
+            session.rollback()
             raise
         finally:
-            conn.close()
-
-    def _ensure_schema(self):
-        """Create metadata tables if they don't exist."""
-        with self._get_connection() as conn:
-            conn.execute(get_schema_ddl())
+            session.close()
 
     # ========================================================================
-    # JOB RUN MANAGEMENT
+    # CORRIDAS
     # ========================================================================
 
     def create_run(
@@ -90,46 +107,34 @@ class MetadataTracker:
         config: dict[str, Any] | None = None,
     ) -> str:
         """
-        Create new job run and return run_id.
+        Abre una corrida y devuelve su identificador.
 
         Args:
-            job_name: Name of the job (e.g., "denue_downloader")
-            job_type: Type of job: DOWNLOAD, PROCESS, CLEE_RESOLUTION
-            trigger_type: What triggered this run: MANUAL, SCHEDULED, RETRY
-            triggered_by: Who/what triggered this run
-            config: Optional configuration dictionary
+            job_name: nombre del job (p. ej. "denue_downloader").
+            job_type: DOWNLOAD, PROCESS, CLEE_RESOLUTION, LOAD.
+            trigger_type: MANUAL, SCHEDULED, RETRY.
+            triggered_by: quien o que la disparo.
+            config: configuracion de la corrida, se guarda como JSON.
 
         Returns:
-            str: Unique run_id (UUID)
-
-        Example:
-            >>> tracker = MetadataTracker(Path("data/metadata.duckdb"))
-            >>> run_id = tracker.create_run("denue_downloader", config={"max_retries": 5})
+            str: run_id (UUID).
         """
         run_id = str(uuid.uuid4())
-        run_date = datetime.now()
-
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO job_runs (
-                    run_id, job_name, job_type, run_date, start_time,
-                    status, trigger_type, triggered_by, config
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                [
-                    run_id,
-                    job_name,
-                    job_type,
-                    run_date,
-                    run_date,
-                    JobStatus.RUNNING.value,
-                    trigger_type,
-                    triggered_by,
-                    json.dumps(config) if config else None,
-                ],
+        now = datetime.now()
+        with self._session() as session:
+            session.add(
+                JobRun(
+                    run_id=run_id,
+                    job_name=job_name,
+                    job_type=job_type,
+                    run_date=now,
+                    start_time=now,
+                    status=JobStatus.RUNNING.value,
+                    trigger_type=trigger_type,
+                    triggered_by=triggered_by,
+                    config=json.dumps(config) if config else None,
+                )
             )
-
         return run_id
 
     def complete_run(
@@ -137,118 +142,202 @@ class MetadataTracker:
         run_id: str,
         status: JobStatus | None = None,
         error_summary: str | None = None,
-    ):
+    ) -> None:
         """
-        Mark job run as complete and calculate aggregated metrics.
+        Cierra una corrida y consolida las metricas de sus descargas.
+
+        Si no se pasa `status`, se deduce del resultado de las tareas: sin
+        tareas o sin fallos es SUCCESS, sin exitos es FAILED, y una mezcla
+        es PARTIAL.
 
         Args:
-            run_id: Job run identifier
-            status: Final status (SUCCESS, FAILED, PARTIAL) - auto-determined if not provided
-            error_summary: Optional error summary if failed
+            run_id: corrida a cerrar.
+            status: estado final explicito.
+            error_summary: resumen del error, si fallo.
         """
-        with self._get_connection() as conn:
-            # Get task statistics
-            stats = conn.execute(
-                """
-                SELECT 
-                    COUNT(*) as total_tasks,
-                    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as tasks_succeeded,
-                    SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as tasks_failed,
-                    SUM(CASE WHEN status = 'SKIPPED' THEN 1 ELSE 0 END) as tasks_skipped,
-                    SUM(COALESCE(file_size_bytes, 0)) as total_bytes,
-                    AVG(COALESCE(download_speed_mbps, 0)) as avg_speed
-                FROM download_tasks
-                WHERE run_id = ?
-            """,
-                [run_id],
-            ).fetchone()
+        with self._session() as session:
+            run = session.get(JobRun, run_id)
+            if run is None:
+                return
 
-            # Calculate duration
-            run_info = conn.execute(
-                """
-                SELECT start_time FROM job_runs WHERE run_id = ?
-            """,
-                [run_id],
-            ).fetchone()
+            stats = session.execute(
+                select(
+                    func.count(DownloadTask.task_id),
+                    func.coalesce(
+                        func.sum(case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(case((DownloadTask.status == TaskStatus.SKIPPED.value, 1), else_=0)),
+                        0,
+                    ),
+                    func.coalesce(func.sum(DownloadTask.file_size_bytes), 0),
+                    func.avg(DownloadTask.download_speed_mbps),
+                ).where(DownloadTask.run_id == run_id)
+            ).one()
+            total, succeeded, failed, skipped, total_bytes, avg_speed = stats
 
-            if run_info and run_info[0]:
-                duration = (datetime.now() - run_info[0]).total_seconds()
-            else:
-                duration = 0
-
-            # Auto-determine status if not provided
             if status is None:
-                total_tasks = stats[0] or 0
-                failed_tasks = stats[2] or 0
-                succeeded_tasks = stats[1] or 0
-
-                if total_tasks == 0:
-                    status = JobStatus.SUCCESS  # No tasks = success
-                elif failed_tasks == 0:
-                    status = JobStatus.SUCCESS  # All succeeded
-                elif succeeded_tasks == 0:
-                    status = JobStatus.FAILED  # All failed
+                if total == 0 or failed == 0:
+                    status = JobStatus.SUCCESS
+                elif succeeded == 0:
+                    status = JobStatus.FAILED
                 else:
-                    status = JobStatus.PARTIAL  # Mixed results
+                    status = JobStatus.PARTIAL
 
-            # Update job run
-            conn.execute(
-                """
-                UPDATE job_runs SET
-                    end_time = ?,
-                    duration_seconds = ?,
-                    status = ?,
-                    total_tasks = ?,
-                    tasks_succeeded = ?,
-                    tasks_failed = ?,
-                    tasks_skipped = ?,
-                    total_bytes_downloaded = ?,
-                    avg_download_speed_mbps = ?,
-                    error_summary = ?,
-                    updated_at = ?
-                WHERE run_id = ?
-            """,
-                [
-                    datetime.now(),
-                    duration,
-                    status.value,
-                    stats[0],
-                    stats[1],
-                    stats[2],
-                    stats[3],
-                    stats[4],
-                    stats[5],
-                    error_summary,
-                    datetime.now(),
-                    run_id,
-                ],
+            end_time = datetime.now()
+            run.end_time = end_time
+            run.duration_seconds = (
+                (end_time - run.start_time).total_seconds() if run.start_time else 0.0
             )
+            run.status = status.value
+            run.total_tasks = total
+            run.tasks_succeeded = succeeded
+            run.tasks_failed = failed
+            run.tasks_skipped = skipped
+            run.total_bytes_downloaded = total_bytes
+            run.avg_download_speed_mbps = avg_speed
+            run.error_summary = error_summary
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         """
-        Get job run details.
+        Una corrida por su identificador.
 
         Args:
-            run_id: Job run identifier
+            run_id: identificador de la corrida.
 
         Returns:
-            Dict with run details or None if not found
+            dict | None: la fila, o None si no existe.
         """
-        with self._get_connection() as conn:
-            result = conn.execute(
-                """
-                SELECT * FROM job_runs WHERE run_id = ?
-            """,
-                [run_id],
-            ).fetchone()
+        with self._session() as session:
+            run = session.get(JobRun, run_id)
+            return _as_dict(run) if run else None
 
-            if result:
-                columns = [desc[0] for desc in conn.description]
-                return dict(zip(columns, result))
-            return None
+    def get_recent_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Las corridas mas recientes, de la mas nueva a la mas vieja.
+
+        Args:
+            limit: cuantas devolver.
+
+        Returns:
+            list[dict]: corridas.
+        """
+        with self._session() as session:
+            runs = session.scalars(
+                select(JobRun).order_by(JobRun.run_date.desc()).limit(limit)
+            ).all()
+            return [_as_dict(r) for r in runs]
+
+    def get_run_summary(self, run_id: str) -> dict[str, Any]:
+        """
+        Una corrida con el conteo real de sus descargas.
+
+        Los campos `actual_*` se recalculan desde `download_tasks` en vez de
+        leer los agregados de `job_runs`: permiten detectar una corrida cuyo
+        `complete_run` no llego a ejecutarse.
+
+        Args:
+            run_id: identificador de la corrida.
+
+        Returns:
+            dict: la corrida mas `actual_total_tasks`, `actual_succeeded` y
+            `actual_failed`; vacio si la corrida no existe.
+        """
+        with self._session() as session:
+            run = session.get(JobRun, run_id)
+            if run is None:
+                return {}
+
+            total, succeeded, failed = session.execute(
+                select(
+                    func.count(DownloadTask.task_id),
+                    func.coalesce(
+                        func.sum(case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)),
+                        0,
+                    ),
+                ).where(DownloadTask.run_id == run_id)
+            ).one()
+
+            return {
+                **_as_dict(run),
+                "actual_total_tasks": total,
+                "actual_succeeded": succeeded,
+                "actual_failed": failed,
+            }
 
     # ========================================================================
-    # TASK MANAGEMENT
+    # CICLO DE VIDA COMUN A TODA TAREA
+    # ========================================================================
+
+    def _create_task(self, model, **fields) -> str:
+        """Inserta una tarea en PENDING y devuelve su id.
+
+        Args:
+            model: clase ORM de la tabla de tareas.
+            **fields: columnas propias de esa familia de tarea.
+
+        Returns:
+            str: task_id (UUID).
+        """
+        task_id = str(uuid.uuid4())
+        with self._session() as session:
+            session.add(model(task_id=task_id, status=TaskStatus.PENDING.value, **fields))
+        return task_id
+
+    def _start_task(self, model, task_id: str, **fields) -> None:
+        """Pasa una tarea a RUNNING y le pone `start_time`.
+
+        Args:
+            model: clase ORM de la tabla de tareas.
+            task_id: tarea a marcar.
+            **fields: columnas adicionales (p. ej. `attempt_number`).
+        """
+        with self._session() as session:
+            task = session.get(model, task_id)
+            if task is None:
+                return
+            task.status = TaskStatus.RUNNING.value
+            task.start_time = datetime.now()
+            for key, value in fields.items():
+                setattr(task, key, value)
+
+    def _complete_task(self, model, task_id: str, status: TaskStatus, **fields) -> None:
+        """Cierra una tarea calculando su duracion desde `start_time`.
+
+        Los campos en `None` no se escriben: permite completar una tarea
+        informando solo las metricas que aplican, sin borrar las que ya
+        tenia.
+
+        Args:
+            model: clase ORM de la tabla de tareas.
+            task_id: tarea a cerrar.
+            status: estado final.
+            **fields: metricas propias de esa familia de tarea.
+        """
+        with self._session() as session:
+            task = session.get(model, task_id)
+            if task is None:
+                return
+            end_time = datetime.now()
+            task.status = status.value
+            task.end_time = end_time
+            if task.start_time:
+                task.duration_seconds = (end_time - task.start_time).total_seconds()
+            for key, value in fields.items():
+                if value is not None:
+                    setattr(task, key, value)
+
+    # ========================================================================
+    # TAREAS DE DESCARGA
     # ========================================================================
 
     def create_task(
@@ -261,78 +350,45 @@ class MetadataTracker:
         max_retries: int = 5,
     ) -> str:
         """
-        Create new download task.
+        Registra la descarga pendiente de un archivo.
 
         Args:
-            run_id: Parent job run ID
-            task_name: Human-readable task name
-            source_url: URL to download from
-            target_path: Local file path destination
-            period: Optional data period (e.g., "2024_11")
-            max_retries: Maximum retry attempts
+            run_id: corrida padre.
+            task_name: nombre legible.
+            source_url: URL de origen.
+            target_path: ruta local de destino.
+            period: corte al que pertenece (p. ej. "2024_11").
+            max_retries: tope de reintentos.
 
         Returns:
-            str: Unique task_id (UUID)
+            str: task_id (UUID).
         """
-        task_id = str(uuid.uuid4())
+        return self._create_task(
+            DownloadTask,
+            run_id=run_id,
+            task_name=task_name,
+            task_type=DOWNLOAD_TASK_TYPE,
+            source_url=source_url,
+            target_path=target_path,
+            period=period,
+            max_retries=max_retries,
+        )
 
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO download_tasks (
-                    task_id, run_id, task_name, task_type, source_url,
-                    target_path, period, status, max_retries, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                [
-                    task_id,
-                    run_id,
-                    task_name,
-                    "DOWNLOAD",
-                    source_url,
-                    target_path,
-                    period,
-                    TaskStatus.PENDING.value,
-                    max_retries,
-                    datetime.now(),
-                ],
-            )
-
-        return task_id
-
-    def start_task(self, task_id: str, attempt_number: int = 1):
+    def start_task(self, task_id: str, attempt_number: int = 1) -> None:
         """
-        Mark task as running.
+        Marca una descarga como en curso.
 
         Args:
-            task_id: Task identifier
-            attempt_number: Current attempt number (for retries)
+            task_id: tarea a marcar.
+            attempt_number: numero de intento (para reintentos).
         """
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE download_tasks SET
-                    status = ?,
-                    start_time = ?,
-                    attempt_number = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [
-                    TaskStatus.RUNNING.value,
-                    datetime.now(),
-                    attempt_number,
-                    datetime.now(),
-                    task_id,
-                ],
-            )
+        self._start_task(DownloadTask, task_id, attempt_number=attempt_number)
 
     def complete_task(
         self,
         task_id: str,
         status: TaskStatus,
-        result: DownloadResult | None = None,
-        # Individual parameters (alternative to result object)
+        result: Any | None = None,
         actual_size_bytes: int | None = None,
         actual_hash: str | None = None,
         download_speed_mbps: float | None = None,
@@ -341,425 +397,96 @@ class MetadataTracker:
         error_message: str | None = None,
         duration_seconds: float | None = None,
         attempt_number: int | None = None,
-    ):
+    ) -> None:
         """
-        Update task with completion results.
+        Cierra una descarga con sus metricas.
+
+        Acepta un `DownloadResult` o los campos sueltos; el objeto gana si
+        se pasan ambos.
 
         Args:
-            task_id: Task identifier
-            status: Final status (SUCCESS or FAILED)
-            result: DownloadResult with metrics (optional if individual params provided)
-            actual_size_bytes: File size in bytes
-            actual_hash: SHA256 hash
-            download_speed_mbps: Download speed
-            validation_passed: Whether validation passed
-            error_type: Error classification
-            error_message: Error details
-            duration_seconds: Download duration
-            attempt_number: Retry attempt number
+            task_id: tarea a cerrar.
+            status: estado final.
+            result: `DownloadResult` con las metricas.
+            actual_size_bytes: tamano del archivo.
+            actual_hash: SHA256 calculado.
+            download_speed_mbps: velocidad media.
+            validation_passed: si la validacion paso.
+            error_type: clasificacion del error.
+            error_message: detalle del error.
+            duration_seconds: duracion medida por el llamador (se ignora:
+                la duracion se calcula desde `start_time`).
+            attempt_number: numero de intento.
         """
-        # Use result object if provided, otherwise use individual parameters
-        if result:
-            file_size = result.file_size_bytes
-            hash_value = result.sha256_hash
-            speed = result.download_speed_mbps
-            validation = result.validation_passed
-            err_type = result.error_type
-            err_msg = result.error_message
-            duration = result.duration_seconds
-            attempts = result.attempt_number
-        else:
-            file_size = actual_size_bytes or 0
-            hash_value = actual_hash
-            speed = download_speed_mbps or 0.0
-            validation = validation_passed
-            err_type = error_type
-            err_msg = error_message
-            duration = duration_seconds or 0.0
-            attempts = attempt_number or 1
+        if result is not None:
+            actual_size_bytes = result.file_size_bytes
+            actual_hash = result.sha256_hash
+            download_speed_mbps = result.download_speed_mbps
+            validation_passed = result.validation_passed
+            error_type = result.error_type
+            error_message = result.error_message
+            attempt_number = result.attempt_number
 
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE download_tasks SET
-                    status = ?,
-                    end_time = ?,
-                    duration_seconds = ?,
-                    file_size_bytes = ?,
-                    sha256_hash = ?,
-                    download_speed_mbps = ?,
-                    error_type = ?,
-                    error_message = ?,
-                    validation_status = ?,
-                    attempt_number = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [
-                    status.value,
-                    datetime.now(),
-                    duration,
-                    file_size,
-                    hash_value,
-                    speed,
-                    err_type.value if err_type else None,
-                    err_msg,
-                    "PASSED" if validation else ("FAILED" if validation is False else None),
-                    attempts,
-                    datetime.now(),
-                    task_id,
-                ],
-            )
+        validation_status = None
+        if validation_passed is not None:
+            validation_status = "PASSED" if validation_passed else "FAILED"
 
-    def get_task(self, task_id: str) -> dict[str, Any] | None:
-        """
-        Get task details.
-
-        Args:
-            task_id: Task identifier
-
-        Returns:
-            Dict with task details or None if not found
-        """
-        with self._get_connection() as conn:
-            result = conn.execute(
-                """
-                SELECT * FROM download_tasks WHERE task_id = ?
-            """,
-                [task_id],
-            ).fetchone()
-
-            if result:
-                columns = [desc[0] for desc in conn.description]
-                return dict(zip(columns, result))
-            return None
+        self._complete_task(
+            DownloadTask,
+            task_id,
+            status,
+            file_size_bytes=actual_size_bytes,
+            sha256_hash=actual_hash,
+            download_speed_mbps=download_speed_mbps,
+            validation_status=validation_status,
+            error_type=error_type.value if error_type else None,
+            error_message=error_message,
+            attempt_number=attempt_number,
+        )
 
     def get_tasks_by_run(self, run_id: str) -> list[dict[str, Any]]:
         """
-        Get all tasks for a job run.
+        Todas las descargas de una corrida, en orden de creacion.
 
         Args:
-            run_id: Job run identifier
+            run_id: corrida.
 
         Returns:
-            List of task dictionaries
+            list[dict]: tareas.
         """
-        with self._get_connection() as conn:
-            results = conn.execute(
-                """
-                SELECT * FROM download_tasks WHERE run_id = ? ORDER BY created_at
-            """,
-                [run_id],
-            ).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
+        with self._session() as session:
+            tasks = session.scalars(
+                select(DownloadTask)
+                .where(DownloadTask.run_id == run_id)
+                .order_by(DownloadTask.created_at)
+            ).all()
+            return [_as_dict(t) for t in tasks]
 
     def get_successful_download_urls(self) -> set[str]:
         """
-        Get the source URLs of every download that ever succeeded.
+        URLs que alguna vez se descargaron con exito, de cualquier corrida.
 
-        Cruza TODOS los runs a proposito: el scraper la usa para saltarse
-        lo ya descargado, y filtrar por el run en curso (que al momento
-        del scrape esta vacio) hacia que cada corrida re-registrara desde
+        Cruza TODAS las corridas a proposito: el scraper la usa para saltarse
+        lo ya descargado, y filtrar por la corrida en curso --que al momento
+        del scrape esta vacia-- hacia que cada corrida re-registrara desde
         disco los cientos de archivos ya presentes.
 
         Returns:
-            Set of source_url strings with at least one SUCCESS task
+            set[str]: URLs con al menos una descarga SUCCESS.
         """
-        with self._get_connection() as conn:
-            results = conn.execute(
-                """
-                SELECT DISTINCT source_url FROM download_tasks
-                WHERE status = 'SUCCESS' AND source_url IS NOT NULL
-            """
-            ).fetchall()
-            return {row[0] for row in results}
-
-    def get_failed_tasks(
-        self, run_id: str | None = None, retryable_only: bool = True
-    ) -> list[dict[str, Any]]:
-        """
-        Get failed tasks that can be retried.
-
-        Args:
-            run_id: Optional filter by specific run
-            retryable_only: Only return tasks that can be retried
-
-        Returns:
-            List of failed task dictionaries
-        """
-        with self._get_connection() as conn:
-            query = """
-                SELECT * FROM download_tasks
-                WHERE status = 'FAILED'
-            """
-            params = []
-
-            if run_id:
-                query += " AND run_id = ?"
-                params.append(run_id)
-
-            if retryable_only:
-                query += " AND is_retryable = TRUE AND attempt_number < max_retries"
-
-            query += " ORDER BY created_at DESC"
-
-            results = conn.execute(query, params).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
-
-    def get_tasks_by_status(
-        self, status: TaskStatus, process_status: str | None = None
-    ) -> list[dict[str, Any]]:
-        """
-        Get tasks by download status and optional process status.
-
-        This method provides compatibility with the old reporter interface
-        for the processor to query which files need processing.
-
-        Args:
-            status: Download status to filter by
-            process_status: Optional process status (for compatibility)
-
-        Returns:
-            List of task dictionaries
-        """
-        with self._get_connection() as conn:
-            # For now, we just filter by download status
-            # TODO: Add process_status tracking in future iteration
-            query = """
-                SELECT * FROM download_tasks
-                WHERE status = ?
-                ORDER BY created_at DESC
-            """
-
-            results = conn.execute(query, [status.value]).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
-
-    # ========================================================================
-    # QUERY & REPORTING
-    # ========================================================================
-
-    def get_run_summary(self, run_id: str) -> dict[str, Any]:
-        """
-        Get comprehensive run statistics.
-
-        Args:
-            run_id: Job run identifier
-
-        Returns:
-            Dict with aggregated statistics
-        """
-        with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_run_summary"], [run_id]).fetchone()
-
-            if result:
-                columns = [desc[0] for desc in conn.description]
-                return dict(zip(columns, result))
-            return {}
-
-    def get_recent_runs(self, limit: int = 10) -> list[dict[str, Any]]:
-        """
-        Get recent job runs.
-
-        Args:
-            limit: Maximum number of runs to return
-
-        Returns:
-            List of run dictionaries
-        """
-        with self._get_connection() as conn:
-            results = conn.execute(QUERIES["get_recent_runs"], [limit]).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
-
-    def get_error_summary(self) -> list[dict[str, Any]]:
-        """
-        Get summary of errors grouped by type.
-
-        Returns:
-            List of error statistics
-        """
-        with self._get_connection() as conn:
-            results = conn.execute(QUERIES["get_error_summary"]).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
-
-    def get_performance_metrics(self) -> list[dict[str, Any]]:
-        """
-        Get performance metrics by period.
-
-        Returns:
-            List of performance statistics by period
-        """
-        with self._get_connection() as conn:
-            results = conn.execute(QUERIES["get_performance_metrics"]).fetchall()
-
-            if results:
-                columns = [desc[0] for desc in conn.description]
-                return [dict(zip(columns, row)) for row in results]
-            return []
-
-    # ========================================================================
-    # DATA LINEAGE
-    # ========================================================================
-
-    def record_lineage(
-        self,
-        run_id: str,
-        task_id: str,
-        source_location: str,
-        target_location: str,
-        source_type: str = "WEB",
-        target_type: str = "FILE",
-        bytes_processed: int | None = None,
-    ):
-        """
-        Record data lineage for audit trail.
-
-        Args:
-            run_id: Job run identifier
-            task_id: Task identifier
-            source_location: Source URL/path
-            target_location: Target file path
-            source_type: Type of source (WEB, API, FILE, DATABASE)
-            target_type: Type of target (FILE, TABLE, OBJECT_STORE)
-            bytes_processed: Optional bytes processed
-        """
-        lineage_id = str(uuid.uuid4())
-
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO data_lineage (
-                    lineage_id, run_id, task_id,
-                    source_type, source_location,
-                    target_type, target_location,
-                    transformation, bytes_processed,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                [
-                    lineage_id,
-                    run_id,
-                    task_id,
-                    source_type,
-                    source_location,
-                    target_type,
-                    target_location,
-                    "DOWNLOAD",
-                    bytes_processed,
-                    datetime.now(),
-                ],
-            )
-
-    # ========================================================================
-    # UTILITY METHODS
-    # ========================================================================
-
-    def fix_incomplete_run(self, run_id: str) -> bool:
-        """
-        Fix a run that failed to complete properly.
-
-        This is useful when complete_run() failed due to transaction issues
-        but all tasks were actually completed.
-
-        Args:
-            run_id: Job run identifier to fix
-
-        Returns:
-            bool: True if run was fixed, False if already complete
-        """
-        # Check if run needs fixing
-        run = self.get_run(run_id)
-        if not run:
-            return False
-
-        if run["status"] != "RUNNING":
-            # Already completed
-            return False
-
-        # Force complete the run
-        try:
-            self.complete_run(run_id)
-            return True
-        except Exception:
-            # If it still fails, try direct SQL update
-            with self._get_connection() as conn:
-                # Get task stats
-                stats = conn.execute(
-                    """
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as succeeded,
-                        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
-                    FROM download_tasks
-                    WHERE run_id = ?
-                    """,
-                    [run_id],
-                ).fetchone()
-
-                # Direct update bypassing foreign key checks
-                total, succeeded, failed = stats[0] or 0, stats[1] or 0, stats[2] or 0
-
-                if total == 0:
-                    final_status = "SUCCESS"
-                elif failed == 0:
-                    final_status = "SUCCESS"
-                elif succeeded == 0:
-                    final_status = "FAILED"
-                else:
-                    final_status = "PARTIAL"
-
-                # Calculate duration
-                run_start = run.get("start_time")
-                if run_start:
-                    from datetime import datetime as dt
-
-                    duration = (dt.now() - run_start).total_seconds()
-                else:
-                    duration = 0
-
-                # Flush any pending writes first
-                conn.commit()
-
-                # Update job run - this should work now that child records are committed
-                conn.execute(
-                    """
-                    UPDATE job_runs 
-                    SET status = ?, 
-                        end_time = CURRENT_TIMESTAMP,
-                        duration_seconds = ?,
-                        total_tasks = ?,
-                        tasks_succeeded = ?,
-                        tasks_failed = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE run_id = ?
-                    """,
-                    [final_status, duration, total, succeeded, failed, run_id],
+        with self._session() as session:
+            urls = session.scalars(
+                select(DownloadTask.source_url)
+                .where(
+                    DownloadTask.status == TaskStatus.SUCCESS.value,
+                    DownloadTask.source_url.is_not(None),
                 )
-
-                conn.commit()
-                return True
+                .distinct()
+            ).all()
+            return set(urls)
 
     # ========================================================================
-    # PROCESS TASK MANAGEMENT
+    # TAREAS DE PROCESO (ZIP -> Silver)
     # ========================================================================
 
     def create_process_task(
@@ -771,60 +498,35 @@ class MetadataTracker:
         target_table: str | None = None,
     ) -> str:
         """
-        Create new processing task.
+        Registra el procesamiento pendiente de un archivo.
 
         Args:
-            run_id: Parent job run ID
-            task_name: Human-readable task name
-            source_path: Path to source ZIP file
-            period: Optional data period (e.g., "2024_11")
-            target_table: Target warehouse table name
+            run_id: corrida padre.
+            task_name: nombre legible.
+            source_path: ruta del ZIP de origen.
+            period: corte al que pertenece.
+            target_table: tabla destino.
 
         Returns:
-            str: Unique task_id (UUID)
+            str: task_id (UUID).
         """
-        task_id = str(uuid.uuid4())
+        return self._create_task(
+            ProcessTask,
+            run_id=run_id,
+            task_name=task_name,
+            source_path=source_path,
+            target_table=target_table,
+            period=period,
+        )
 
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO process_tasks (
-                    task_id, run_id, task_name, source_path, target_table,
-                    period, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                [
-                    task_id,
-                    run_id,
-                    task_name,
-                    source_path,
-                    target_table,
-                    period,
-                    TaskStatus.PENDING.value,
-                    datetime.now(),
-                ],
-            )
-
-        return task_id
-
-    def start_process_task(self, task_id: str):
+    def start_process_task(self, task_id: str) -> None:
         """
-        Mark process task as running.
+        Marca un procesamiento como en curso.
 
         Args:
-            task_id: Task identifier
+            task_id: tarea a marcar.
         """
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE process_tasks SET
-                    status = ?,
-                    start_time = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
-            )
+        self._start_task(ProcessTask, task_id)
 
     def complete_process_task(
         self,
@@ -836,103 +538,213 @@ class MetadataTracker:
         file_size_bytes: int | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
-    ):
+    ) -> None:
         """
-        Complete process task with results.
+        Cierra un procesamiento con sus metricas de filas.
 
         Args:
-            task_id: Task identifier
-            status: Final task status
-            rows_extracted: Number of rows extracted from ZIP
-            rows_loaded: Number of rows loaded to warehouse
-            rows_rejected: Number of rows rejected (validation)
-            file_size_bytes: Source file size
-            error_type: Error classification if failed
-            error_message: Error details if failed
+            task_id: tarea a cerrar.
+            status: estado final.
+            rows_extracted: filas leidas del ZIP.
+            rows_loaded: filas escritas en Silver.
+            rows_rejected: filas rechazadas por validacion.
+            file_size_bytes: tamano del archivo de origen.
+            error_type: clasificacion del error.
+            error_message: detalle del error.
         """
-        end_time = datetime.now()
-
-        with self._get_connection() as conn:
-            # Get start time to calculate duration
-            result = conn.execute(
-                "SELECT start_time FROM process_tasks WHERE task_id = ?", [task_id]
-            ).fetchone()
-
-            duration = None
-            if result and result[0]:
-                start_time = datetime.fromisoformat(str(result[0]))
-                duration = (end_time - start_time).total_seconds()
-
-            conn.execute(
-                """
-                UPDATE process_tasks SET
-                    end_time = ?,
-                    duration_seconds = ?,
-                    status = ?,
-                    rows_extracted = ?,
-                    rows_loaded = ?,
-                    rows_rejected = ?,
-                    file_size_bytes = ?,
-                    error_type = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [
-                    end_time,
-                    duration,
-                    status.value,
-                    rows_extracted,
-                    rows_loaded,
-                    rows_rejected,
-                    file_size_bytes,
-                    error_type,
-                    error_message,
-                    datetime.now(),
-                    task_id,
-                ],
-            )
+        self._complete_task(
+            ProcessTask,
+            task_id,
+            status,
+            rows_extracted=rows_extracted,
+            rows_loaded=rows_loaded,
+            rows_rejected=rows_rejected,
+            file_size_bytes=file_size_bytes,
+            error_type=error_type,
+            error_message=error_message,
+        )
 
     def get_pending_process_tasks(self, include_failed: bool = False) -> list[dict[str, Any]]:
         """
-        Get list of files pending processing.
+        Archivos descargados con exito que falta procesar.
 
-        Queries download_tasks joined with process_tasks to find
-        successfully downloaded files that haven't been processed yet.
-
-        Args:
-            include_failed: Include previously failed tasks for retry
-
-        Returns:
-            List of dicts with keys: source_path, period, download_task_id
-        """
-        with self._get_connection() as conn:
-            if include_failed:
-                query = QUERIES["get_pending_process_tasks_with_failed"]
-            else:
-                query = QUERIES["get_pending_process_tasks"]
-
-            result = conn.execute(query).fetchall()
-            columns = ["source_path", "period", "download_task_id"]
-            return [dict(zip(columns, row)) for row in result]
-
-    def get_process_task_by_path(self, source_path: str) -> str | None:
-        """
-        Find existing process task for a file path.
+        Deduplica por ruta en los dos lados. Un mismo ZIP puede tener varias
+        descargas SUCCESS --cada `extract` que lo re-sincroniza desde disco
+        crea una-- y sin deduplicar, el ingest lo leeria una vez por
+        registro.
 
         Args:
-            source_path: Source file path to search for
+            include_failed: incluir tambien los que fallaron al procesarse.
 
         Returns:
-            task_id if found, None otherwise
+            list[dict]: con `source_path`, `period` y `download_task_id`.
         """
-        with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_process_task_by_path"], [source_path]).fetchone()
+        with self._session() as session:
+            # Ultimo intento de proceso por ruta.
+            ultimo_proceso = (
+                select(
+                    ProcessTask.source_path,
+                    ProcessTask.status,
+                    func.row_number()
+                    .over(
+                        partition_by=ProcessTask.source_path,
+                        order_by=ProcessTask.created_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .subquery()
+            )
+            proceso = select(ultimo_proceso).where(ultimo_proceso.c.rn == 1).subquery()
 
-            return result[0] if result else None
+            # Ultima descarga exitosa por ruta.
+            ultima_descarga = (
+                select(
+                    DownloadTask.target_path,
+                    DownloadTask.period,
+                    DownloadTask.task_id,
+                    DownloadTask.created_at,
+                    func.row_number()
+                    .over(
+                        partition_by=DownloadTask.target_path,
+                        order_by=DownloadTask.created_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .where(DownloadTask.status == TaskStatus.SUCCESS.value)
+                .subquery()
+            )
+
+            sin_procesar = proceso.c.source_path.is_(None)
+            condicion = (
+                sin_procesar | (proceso.c.status == TaskStatus.FAILED.value)
+                if include_failed
+                else sin_procesar
+            )
+
+            filas = session.execute(
+                select(
+                    ultima_descarga.c.target_path,
+                    ultima_descarga.c.period,
+                    ultima_descarga.c.task_id,
+                )
+                .select_from(
+                    ultima_descarga.outerjoin(
+                        proceso, ultima_descarga.c.target_path == proceso.c.source_path
+                    )
+                )
+                .where(ultima_descarga.c.rn == 1, condicion)
+                .order_by(
+                    ultima_descarga.c.period.desc(), ultima_descarga.c.created_at.desc()
+                )
+            ).all()
+
+            return [
+                {"source_path": path, "period": period, "download_task_id": task_id}
+                for path, period, task_id in filas
+            ]
+
+    def get_all_successful_downloads(self) -> list[dict[str, Any]]:
+        """
+        Toda descarga exitosa, una por ruta de destino.
+
+        El camino de `--force`, que reprocesa todo en vez de solo lo
+        pendiente. Deduplica por ruta por la misma razon que
+        `get_pending_process_tasks`: un ZIP acumula una descarga SUCCESS por
+        cada `extract` que lo re-sincroniza desde disco, y sin deduplicar se
+        reprocesaria una vez por registro --horas de ingest para el mismo
+        resultado.
+
+        Returns:
+            list[dict]: con `source_path`, `period` y `download_task_id`.
+        """
+        with self._session() as session:
+            ultima = (
+                select(
+                    DownloadTask.target_path,
+                    DownloadTask.period,
+                    DownloadTask.task_id,
+                    func.row_number()
+                    .over(
+                        partition_by=DownloadTask.target_path,
+                        order_by=DownloadTask.created_at.desc(),
+                    )
+                    .label("rn"),
+                )
+                .where(DownloadTask.status == TaskStatus.SUCCESS.value)
+                .subquery()
+            )
+            filas = session.execute(
+                select(ultima.c.target_path, ultima.c.period, ultima.c.task_id)
+                .where(ultima.c.rn == 1)
+                .order_by(ultima.c.period.desc())
+            ).all()
+            return [
+                {"source_path": path, "period": period, "download_task_id": task_id}
+                for path, period, task_id in filas
+            ]
+
+    def has_successful_process_task(self, task_name: str, target_table: str) -> bool:
+        """
+        Si un archivo ya se proceso con exito hacia una tabla.
+
+        Args:
+            task_name: nombre de la tarea (el del archivo de origen).
+            target_table: tabla destino.
+
+        Returns:
+            bool: True si existe al menos un SUCCESS.
+        """
+        with self._session() as session:
+            return (
+                session.scalar(
+                    select(ProcessTask.task_id)
+                    .where(
+                        ProcessTask.task_name == task_name,
+                        ProcessTask.target_table == target_table,
+                        ProcessTask.status == TaskStatus.SUCCESS.value,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+
+    def get_normalized_periods(self) -> set[str]:
+        """
+        Cortes cuya normalizacion de fechas ya termino bien.
+
+        Returns:
+            set[str]: periodos con al menos una tarea SUCCESS.
+        """
+        with self._session() as session:
+            return set(
+                session.scalars(
+                    select(NormalizeTask.period)
+                    .where(NormalizeTask.status == TaskStatus.SUCCESS.value)
+                    .distinct()
+                ).all()
+            )
+
+    def get_latest_run_by_type(self, *job_types: str) -> dict[str, Any] | None:
+        """
+        La corrida mas reciente de alguno de los tipos dados.
+
+        Args:
+            *job_types: tipos aceptados (p. ej. "TRANSFORM", "PROCESS").
+
+        Returns:
+            dict | None: la corrida, o None si no hay ninguna.
+        """
+        with self._session() as session:
+            run = session.scalars(
+                select(JobRun)
+                .where(JobRun.job_type.in_(job_types))
+                .order_by(JobRun.run_date.desc())
+                .limit(1)
+            ).first()
+            return _as_dict(run) if run else None
 
     # ========================================================================
-    # CLEE RESOLUTION TASK MANAGEMENT
+    # TAREAS DE RESOLUCION CLEE
     # ========================================================================
 
     def create_clee_resolution_task(
@@ -943,61 +755,33 @@ class MetadataTracker:
         state_list: list[str],
     ) -> str:
         """
-        Create new CLEE resolution task.
+        Registra la resolucion pendiente de un grupo de estados.
 
         Args:
-            run_id: Parent job run ID
-            task_name: Human-readable task name
-            region_group: Region/state group identifier
-            state_list: List of state codes in this group
+            run_id: corrida padre.
+            task_name: nombre legible.
+            region_group: identificador del grupo.
+            state_list: claves de entidad del grupo.
 
         Returns:
-            str: Unique task_id (UUID)
+            str: task_id (UUID).
         """
-        import json
+        return self._create_task(
+            CleeResolutionTask,
+            run_id=run_id,
+            task_name=task_name,
+            region_group=region_group,
+            state_list=json.dumps(state_list),
+        )
 
-        task_id = str(uuid.uuid4())
-        state_list_json = json.dumps(state_list)
-
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO clee_resolution_tasks (
-                    task_id, run_id, task_name, region_group, state_list,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-                [
-                    task_id,
-                    run_id,
-                    task_name,
-                    region_group,
-                    state_list_json,
-                    TaskStatus.PENDING.value,
-                    datetime.now(),
-                ],
-            )
-
-        return task_id
-
-    def start_clee_resolution_task(self, task_id: str):
+    def start_clee_resolution_task(self, task_id: str) -> None:
         """
-        Mark CLEE resolution task as running.
+        Marca una resolucion como en curso.
 
         Args:
-            task_id: Task identifier
+            task_id: tarea a marcar.
         """
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE clee_resolution_tasks SET
-                    status = ?,
-                    start_time = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
-            )
+        self._start_task(CleeResolutionTask, task_id)
 
     def complete_clee_resolution_task(
         self,
@@ -1015,142 +799,72 @@ class MetadataTracker:
         output_path: str | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
-    ):
+    ) -> None:
         """
-        Complete CLEE resolution task with results.
+        Cierra una resolucion con sus metricas de matching.
 
         Args:
-            task_id: Task identifier
-            status: Final task status
-            entities_input: Number of input entities
-            entities_matched: Number of matched entities
-            entities_new: Number of new entities discovered
-            master_clees_created: Number of master CLEEs created
-            periods_processed: Number of time periods processed
-            match_confidence_avg: Average match confidence score
-            spatial_matches: Number of spatial-based matches
-            identity_matches: Number of identity-based matches
-            activity_matches: Number of activity-based matches
-            output_path: Path to output files
-            error_type: Error classification if failed
-            error_message: Error details if failed
+            task_id: tarea a cerrar.
+            status: estado final.
+            entities_input: identidades de entrada.
+            entities_matched: identidades emparejadas.
+            entities_new: identidades nuevas.
+            master_clees_created: CLEEs maestros generados.
+            periods_processed: periodos recorridos.
+            match_confidence_avg: confianza media del match.
+            spatial_matches: emparejamientos por cercania.
+            identity_matches: emparejamientos por identidad.
+            activity_matches: emparejamientos por actividad.
+            output_path: ruta de salida.
+            error_type: clasificacion del error.
+            error_message: detalle del error.
         """
-        end_time = datetime.now()
-
-        with self._get_connection() as conn:
-            # Get start time to calculate duration
-            result = conn.execute(
-                "SELECT start_time FROM clee_resolution_tasks WHERE task_id = ?", [task_id]
-            ).fetchone()
-
-            duration = None
-            if result and result[0]:
-                start_time = datetime.fromisoformat(str(result[0]))
-                duration = (end_time - start_time).total_seconds()
-
-            conn.execute(
-                """
-                UPDATE clee_resolution_tasks SET
-                    end_time = ?,
-                    duration_seconds = ?,
-                    status = ?,
-                    entities_input = ?,
-                    entities_matched = ?,
-                    entities_new = ?,
-                    master_clees_created = ?,
-                    periods_processed = ?,
-                    match_confidence_avg = ?,
-                    spatial_matches = ?,
-                    identity_matches = ?,
-                    activity_matches = ?,
-                    output_path = ?,
-                    error_type = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [
-                    end_time,
-                    duration,
-                    status.value,
-                    entities_input,
-                    entities_matched,
-                    entities_new,
-                    master_clees_created,
-                    periods_processed,
-                    match_confidence_avg,
-                    spatial_matches,
-                    identity_matches,
-                    activity_matches,
-                    output_path,
-                    error_type,
-                    error_message,
-                    datetime.now(),
-                    task_id,
-                ],
-            )
+        self._complete_task(
+            CleeResolutionTask,
+            task_id,
+            status,
+            entities_input=entities_input,
+            entities_matched=entities_matched,
+            entities_new=entities_new,
+            master_clees_created=master_clees_created,
+            periods_processed=periods_processed,
+            match_confidence_avg=match_confidence_avg,
+            spatial_matches=spatial_matches,
+            identity_matches=identity_matches,
+            activity_matches=activity_matches,
+            output_path=output_path,
+            error_type=error_type,
+            error_message=error_message,
+        )
 
     # ========================================================================
-    # NORMALIZE TASK MANAGEMENT
+    # TAREAS DE NORMALIZACION
     # ========================================================================
 
-    def create_normalize_task(
-        self,
-        run_id: str,
-        task_name: str,
-        period: str,
-    ) -> str:
+    def create_normalize_task(self, run_id: str, task_name: str, period: str) -> str:
         """
-        Create new date normalization task.
+        Registra la normalizacion pendiente de un corte.
 
         Args:
-            run_id: Parent job run ID
-            task_name: Human-readable task name
-            period: Data period as DATE string (e.g., "2024-11-01")
+            run_id: corrida padre.
+            task_name: nombre legible.
+            period: corte a normalizar.
 
         Returns:
-            str: Unique task_id (UUID)
+            str: task_id (UUID).
         """
-        task_id = str(uuid.uuid4())
+        return self._create_task(
+            NormalizeTask, run_id=run_id, task_name=task_name, period=period
+        )
 
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO normalize_tasks (
-                    task_id, run_id, task_name, period,
-                    status, created_at
-                ) VALUES (?, ?, ?, CAST(? AS DATE), ?, ?)
-            """,
-                [
-                    task_id,
-                    run_id,
-                    task_name,
-                    period,
-                    TaskStatus.PENDING.value,
-                    datetime.now(),
-                ],
-            )
-
-        return task_id
-
-    def start_normalize_task(self, task_id: str):
+    def start_normalize_task(self, task_id: str) -> None:
         """
-        Mark normalize task as running.
+        Marca una normalizacion como en curso.
 
         Args:
-            task_id: Task identifier
+            task_id: tarea a marcar.
         """
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE normalize_tasks SET
-                    status = ?,
-                    start_time = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [TaskStatus.RUNNING.value, datetime.now(), datetime.now(), task_id],
-            )
+        self._start_task(NormalizeTask, task_id)
 
     def complete_normalize_task(
         self,
@@ -1161,116 +875,165 @@ class MetadataTracker:
         rows_unrecognized: int | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
-    ):
+    ) -> None:
         """
-        Complete normalize task with results.
+        Cierra una normalizacion con sus metricas de filas.
 
         Args:
-            task_id: Task identifier
-            status: Final task status
-            rows_total: Total rows in this period
-            rows_normalized: Rows successfully normalized
-            rows_unrecognized: Rows with unrecognized fecha_alta_str format
-            error_type: Error classification if failed
-            error_message: Error details if failed
+            task_id: tarea a cerrar.
+            status: estado final.
+            rows_total: filas del corte.
+            rows_normalized: filas con fecha reconocida.
+            rows_unrecognized: filas con formato no reconocido.
+            error_type: clasificacion del error.
+            error_message: detalle del error.
         """
-        end_time = datetime.now()
+        self._complete_task(
+            NormalizeTask,
+            task_id,
+            status,
+            rows_total=rows_total,
+            rows_normalized=rows_normalized,
+            rows_unrecognized=rows_unrecognized,
+            error_type=error_type,
+            error_message=error_message,
+        )
 
-        with self._get_connection() as conn:
-            # Get start time to calculate duration
-            result = conn.execute(
-                "SELECT start_time FROM normalize_tasks WHERE task_id = ?", [task_id]
-            ).fetchone()
+    # ========================================================================
+    # LINAJE
+    # ========================================================================
 
-            duration = None
-            if result and result[0]:
-                start_time = datetime.fromisoformat(str(result[0]))
-                duration = (end_time - start_time).total_seconds()
+    def record_lineage(
+        self,
+        run_id: str,
+        task_id: str,
+        source_location: str,
+        target_location: str,
+        source_type: str = "WEB",
+        target_type: str = "FILE",
+        bytes_processed: int | None = None,
+    ) -> None:
+        """
+        Deja constancia de que un origen produjo un destino.
 
-            conn.execute(
-                """
-                UPDATE normalize_tasks SET
-                    end_time = ?,
-                    duration_seconds = ?,
-                    status = ?,
-                    rows_total = ?,
-                    rows_normalized = ?,
-                    rows_unrecognized = ?,
-                    error_type = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE task_id = ?
-            """,
-                [
-                    end_time,
-                    duration,
-                    status.value,
-                    rows_total,
-                    rows_normalized,
-                    rows_unrecognized,
-                    error_type,
-                    error_message,
-                    datetime.now(),
-                    task_id,
-                ],
+        Args:
+            run_id: corrida.
+            task_id: tarea que lo produjo.
+            source_location: URL o ruta de origen.
+            target_location: ruta de destino.
+            source_type: WEB, API, FILE, DATABASE.
+            target_type: FILE, TABLE, OBJECT_STORE.
+            bytes_processed: bytes movidos.
+        """
+        with self._session() as session:
+            session.add(
+                DataLineage(
+                    lineage_id=str(uuid.uuid4()),
+                    run_id=run_id,
+                    task_id=task_id,
+                    source_type=source_type,
+                    source_location=source_location,
+                    target_type=target_type,
+                    target_location=target_location,
+                    transformation=DOWNLOAD_TASK_TYPE,
+                    bytes_processed=bytes_processed,
+                )
             )
 
     # ========================================================================
-    # METRICS AND REPORTING
+    # METRICAS AGREGADAS
     # ========================================================================
 
     def get_process_metrics(self) -> list[dict[str, Any]]:
         """
-        Get processing performance metrics by period.
+        Rendimiento del procesamiento, por corte.
 
         Returns:
-            List of dicts with metrics per period
+            list[dict]: `period`, `total_processed`, `total_rows`,
+            `avg_duration_sec`, `avg_rows_loaded`.
         """
-        with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_process_metrics"]).fetchall()
-            columns = [
+        with self._session() as session:
+            filas = session.execute(
+                select(
+                    ProcessTask.period,
+                    func.count(ProcessTask.task_id),
+                    func.coalesce(func.sum(ProcessTask.rows_loaded), 0),
+                    func.avg(ProcessTask.duration_seconds),
+                    func.avg(ProcessTask.rows_loaded),
+                )
+                .where(ProcessTask.status == TaskStatus.SUCCESS.value)
+                .group_by(ProcessTask.period)
+                .order_by(ProcessTask.period.desc())
+            ).all()
+            columnas = (
                 "period",
                 "total_processed",
                 "total_rows",
                 "avg_duration_sec",
                 "avg_rows_loaded",
-            ]
-            return [dict(zip(columns, row)) for row in result]
+            )
+            return [dict(zip(columnas, fila)) for fila in filas]
 
     def get_clee_resolution_metrics(self) -> list[dict[str, Any]]:
         """
-        Get CLEE resolution performance metrics by region.
+        Rendimiento de la resolucion CLEE, por grupo de region.
 
         Returns:
-            List of dicts with metrics per region
+            list[dict]: `region_group`, `total_resolutions`,
+            `total_entities`, `total_matched`, `total_new`, `avg_confidence`.
         """
-        with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_clee_resolution_metrics"]).fetchall()
-            columns = [
+        with self._session() as session:
+            filas = session.execute(
+                select(
+                    CleeResolutionTask.region_group,
+                    func.count(CleeResolutionTask.task_id),
+                    func.coalesce(func.sum(CleeResolutionTask.entities_input), 0),
+                    func.coalesce(func.sum(CleeResolutionTask.entities_matched), 0),
+                    func.coalesce(func.sum(CleeResolutionTask.entities_new), 0),
+                    func.avg(CleeResolutionTask.match_confidence_avg),
+                )
+                .where(CleeResolutionTask.status == TaskStatus.SUCCESS.value)
+                .group_by(CleeResolutionTask.region_group)
+                .order_by(CleeResolutionTask.region_group)
+            ).all()
+            columnas = (
                 "region_group",
                 "total_resolutions",
                 "total_entities",
                 "total_matched",
                 "total_new",
                 "avg_confidence",
-            ]
-            return [dict(zip(columns, row)) for row in result]
+            )
+            return [dict(zip(columnas, fila)) for fila in filas]
 
     def get_normalize_metrics(self) -> list[dict[str, Any]]:
         """
-        Get date normalization metrics by period.
+        Rendimiento de la normalizacion de fechas, por corte.
 
         Returns:
-            List of dicts with metrics per period
+            list[dict]: `period`, `total_normalizations`, `total_rows`,
+            `total_normalized`, `total_unrecognized`, `avg_duration_sec`.
         """
-        with self._get_connection() as conn:
-            result = conn.execute(QUERIES["get_normalize_metrics"]).fetchall()
-            columns = [
+        with self._session() as session:
+            filas = session.execute(
+                select(
+                    NormalizeTask.period,
+                    func.count(NormalizeTask.task_id),
+                    func.coalesce(func.sum(NormalizeTask.rows_total), 0),
+                    func.coalesce(func.sum(NormalizeTask.rows_normalized), 0),
+                    func.coalesce(func.sum(NormalizeTask.rows_unrecognized), 0),
+                    func.avg(NormalizeTask.duration_seconds),
+                )
+                .where(NormalizeTask.status == TaskStatus.SUCCESS.value)
+                .group_by(NormalizeTask.period)
+                .order_by(NormalizeTask.period.desc())
+            ).all()
+            columnas = (
                 "period",
                 "total_normalizations",
                 "total_rows",
                 "total_normalized",
                 "total_unrecognized",
                 "avg_duration_sec",
-            ]
-            return [dict(zip(columns, row)) for row in result]
+            )
+            return [dict(zip(columnas, fila)) for fila in filas]

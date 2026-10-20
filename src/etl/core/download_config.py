@@ -148,7 +148,7 @@ class DownloadConfig(BaseSettings):
 
     enable_metadata_tracking: bool = Field(
         default=True,
-        description="Track downloads in metadata.duckdb",
+        description="Registrar las descargas en el schema meta",
     )
 
     model_config = {

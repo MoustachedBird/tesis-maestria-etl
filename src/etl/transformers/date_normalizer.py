@@ -150,14 +150,7 @@ class DateNormalizer:
         Returns:
             Set of period dates with SUCCESS status
         """
-        with self.tracker._get_connection() as conn:
-            result = conn.execute(
-                """
-                SELECT DISTINCT period FROM normalize_tasks
-                WHERE status = 'SUCCESS'
-                """
-            ).fetchall()
-            return {row[0] for row in result}
+        return self.tracker.get_normalized_periods()
 
     def _get_pending_periods(self, force: bool) -> list[date]:
         """

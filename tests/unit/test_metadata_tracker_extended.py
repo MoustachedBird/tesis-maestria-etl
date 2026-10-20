@@ -1,21 +1,27 @@
-"""
-Unit tests for extended MetadataTracker functionality.
+"""Ciclo de vida de las tareas de proceso y de resolucion CLEE.
 
-Tests the new process_tasks and clee_resolution_tasks tracking.
+El tracker escribe en el schema `meta` via ORM, asi que estos tests
+necesitan un PostgreSQL de pruebas: se saltan solos si no hay servidor
+(ver `TEST_POSTGRES_URL` en conftest.py).
 """
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
-from src.meta.models import TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.db.base import Base, tables_for
+from src.shared.enums import TaskStatus
+
+pytestmark = pytest.mark.postgres
 
 
 @pytest.fixture
-def temp_tracker(tmp_path):
-    """Create temporary metadata tracker for testing."""
-    db_path = tmp_path / "test_metadata.duckdb"
-    tracker = MetadataTracker(db_path)
-    return tracker
+def temp_tracker(pg_engine):
+    """Tracker sobre un schema `meta` recien creado y vacio."""
+    tablas = tables_for("meta")
+    Base.metadata.drop_all(pg_engine, tables=tablas)
+    Base.metadata.create_all(pg_engine, tables=tablas)
+    return MetadataTracker(session_factory=sessionmaker(bind=pg_engine))
 
 
 def test_create_process_task(temp_tracker):

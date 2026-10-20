@@ -1,7 +1,8 @@
 """Modelos ORM de la capa `meta` — observabilidad y control del pipeline.
 
-Reemplaza las 451 líneas de DDL en strings de `src/meta/schema.py`, que no
-tenían ORM ni migraciones: el diagnóstico 1.3 de `arquitectura.md`. Al vivir
+El esquema se declara aquí y en ningún otro lado: antes vivía como 451
+líneas de DDL en strings, sin ORM ni migraciones (diagnóstico 1.3 de
+`arquitectura.md`). Al vivir
 en el schema `meta` de la MISMA base, el historial de corridas puede hacer
 JOIN con los datos que describe (`meta.process_tasks` →
 `silver.establecimientos` por periodo), que es la razón de fondo para no

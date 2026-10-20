@@ -83,7 +83,7 @@ class SesnspExtractor:
         self.output_dir = Path(output_dir)
         self.force = force
         self.config = config or DownloadConfig(download_directory=self.output_dir)
-        self.tracker = MetadataTracker(db_path=settings.DATA_DIR / "metadata.duckdb")
+        self.tracker = MetadataTracker()
         self.run_id: str | None = None
 
     def _discover_download_url(self, log) -> str:

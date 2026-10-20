@@ -152,12 +152,12 @@ class EntidadesDimensionBuilder:
     ):
         """
         Args:
-            data_root: Raiz de datos (contiene silver/, metadata.duckdb).
-            tracker: MetadataTracker (default: data/metadata.duckdb).
+            data_root: Raiz de datos.
+            tracker: MetadataTracker; por default, uno nuevo.
             silver_db_path: Silver DuckDB (default: settings).
         """
         self.data_root = Path(data_root)
-        self.tracker = tracker or MetadataTracker(self.data_root / "metadata.duckdb")
+        self.tracker = tracker or MetadataTracker()
         self.warehouse_path = Path(silver_db_path or settings.SILVER_DUCKDB_PATH)
 
     def run(self) -> bool:

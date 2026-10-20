@@ -33,13 +33,11 @@ def temp_transformer(tmp_path):
     for seed_file in SEEDS_DIR.glob("*.parquet"):
         shutil.copy2(seed_file, seeds_dir / seed_file.name)
 
-    metadata_db = data_root / "metadata.duckdb"
     silver_db = data_root / "silver" / "mipymes.duckdb"
     gold_db = data_root / "gold" / "mipymes.duckdb"
 
     transformer = DenuePipelineOrchestrator(
         data_root=data_root,
-        metadata_db=metadata_db,
         silver_db_path=silver_db,
         gold_db_path=gold_db,
     )
@@ -56,8 +54,9 @@ def test_transformer_initialization(temp_transformer):
     assert temp_transformer.loader is not None
 
 
+@pytest.mark.postgres
 def test_get_pipeline_status(temp_transformer):
-    """Test getting pipeline status."""
+    """El estado del pipeline se lee del schema `meta`, asi que exige servidor."""
     status = temp_transformer.get_pipeline_status()
 
     assert "latest_transform_run" in status
@@ -65,7 +64,6 @@ def test_get_pipeline_status(temp_transformer):
     assert "latest_clee_resolution_run" in status
     assert "process_metrics" in status
     assert "clee_resolution_metrics" in status
-    assert "metadata_db" in status
     assert "silver_db" in status
     assert "gold_db" in status
 

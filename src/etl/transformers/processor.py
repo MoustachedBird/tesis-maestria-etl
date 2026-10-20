@@ -398,24 +398,7 @@ class BronzeToSilverProcessor:
 
         # If force mode, get all successful downloads
         if force:
-            with self.tracker._get_connection() as conn:
-                # QUALIFY: un mismo ZIP puede tener varios registros SUCCESS
-                # (cada extract que lo re-sincroniza desde disco crea uno).
-                # Sin deduplicar se re-procesaria una vez por registro:
-                # horas de ingest tiradas para el mismo resultado (el writer
-                # hace INSERT OR IGNORE por PK).
-                result = conn.execute("""
-                    SELECT target_path as source_path, period, task_id as download_task_id
-                    FROM download_tasks
-                    WHERE status = 'SUCCESS'
-                    QUALIFY ROW_NUMBER() OVER (
-                        PARTITION BY target_path ORDER BY created_at DESC
-                    ) = 1
-                    ORDER BY period DESC
-                """).fetchall()
-                tasks = [
-                    {"source_path": r[0], "period": r[1], "download_task_id": r[2]} for r in result
-                ]
+            tasks = self.tracker.get_all_successful_downloads()
 
         if not tasks:
             logger.info("✨ Silver actualizado. Nada por transformar.")

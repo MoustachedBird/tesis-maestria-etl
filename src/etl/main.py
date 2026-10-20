@@ -401,7 +401,6 @@ def pipeline(
             console.print("\n[bold]Pipeline Summary:[/bold]")
             console.print(f"  Silver: {status['silver_db']}")
             console.print(f"  Gold: {status['gold_db']}")
-            console.print(f"  Metadata: {status['metadata_db']}")
         else:
             console.print("[bold yellow]Pipeline completed with errors. Check logs.[/bold yellow]")
             raise typer.Exit(code=1)

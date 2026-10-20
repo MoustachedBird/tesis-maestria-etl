@@ -4,7 +4,6 @@ DENUE Downloader - Simplified working version.
 Integrates Phase 2 components with existing architecture.
 """
 
-import os
 from pathlib import Path
 
 from rich.console import Console
@@ -51,16 +50,9 @@ class DenueExtractor:
         # lo que silenciaba esas variables.
         self.config = config or DownloadConfig(download_directory=self.output_dir)
 
-        # Metadata tracker
-        # Try to read from environment variable first, otherwise compute default path
-        metadata_path_env = os.getenv("METADATA_DUCKDB_PATH")
-        if metadata_path_env:
-            metadata_path = Path(metadata_path_env)
-        else:
-            # Fallback to computed path (backward compatibility)
-            metadata_path = self.output_dir.parent.parent / "metadata.duckdb"
-
-        self.tracker = MetadataTracker(db_path=metadata_path)
+        # El historial vive en el schema `meta` de la base, asi que el
+        # tracker no recibe ruta: resuelve su conexion desde la config.
+        self.tracker = MetadataTracker()
 
         # Console
         self.console = Console()

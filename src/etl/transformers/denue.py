@@ -45,7 +45,6 @@ class DenuePipelineOrchestrator:
     def __init__(
         self,
         data_root: Path,
-        metadata_db: Path | None = None,
         silver_db_path: Path | None = None,
         gold_db_path: Path | None = None,
     ):
@@ -54,17 +53,12 @@ class DenuePipelineOrchestrator:
 
         Args:
             data_root: Root data directory
-            metadata_db: Path to metadata.duckdb (default: data/metadata.duckdb)
             silver_db_path: Path to Silver DuckDB (default: from settings)
             gold_db_path: Path to Gold DuckDB (default: from settings)
         """
         self.data_root = Path(data_root)
 
-        # Setup metadata tracker
-        if metadata_db is None:
-            metadata_db = self.data_root / "metadata.duckdb"
-        self.metadata_db = Path(metadata_db)
-        self.tracker = MetadataTracker(self.metadata_db)
+        self.tracker = MetadataTracker()
 
         # Resolve paths (validators guarantee non-None, assert for type checker)
         resolved_silver = Path(silver_db_path) if silver_db_path else settings.SILVER_DUCKDB_PATH
@@ -113,7 +107,6 @@ class DenuePipelineOrchestrator:
         logger.info("DenuePipelineOrchestrator initialized")
         logger.info(f"   Silver DB: {self.silver_db_path}")
         logger.info(f"   Gold DB: {self.gold_db_path}")
-        logger.info(f"   Metadata: {self.metadata_db}")
 
     def run_transform_stage(self, force: bool = False) -> bool:
         """
@@ -364,7 +357,6 @@ class DenuePipelineOrchestrator:
             logger.info("FULL PIPELINE completed successfully!")
             logger.info(f"   Silver: {self.silver_db_path}")
             logger.info(f"   Gold: {self.gold_db_path}")
-            logger.info(f"   Metadata: {self.metadata_db}")
             return True
         else:
             logger.warning("FULL PIPELINE completed with errors")
@@ -377,74 +369,33 @@ class DenuePipelineOrchestrator:
         Returns:
             Dict with pipeline statistics
         """
-        with self.tracker._get_connection() as conn:
-            # Get latest runs by type
-            latest_transform = conn.execute("""
-                SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
-                FROM job_runs
-                WHERE job_type IN ('TRANSFORM', 'PROCESS')
-                ORDER BY run_date DESC
-                LIMIT 1
-            """).fetchone()
-
-            latest_load = conn.execute("""
-                SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
-                FROM job_runs
-                WHERE job_type = 'LOAD'
-                ORDER BY run_date DESC
-                LIMIT 1
-            """).fetchone()
-
-            latest_clee_resolution = conn.execute("""
-                SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
-                FROM job_runs
-                WHERE job_type = 'CLEE_RESOLUTION'
-                ORDER BY run_date DESC
-                LIMIT 1
-            """).fetchone()
-
-            latest_normalize = conn.execute("""
-                SELECT run_id, status, run_date, tasks_succeeded, tasks_failed
-                FROM job_runs
-                WHERE job_type = 'NORMALIZE'
-                ORDER BY run_date DESC
-                LIMIT 1
-            """).fetchone()
-
-            # Get metrics
-            process_metrics = self.tracker.get_process_metrics()
-            clee_resolution_metrics = self.tracker.get_clee_resolution_metrics()
-            normalize_metrics = self.tracker.get_normalize_metrics()
-
-            def _run_dict(row):
-                if row is None:
-                    return {
-                        "run_id": None,
-                        "status": None,
-                        "date": None,
-                        "succeeded": 0,
-                        "failed": 0,
-                    }
-                return {
-                    "run_id": row[0],
-                    "status": row[1],
-                    "date": row[2],
-                    "succeeded": row[3],
-                    "failed": row[4],
-                }
-
+        def _run_dict(run: dict | None) -> dict:
+            """Resumen compacto de una corrida, o huecos si no hubo ninguna."""
+            if run is None:
+                return {"run_id": None, "status": None, "date": None, "succeeded": 0, "failed": 0}
             return {
-                "latest_transform_run": _run_dict(latest_transform),
-                "latest_normalize_run": _run_dict(latest_normalize),
-                "latest_load_run": _run_dict(latest_load),
-                "latest_clee_resolution_run": _run_dict(latest_clee_resolution),
-                "process_metrics": process_metrics,
-                "normalize_metrics": normalize_metrics,
-                "clee_resolution_metrics": clee_resolution_metrics,
-                "metadata_db": str(self.metadata_db),
-                "silver_db": str(self.silver_db_path),
-                "gold_db": str(self.gold_db_path),
+                "run_id": run["run_id"],
+                "status": run["status"],
+                "date": run["run_date"],
+                "succeeded": run["tasks_succeeded"],
+                "failed": run["tasks_failed"],
             }
+
+        return {
+            "latest_transform_run": _run_dict(
+                self.tracker.get_latest_run_by_type("TRANSFORM", "PROCESS")
+            ),
+            "latest_normalize_run": _run_dict(self.tracker.get_latest_run_by_type("NORMALIZE")),
+            "latest_load_run": _run_dict(self.tracker.get_latest_run_by_type("LOAD")),
+            "latest_clee_resolution_run": _run_dict(
+                self.tracker.get_latest_run_by_type("CLEE_RESOLUTION")
+            ),
+            "process_metrics": self.tracker.get_process_metrics(),
+            "normalize_metrics": self.tracker.get_normalize_metrics(),
+            "clee_resolution_metrics": self.tracker.get_clee_resolution_metrics(),
+            "silver_db": str(self.silver_db_path),
+            "gold_db": str(self.gold_db_path),
+        }
 
     def __repr__(self) -> str:
         """String representation."""
