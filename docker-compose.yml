@@ -204,6 +204,13 @@ services:
       - ./alembic:/app/alembic
       - ./data:/app/data
       - ./logs:/app/logs
+      # La configuracion de las herramientas, sin la cual corren con sus
+      # defaults: sin estos, pytest ignora `--strict-markers` y trata cada
+      # marcador como desconocido, y ruff pierde la config del proyecto.
+      - ./pytest.ini:/app/pytest.ini:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./.coveragerc:/app/.coveragerc:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
 
     deploy:
       resources:
