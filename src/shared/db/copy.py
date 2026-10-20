@@ -89,7 +89,7 @@ def copy_dataframe(
     conn: Connection,
     df: pl.DataFrame,
     table: str,
-    schema: str = DEFAULT_SCHEMA,
+    schema: str | None = DEFAULT_SCHEMA,
     columns: list[str] | None = None,
     chunk_rows: int | None = None,
 ) -> int:
@@ -107,7 +107,9 @@ def copy_dataframe(
         conn: conexion SQLAlchemy sobre PostgreSQL.
         df: datos a cargar; sus columnas deben existir en la tabla destino.
         table: nombre de la tabla (sin calificar).
-        schema: schema de la tabla.
+        schema: schema de la tabla; `None` deja el nombre sin calificar,
+            que es como se alcanza una tabla temporal (viven en `pg_temp`,
+            cuyo nombre cambia por sesion).
         columns: subconjunto y orden de columnas; default, todas las del df.
         chunk_rows: filas por bloque; default, `COPY_CHUNK_ROWS` de la config.
 
@@ -125,9 +127,8 @@ def copy_dataframe(
 
     chunk_rows = chunk_rows if chunk_rows is not None else get_settings().COPY_CHUNK_ROWS
     quoted_cols = ", ".join(f'"{c}"' for c in cols)
-    statement = (
-        f'COPY "{schema}"."{table}" ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE \'"\')'
-    )
+    destino = f'"{schema}"."{table}"' if schema else f'"{table}"'
+    statement = f'COPY {destino} ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE \'"\')'
 
     projected = df.select(cols)
     written = 0
@@ -141,7 +142,7 @@ def copy_dataframe(
 
     logger.info(
         "COPY completado",
-        table=f"{schema}.{table}",
+        table=f"{schema}.{table}" if schema else table,
         rows=written,
         chunks=-(-projected.height // chunk_rows),
     )

@@ -1,5 +1,5 @@
 """
-CLEE Resolution Stage: Entity Resolution (Silver DuckDB)
+CLEE Resolution Stage: Entity Resolution sobre Silver
 
 Resolves entity identities across temporal snapshots, matching
 establishments over time and generating master identifiers (CLEEs).
@@ -14,7 +14,7 @@ is deterministic (clee_propagado_radio = clee). For older periods without CLEE
 (2015-2020), a spatial tolerance radius (BallTree) pre-filter and a
 conditional matching cascade resolve identities probabilistically.
 
-Reads from and writes back to the Silver DuckDB warehouse directly,
+Lee y escribe directamente sobre `silver.establecimientos`,
 populating the `clee_propagado_radio` column on the `establecimientos` table.
 """
 
@@ -22,8 +22,8 @@ import gc
 from datetime import date
 from pathlib import Path
 
-import duckdb
 import polars as pl
+from sqlalchemy import Engine, func, select, text
 
 from src.etl.db.indexes import suspended_indexes
 from src.etl.utils.clee_resolution_config import (
@@ -39,8 +39,10 @@ from src.etl.utils.entity_resolution import (
     set_matching_logger,
 )
 from src.etl.utils.matching import clean_contact_columns
-from src.etl.utils.warehouse import connect_configured, get_distinct_periods
 from src.meta.tracker import MetadataTracker
+from src.shared.config import get_settings
+from src.shared.db.base import get_table
+from src.shared.db.copy import copy_dataframe
 from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
@@ -87,27 +89,30 @@ class CLEEResolver:
 
     def __init__(
         self,
-        silver_db_path: Path,
         tracker: MetadataTracker,
         method: str = "radio",
+        engine: Engine | None = None,
+        kb_cache_dir: Path | None = None,
     ):
         """
         Initialize CLEE resolution stage.
 
         Args:
-            silver_db_path: Path to Silver DuckDB warehouse
             tracker: MetadataTracker instance for job/task tracking
             method: "radio" (BallTree, columna clee_propagado_radio) o
                 "h3" (blocking H3, columna clee_propagado_h3). Ambos metodos
                 comparten TODO el motor de ventana deslizante; solo cambian
                 la columna destino y el generador de candidatos.
+            engine: conexion a la base; por default la del proyecto.
+            kb_cache_dir: donde cachear las KB de referencia; por default,
+                `data/kb_cache/<metodo>`.
         """
         if method not in self.METHODS:
             raise ValueError(f"Metodo desconocido '{method}'. Opciones: {list(self.METHODS)}")
 
-        self.silver_db_path = Path(silver_db_path)
         self.tracker = tracker
         self.method = method
+        self._engine = engine
 
         cfg = self.METHODS[method]
         self.master_column: str = cfg["column"]
@@ -128,57 +133,68 @@ class CLEEResolver:
         # Spatial tolerance from config (easy to calibrate)
         self.spatial_tol = SPATIAL_RADIUS_M
 
-        # KB cache por metodo: la identidad cacheada difiere entre radio y h3,
-        # asi que cada metodo tiene su subdirectorio.
-        self.kb_cache_dir = self.silver_db_path.parent / "kb_cache" / method
+        # KB cache por metodo: la identidad cacheada difiere entre radio y
+        # h3, asi que cada metodo tiene su subdirectorio. Es cache en disco,
+        # no almacenamiento: se puede borrar y se reconstruye.
+        self.kb_cache_dir = (
+            kb_cache_dir or get_settings().DATA_DIR / "kb_cache"
+        ) / method
 
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """Get a DuckDB connection to Silver warehouse (settings limits applied)."""
-        return connect_configured(self.silver_db_path)
+    @property
+    def engine(self) -> Engine:
+        """Engine de la base, resuelto la primera vez que se usa."""
+        if self._engine is None:
+            from src.shared.db.session import get_engine
+
+            self._engine = get_engine()
+        return self._engine
 
     def _count_unresolved(self) -> int:
-        """Count rows where the method's master column IS NULL."""
-        with self._get_connection() as conn:
-            return conn.execute(f"""
-                SELECT COUNT(*) FROM establecimientos
-                WHERE {self.master_column} IS NULL
-            """).fetchone()[0]
+        """Observaciones que todavia no tienen identidad asignada."""
+        estab = get_table("establecimientos")
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(func.count())
+                .select_from(estab)
+                .where(estab.c[self.master_column].is_(None))
+            ).scalar_one()
 
     def _get_sorted_periods(self) -> list[date]:
-        """
-        Get all periods from Silver DuckDB sorted newest-first.
+        """Cortes presentes en Silver, del mas antiguo al mas nuevo.
 
         Returns:
-            List of date objects sorted chronologically descending.
-            Example: [date(2024, 11, 1), date(2024, 5, 1), ...]
+            list[date]: periodos ordenados.
         """
-        with self._get_connection() as conn:
-            return get_distinct_periods(conn, descending=True)
+        estab = get_table("establecimientos")
+        with self.engine.connect() as conn:
+            return list(
+                conn.execute(
+                    select(estab.c.period).distinct().order_by(estab.c.period)
+                ).scalars()
+            )
 
     def _get_periods_with_clee_coverage(self) -> dict[date, bool]:
-        """
-        Classify each period as having full CLEE coverage or not.
+        """Que cortes traen CLEE de INEGI y cuales no.
+
+        Los que lo traen se resuelven por copia directa; los que no, por
+        matching probabilistico contra los anteriores.
 
         Returns:
-            Dict mapping period -> True if 100% rows have CLEE, False otherwise.
+            dict: periodo -> True si tiene al menos un CLEE no vacio.
         """
-        with self._get_connection() as conn:
-            rows = conn.execute("""
-                SELECT
-                    period,
-                    COUNT(*) AS total,
-                    COUNT(CASE WHEN clee IS NOT NULL AND clee != '' THEN 1 END) AS with_clee
-                FROM establecimientos
-                WHERE period IS NOT NULL
-                GROUP BY period
-                ORDER BY period DESC
-            """).fetchall()
-
-        return {r[0]: (r[2] == r[1]) for r in rows}
+        estab = get_table("establecimientos")
+        with self.engine.connect() as conn:
+            filas = conn.execute(
+                select(
+                    estab.c.period,
+                    func.count(estab.c.clee).filter(estab.c.clee != "") > 0,
+                ).group_by(estab.c.period)
+            ).all()
+        return {period: bool(tiene) for period, tiene in filas}
 
     def _load_period(self, period: date) -> pl.DataFrame:
         """
-        Load a single period's data from Silver DuckDB.
+        Carga las observaciones de un corte.
 
         Uses SILVER_READ_QUERY which JOINs with catalog tables to get
         `nombre_act` and casts ENUM columns to VARCHAR, filtered by period.
@@ -189,11 +205,13 @@ class CLEEResolver:
         Returns:
             Polars DataFrame with columns from COLS_NEEDED_FOR_MATCHING
         """
-        query = SILVER_READ_QUERY + "\n    WHERE e.period = ?"
+        # El filtro por periodo es lo que activa el pruning de la
+        # particion: sin el, cada lectura barreria los veinte cortes.
+        query = text(SILVER_READ_QUERY + "\n    WHERE e.period = :period")
 
-        with self._get_connection() as conn:
-            result = conn.execute(query, [period])
-            df = pl.from_arrow(result.fetch_arrow_table())
+        with self.engine.connect() as conn:
+            filas = conn.execute(query, {"period": period})
+            df = pl.DataFrame(filas.all(), schema=list(filas.keys()), orient="row")
 
         if df.is_empty():
             return df
@@ -214,7 +232,7 @@ class CLEEResolver:
         """
         Obtiene la KB de un periodo de referencia, usando cache en disco.
 
-        Primera vez: carga el periodo de DuckDB (JOIN + limpieza), construye
+        Primera vez: carga el periodo de la base (JOIN + limpieza), construye
         la KB de 10 columnas y la persiste en parquet (escritura atomica via
         tmp + rename). Siguientes veces: lee el parquet directo, evitando
         re-materializar el periodo completo (~19 columnas) en RAM.
@@ -258,46 +276,49 @@ class CLEEResolver:
 
     def _get_total_rows(self) -> int:
         """Get total row count in establecimientos."""
-        with self._get_connection() as conn:
-            return conn.execute("SELECT COUNT(*) FROM establecimientos").fetchone()[0]
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(func.count()).select_from(get_table("establecimientos"))
+            ).scalar_one()
 
-    def _write_period_results(self, mapping: pl.DataFrame) -> int:
+    def _write_period_results(self, mapping: pl.DataFrame, period: date) -> int:
         """
-        Write master-column assignments for a single period to Silver DuckDB.
-
-        Uses batched UPDATE statements via temp table for efficiency.
+        Escribe las identidades resueltas de un corte.
 
         Args:
-            mapping: DataFrame with columns [id, <master_column>]
+            mapping: columnas [id, <master_column>].
+            period: corte al que pertenecen, para acotar el UPDATE a su
+                particion.
 
         Returns:
-            Number of rows updated
+            int: filas actualizadas.
         """
         if mapping.is_empty():
             return 0
 
         col = self.master_column
-        total = mapping.height
-        batch_size = 50_000
         updated = 0
 
-        with self._get_connection() as conn:
-            for offset in range(0, total, batch_size):
-                batch = mapping.slice(offset, batch_size)
+        with self.engine.begin() as conn:
+            # Tabla temporal + UPDATE ... FROM, que es como PostgreSQL hace
+            # una actualizacion masiva por llave. El COPY la llena de golpe;
+            # un UPDATE por fila sobre millones de identidades no termina.
+            conn.execute(
+                text(f'CREATE TEMP TABLE _clee_updates (id text, "{col}" text) ON COMMIT DROP')
+            )
+            copy_dataframe(conn, mapping, "_clee_updates", schema=None)
 
-                conn.execute(
-                    f"CREATE OR REPLACE TEMP TABLE _clee_updates (id VARCHAR, {col} VARCHAR)"
-                )
-                conn.execute("INSERT INTO _clee_updates SELECT * FROM batch")
-                result = conn.execute(f"""
-                    UPDATE establecimientos e
-                    SET {col} = u.{col}
-                    FROM _clee_updates u
-                    WHERE e.id = u.id
-                """)
-                batch_updated = result.fetchone()[0] if result.description else batch.height
-                updated += batch_updated
-                conn.execute("DROP TABLE IF EXISTS _clee_updates")
+            # El filtro por periodo activa el pruning: sin el, el UPDATE
+            # recorre las veinte particiones para tocar una.
+            resultado = conn.execute(
+                text(
+                    f'UPDATE silver.establecimientos e SET "{col}" = u."{col}" '
+                    "FROM _clee_updates u "
+                    "WHERE e.id = u.id AND e.period = :period"
+                ),
+                {"period": period},
+            )
+            updated = resultado.rowcount
 
         return updated
 
@@ -335,27 +356,29 @@ class CLEEResolver:
         )
 
         col = self.master_column
-        with self._get_connection() as conn:
+        estab = get_table("establecimientos")
+        with self.engine.begin() as conn:
             if force:
-                # Reset SOLO la columna de este metodo (no toca la del otro)
-                conn.execute(f"UPDATE establecimientos SET {col} = NULL")
+                # Reset SOLO la columna de este metodo: la del otro track
+                # de comparacion no se toca.
+                conn.execute(estab.update().values(**{col: None}))
 
-            # Copy clee -> master_column for all rows with CLEE.
-            # IS DISTINCT FROM = no-op guard: en corridas incrementales las
-            # filas ya sembradas no se reescriben (sin el guard, DuckDB
-            # reescribia ~45M filas identicas en CADA corrida del transform).
-            conn.execute(f"""
-                UPDATE establecimientos
-                SET {col} = clee
-                WHERE clee IS NOT NULL AND clee != ''
-                  AND {col} IS DISTINCT FROM clee
-            """)
+            # clee -> columna maestra, para toda fila que traiga CLEE.
+            # `IS DISTINCT FROM` es una guarda de no-op: sin ella, cada
+            # corrida reescribiria ~45M filas identicas.
+            conn.execute(
+                estab.update()
+                .where(
+                    estab.c.clee.is_not(None),
+                    estab.c.clee != "",
+                    estab.c[col].is_distinct_from(estab.c.clee),
+                )
+                .values(**{col: estab.c.clee})
+            )
 
-            # Count seeded rows
-            count = conn.execute(f"""
-                SELECT COUNT(*) FROM establecimientos
-                WHERE {col} IS NOT NULL
-            """).fetchone()[0]
+            count = conn.execute(
+                select(func.count()).select_from(estab).where(estab.c[col].is_not(None))
+            ).scalar_one()
 
         self.logger.info(
             f"   {col} = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
@@ -378,14 +401,14 @@ class CLEEResolver:
         Resolve periods without CLEE using sliding-window approach.
 
         For each target period P (no CLEE, newest-first):
-          1. Load P from DuckDB (~3M rows, all clee_propagado_radio NULL)
+          1. Carga P de la base (~3M filas, todas sin identidad)
           2. For each already-resolved period R NEWER than P (nearest-first:
              closest to P first; see docs/findings.md 2026-07-21):
              - Load R, build KB (scalar, ~6M rows max)
              - Run propagate_clees(P, KB_R) to assign matches
              - Free R from RAM
           3. Assign NEW_prefix-uuid to remaining unresolved rows
-          4. Write results to DuckDB
+          4. Escribe los resultados
           5. Mark P as resolved (available as reference for next periods)
 
         Args:
@@ -472,9 +495,9 @@ class CLEEResolver:
                 self.logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
                 df_target = assign_new_clees(df_target, region_prefix, col)
 
-            # Write results to DuckDB immediately (no accumulation in RAM)
+            # Se escribe de inmediato: no se acumula nada en RAM
             mapping = df_target.select(["id", col])
-            rows_written = self._write_period_results(mapping)
+            rows_written = self._write_period_results(mapping, target_period)
             total_resolved += rows_written
 
             # Su identidad cambio: invalidar KB cacheada (si existia)
@@ -533,12 +556,15 @@ class CLEEResolver:
         # Classify periods by CLEE coverage
         clee_coverage = self._get_periods_with_clee_coverage()
 
-        # Get region prefix
-        with self._get_connection() as conn:
-            state_rows = conn.execute(
-                "SELECT DISTINCT cve_ent FROM establecimientos ORDER BY cve_ent"
-            ).fetchall()
-        state_list = [r[0] for r in state_rows] if state_rows else ["NATIONAL"]
+        # Prefijo de region, derivado de las entidades presentes
+        estab = get_table("establecimientos")
+        with self.engine.connect() as conn:
+            entidades = list(
+                conn.execute(
+                    select(estab.c.cve_ent).distinct().order_by(estab.c.cve_ent)
+                ).scalars()
+            )
+        state_list = entidades or ["NATIONAL"]
         prefix = get_region_prefix(state_list) + self._prefix_suffix
         self.logger.info(f"   Prefijo de region (namespace): {prefix}")
 
@@ -562,7 +588,7 @@ class CLEEResolver:
         """
         Run CLEE resolution pipeline.
 
-        Reads from Silver DuckDB period by period, resolves entity
+        Lee Silver corte por corte, resuelve identidades
         identities, and writes `clee_propagado_radio` back to the same table.
 
         Args:
@@ -617,10 +643,10 @@ class CLEEResolver:
                 return True
 
             # La resolucion reescribe la columna maestra sobre decenas de
-            # millones de filas; con su indice ART vivo cada UPDATE lo
-            # mantiene fila por fila. Se suspende aqui y se restituye al
-            # terminar (tambien si falla), sin paso manual.
-            with self._get_connection() as index_conn, suspended_indexes(index_conn):
+            # millones de filas, y mantener sus indices durante un UPDATE
+            # masivo es ordenes de magnitud mas lento. Se suspenden aqui y
+            # se restituyen al terminar, tambien si falla.
+            with self.engine.begin() as index_conn, suspended_indexes(index_conn):
                 stats = self.process_national(force=force)
 
             # Count remaining unresolved
@@ -634,7 +660,7 @@ class CLEEResolver:
                 entities_matched=total_rows - remaining,
                 master_clees_created=total_rows - remaining,
                 periods_processed=stats["periods_processed"],
-                output_path=str(self.silver_db_path),
+                output_path="silver.establecimientos",
             )
 
             self.logger.info(

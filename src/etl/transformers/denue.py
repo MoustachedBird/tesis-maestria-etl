@@ -77,16 +77,8 @@ class DenuePipelineOrchestrator:
         )
 
         # Un resolver por metodo (misma maquinaria, distinta columna destino).
-        self.clee_resolver = CLEEResolver(
-            silver_db_path=self.silver_db_path,
-            tracker=self.tracker,
-            method="radio",
-        )
-        self.clee_resolver_h3 = CLEEResolver(
-            silver_db_path=self.silver_db_path,
-            tracker=self.tracker,
-            method="h3",
-        )
+        self.clee_resolver = CLEEResolver(tracker=self.tracker, method="radio")
+        self.clee_resolver_h3 = CLEEResolver(tracker=self.tracker, method="h3")
 
         self.loader = SilverToGoldLoader(
             tracker=self.tracker,
