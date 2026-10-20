@@ -18,6 +18,15 @@ Se eligio psycopg3 igual porque soporta los dos caminos con la misma API de
 bloques --si el parseo del servidor resulta ser el limite, cambiar a binario
 es local a este modulo-- y porque psycopg2 esta en modo mantenimiento.
 
+**De donde salen los errores.** El protocolo COPY exige el cursor del
+driver, asi que las violaciones que detecta el servidor --una FK invalida,
+una PK repetida, una fila sin particion-- llegan como excepciones de
+`psycopg` y no envueltas en `sqlalchemy.exc`. Se deja asi a proposito: son
+el error real, con su detalle completo y su propia jerarquia de tipos, y
+envolverlas solo para uniformar el vocabulario perderia la distincion entre
+un fallo de integridad y uno de transporte. Quien necesite atrapar ambos
+mundos, `Exception`; quien quiera distinguir, `psycopg.errors`.
+
 **NULL contra cadena vacia.** Los datos del DENUE vienen de encuesta y
 traen campos vacios por todos lados, asi que distinguirlos importa. Polars
 escribe ambos igual por default (nada entre comas), lo que los volveria

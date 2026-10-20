@@ -387,10 +387,16 @@ def silver_engine(pg_engine):
     Yields:
         Engine: con `silver` poblado de tablas vacias.
     """
+    from sqlalchemy import text
+
     from src.shared.db.base import Base, tables_for
 
-    tablas = tables_for("silver")
-    Base.metadata.drop_all(pg_engine, tables=tablas)
-    Base.metadata.create_all(pg_engine, tables=tablas)
+    # DROP SCHEMA CASCADE y no `drop_all`: una particion desenganchada
+    # queda como tabla suelta que conserva sus FKs a los catalogos, y
+    # entonces `drop_all` no puede con ellos ("cannot drop table ...
+    # because other objects depend on it"). CASCADE no distingue.
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS silver CASCADE"))
+        conn.execute(text("CREATE SCHEMA silver"))
+    Base.metadata.create_all(pg_engine, tables=tables_for("silver"))
     yield pg_engine
-    Base.metadata.drop_all(pg_engine, tables=tablas)
