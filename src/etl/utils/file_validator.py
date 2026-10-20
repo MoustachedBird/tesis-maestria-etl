@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.meta.models import ErrorType
+from src.shared.enums import ErrorType
 
 
 class ValidationResult(BaseModel):

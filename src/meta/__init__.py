@@ -1,33 +1,11 @@
-"""
-Metadata tracking package for ETL job execution.
+"""Registro de corridas, tareas y linaje del pipeline.
 
-This package implements industry-standard metadata tracking patterns
-used by orchestration frameworks like Apache Airflow and Prefect.
-
-Provides:
-- Job run lifecycle management
-- Task instance tracking
-- Data lineage recording
-- Performance metrics
-- Error tracking and classification
+El unico punto de entrada es `MetadataTracker`, que escribe en el schema
+`meta`. Las entidades las define el ORM en `shared/db/models/meta.py`; los
+estados, los enums de `shared/enums` --ambos compartidos con el resto del
+proyecto, que es por lo que no viven aqui.
 """
 
-from src.meta.models import (
-    DownloadResult,
-    DownloadTask,
-    ErrorType,
-    JobRun,
-    JobStatus,
-    TaskStatus,
-)
 from src.meta.tracker import MetadataTracker
 
-__all__ = [
-    "JobRun",
-    "DownloadTask",
-    "DownloadResult",
-    "JobStatus",
-    "TaskStatus",
-    "ErrorType",
-    "MetadataTracker",
-]
+__all__ = ["MetadataTracker"]

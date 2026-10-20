@@ -31,9 +31,9 @@ import duckdb
 
 from src.etl.utils.backup import backup_warehouse
 from src.etl.utils.warehouse import connect_configured
-from src.meta.models import JobStatus, TaskStatus
 from src.meta.tracker import MetadataTracker
 from src.shared.config import settings
+from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_entidades.log"))

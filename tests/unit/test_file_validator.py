@@ -6,7 +6,7 @@ import zipfile
 import pytest
 
 from src.etl.utils.file_validator import FileValidator, ValidationResult
-from src.meta.models import ErrorType
+from src.shared.enums import ErrorType
 
 
 @pytest.mark.unit

@@ -22,7 +22,7 @@ import structlog
 
 from src.etl.core.download_config import DownloadConfig
 from src.etl.utils.file_validator import FileValidator, ValidationResult
-from src.meta.models import ErrorType
+from src.shared.enums import ErrorType
 
 logger = structlog.get_logger(__name__)
 

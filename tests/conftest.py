@@ -1,12 +1,8 @@
-"""
-Pytest configuration and shared fixtures.
+"""Fixtures compartidos de la suite.
 
-This module provides test fixtures using a HYBRID approach:
-- Unit tests use MANUAL fixtures (fast, isolated)
-- Integration tests use REAL production DuckDB data (realistic)
-
-Environment Variables:
-    TEST_DB_PATH: Path to production DuckDB (default: data/mipymes_warehouse_most_recent.db)
+Dos clases de prueba: las unitarias arman sus datos a mano y no tocan base
+alguna, y las marcadas `postgres` corren contra el servidor de pruebas que
+describe `TEST_POSTGRES_URL` --y se saltan solas si no responde.
 """
 
 import functools
@@ -14,9 +10,7 @@ import os
 from datetime import date
 from pathlib import Path
 
-import duckdb
 import pytest
-from sqlalchemy import inspect
 from sqlalchemy.pool import NullPool
 
 from src.shared.db.models import (
@@ -41,23 +35,6 @@ from src.shared.db.models import (
 # ============================================================================
 
 
-def get_test_db_path() -> str:
-    """
-    Get production database path from environment or use default.
-
-    Returns:
-        Path to production DuckDB file
-    """
-    return os.getenv("TEST_DB_PATH", "data/mipymes_warehouse_most_recent.db")
-
-
-# ============================================================================
-# DATABASE FIXTURES (INTEGRATION TESTS - REAL DATA)
-# ============================================================================
-
-
-
-
 def _catalog_id(table: str, label_col: str, label: str) -> int:
     """Id de un valor de catalogo leido del seed parquet (fuente de verdad).
 
@@ -74,111 +51,6 @@ def _catalog_id(table: str, label_col: str, label: str) -> int:
     fname = SEED_FILES.get(table, f"seed_{table.removeprefix('denue_')}.parquet")
     df = pl.read_parquet(seeds / fname)
     return int(df.filter(pl.col(label_col) == label)["id"][0])
-
-
-@pytest.fixture(scope="session")
-def production_db():
-    """
-    Read-only connection to production DuckDB warehouse.
-
-    Used for integration tests that validate against real data.
-    Scope: session (shared across all tests for performance).
-
-    Yields:
-        DuckDB connection (read-only)
-    """
-    db_path = get_test_db_path()
-
-    if not os.path.exists(db_path):
-        pytest.skip(f"Production database not found at {db_path}")
-
-    conn = duckdb.connect(db_path, read_only=True)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture
-def real_sample_establecimiento(production_db) -> Establecimiento:
-    """
-    Pull a real establishment from production database.
-
-    Retrieves actual record with complete data for integration testing.
-
-    Args:
-        production_db: Production DuckDB connection fixture
-
-    Returns:
-        Establecimiento instance populated with real data
-    """
-    # Get column names
-    col_query = production_db.execute("DESCRIBE establecimientos")
-    all_columns = [row[0] for row in col_query.fetchall()]
-
-    # Get sample establishment with good data coverage
-    query = """
-    SELECT *
-    FROM establecimientos
-    WHERE nom_estab IS NOT NULL
-      AND nom_vial IS NOT NULL
-      AND latitud IS NOT NULL
-      AND per_ocu IS NOT NULL
-      AND codigo_act IS NOT NULL
-      AND telefono IS NOT NULL
-    LIMIT 1
-    """
-
-    result = production_db.execute(query).fetchone()
-
-    if not result:
-        pytest.skip("No suitable sample data found in production database")
-
-    # Create Establecimiento instance from real data
-    estab = Establecimiento()
-    for i, col in enumerate(all_columns):
-        if hasattr(estab, col):
-            setattr(estab, col, result[i])
-
-    return estab
-
-
-@pytest.fixture
-def real_sample_entidad(production_db) -> Entidad:
-    """
-    Pull a real state (entidad) from production database.
-
-    Args:
-        production_db: Production DuckDB connection fixture
-
-    Returns:
-        Entidad instance with real data
-    """
-    query = "SELECT cve_ent, entidad FROM denue_entidades LIMIT 1"
-    result = production_db.execute(query).fetchone()
-
-    if not result:
-        pytest.skip("No entidad data found")
-
-    return Entidad(cve_ent=result[0], entidad=result[1])
-
-
-@pytest.fixture
-def real_sample_municipio(production_db) -> Municipio:
-    """
-    Pull a real municipality from production database.
-
-    Args:
-        production_db: Production DuckDB connection fixture
-
-    Returns:
-        Municipio instance with real data
-    """
-    query = "SELECT cve_ent, cve_mun, municipio FROM denue_municipios LIMIT 1"
-    result = production_db.execute(query).fetchone()
-
-    if not result:
-        pytest.skip("No municipio data found")
-
-    return Municipio(cve_ent=result[0], cve_mun=result[1], municipio=result[2])
 
 
 # ============================================================================
@@ -362,104 +234,15 @@ def sample_actividad_economica() -> ActividadEconomica:
 # ============================================================================
 
 
-@pytest.fixture
-def db_schema_columns(production_db) -> set[str]:
-    """
-    Get set of column names from production database schema.
-
-    Useful for schema validation tests.
-
-    Args:
-        production_db: Production DuckDB connection
-
-    Returns:
-        Set of column names from establecimientos table
-    """
-    columns = production_db.execute("DESCRIBE establecimientos").fetchall()
-    return {col[0] for col in columns}
-
-
-@pytest.fixture
-def model_columns() -> set[str]:
-    """
-    Get set of column names from Establecimiento model.
-
-    Useful for schema validation tests.
-
-    Returns:
-        Set of column names from SQLAlchemy model
-    """
-    mapper = inspect(Establecimiento)
-    return {col.key for col in mapper.columns}
-
-
-# ============================================================================
-# DATA QUERY HELPERS
-# ============================================================================
-
-
-@pytest.fixture
-def query_helper(production_db):
-    """
-    Helper fixture for executing queries in tests.
-
-    Provides convenient methods for common query patterns.
-
-    Args:
-        production_db: Production DuckDB connection
-
-    Returns:
-        QueryHelper instance
-    """
-
-    class QueryHelper:
-        def __init__(self, conn):
-            self.conn = conn
-
-        def count_establecimientos(self) -> int:
-            """Get total count of establishments."""
-            return self.conn.execute("SELECT COUNT(*) FROM establecimientos").fetchone()[0]
-
-        def count_by_state(self, cve_ent: str) -> int:
-            """Get count of establishments in specific state."""
-            return self.conn.execute(
-                "SELECT COUNT(*) FROM establecimientos WHERE cve_ent = ?", [cve_ent]
-            ).fetchone()[0]
-
-        def count_by_activity(self, codigo_act: str) -> int:
-            """Get count of establishments by activity code."""
-            return self.conn.execute(
-                "SELECT COUNT(*) FROM establecimientos WHERE codigo_act LIKE ?",
-                [f"{codigo_act}%"],
-            ).fetchone()[0]
-
-        def sample_by_state(self, cve_ent: str, limit: int = 10) -> list:
-            """Get sample establishments from specific state."""
-            return self.conn.execute(
-                "SELECT * FROM establecimientos WHERE cve_ent = ? LIMIT ?",
-                [cve_ent, limit],
-            ).fetchall()
-
-    return QueryHelper(production_db)
-
-
 # ============================================================================
 # SERVIDOR POSTGRES DE PRUEBA (migracion Fase 3)
 # ============================================================================
-# Desde que `silver.establecimientos` se declara particionada, el esquema del
-# ORM ya no se puede materializar en DuckDB: duckdb_engine hereda de
-# PGDialect_psycopg2, asi que emite las opciones `postgresql_*` en vez de
-# ignorarlas y `create_all` muere con `syntax error at or near "PARTITION"`.
+# Los tests que tocan el esquema real van marcados `@pytest.mark.postgres` y
+# se saltan solos cuando no hay servidor, de modo que la suite corre completa
+# en una maquina sin nada levantado y completa de verdad cuando lo hay.
 #
-# En vez de migrar los 8 archivos de test de golpe --varios prueban codigo que
-# la propia migracion elimina (`utils/backup.py`) o reescribe
-# (`db/indexes.py`)-- se marcan con `@pytest.mark.postgres` y se saltan cuando
-# no hay servidor. El suite queda verde y la deuda queda explicita y
-# greppable, en lugar de ser rojo que uno aprende a ignorar.
-#
-# Para correrlos basta un Postgres cualquiera; el de test pesa ~200 MB:
 #     docker compose up -d postgres
-#     TEST_POSTGRES_URL=postgresql+psycopg://etl_rw:...@localhost:5432/mipymes_test uv run pytest -m postgres
+#     docker compose run --rm tools pytest -m postgres
 
 #: Variable de entorno que apunta al Postgres desechable de los tests. Si no
 #: esta definida se deriva de la config del proyecto con el sufijo `_test`,

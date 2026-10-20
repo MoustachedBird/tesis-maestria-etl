@@ -13,8 +13,8 @@ from src.etl.core.download_config import DownloadConfig
 from src.etl.utils.browser import get_chrome_driver
 from src.etl.utils.denue_scraping import scrape_denue_table
 from src.etl.utils.downloader import Downloader
-from src.meta.models import TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.enums import TaskStatus
 from src.shared.logging import PipelineLogger
 
 

@@ -20,7 +20,7 @@ propaga a cortes más viejos.
 
 ## Cómo funciona el código actual
 
-Orquestado por `CLEEResolver` (`src_etl/transformers/clee_resolver.py`).
+Orquestado por `CLEEResolver` (`src/etl/transformers/clee_resolver.py`).
 Existen dos métodos paralelos que solo difieren en el generador de
 candidatos espaciales y llenan columnas separadas para compararse:
 `clee_propagado_radio` (BallTree, baseline) y `clee_propagado_h3`
@@ -70,7 +70,7 @@ Solo se evalúan en la cascada los negocios de la KB a menos de
   cubrir 500 m en el peor caso; un guard en
   `clee_resolution_config.py` impide subir el radio sin recalibrar k.
 
-### Cascada de matching (`calculate_match_score`, `src_etl/utils/matching.py`)
+### Cascada de matching (`calculate_match_score`, `src/etl/utils/matching.py`)
 
 Por cada par target-candidato, en orden:
 

@@ -20,8 +20,8 @@ desarrollo canónica.
 
 ### Regla de oro — migraciones y esquema
 
-**No correr migraciones ni `ALTER TABLE` sobre los `.duckdb` de `data/`
-sin confirmación explícita del usuario.** Los cambios de esquema se
+**No aplicar migraciones ni `ALTER TABLE` sobre una base con datos sin
+confirmación explícita del usuario.** Los cambios de esquema se
 preparan en código (migración Alembic + modelo ORM + DDL en el
 loader/writer correspondiente) y se aplican en un paso controlado
 (`docker compose up -d migrate`) que ejecuta el usuario. Esto aplica también a
@@ -43,12 +43,12 @@ deben tener docstring**.
 
 **Toda mejora debe optimizar tiempo de ejecución Y uso de RAM a la vez,
 aprovechando la CPU con paralelización correcta** — el pipeline corre en
-una Mac M4 Pro/Max (límite DuckDB en `.env`), no en un servidor. Nada de
+la workstation Linux (48 hilos / 125 GiB, `docs/entorno_linux.md`). Nada de
 caches sin cota, KBs monolíticas en RAM ni matrices gigantes
 precomputadas; preferir procesamiento columnar/streaming out-of-core,
 caches acotados o en disco, y liberar memoria entre pasadas. Para CPU:
-preferir el paralelismo interno de los motores (DuckDB threads, Polars,
-rapidfuzz workers) antes que multiprocessing manual; cuando se use
+preferir el paralelismo interno de los motores (workers de Postgres,
+Polars, rapidfuzz) antes que multiprocessing manual; cuando se use
 multiprocessing, fork+COW sin copiar datos grandes. Los datos DENUE
 provienen de encuestas: cualquier campo puede venir vacío o faltar en un
 periodo completo — todo código de matching debe tolerarlo
@@ -90,7 +90,7 @@ incremental saltaría.
 ### Respaldo automático antes de escribir (2026-07-25)
 
 **Cada comando que modifica el warehouse deja primero un respaldo
-rotativo** (`src_etl/utils/backup.py`, enganchado en ingest,
+rotativo** (`src/etl/utils/backup.py`, enganchado en ingest,
 normalize-dates, h3-cells, ambas resoluciones CLEE, sesnsp, load y
 build-entidades). No hay paso manual que recordar.
 
@@ -201,21 +201,21 @@ Plus 1 NULL row. Output format is always `DATE YYYY-MM-01`.
 
 ```bash
 # Run only normalize-dates (skip everything else)
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-h3-cells \
+uv run python -m src.etl.main transform --no-ingest --normalize-dates --no-h3-cells \
     --no-clee-resolution-radio --no-clee-resolution-h3 --no-sesnsp
 
 # Force re-normalize all periods
-uv run python -m src_etl.main transform --no-ingest --normalize-dates --no-h3-cells \
+uv run python -m src.etl.main transform --no-ingest --normalize-dates --no-h3-cells \
     --no-clee-resolution-radio --no-clee-resolution-h3 --no-sesnsp --force
 
 # Full transform (DENUE + SESNSP, todo prendido por default)
-uv run python -m src_etl.main transform
+uv run python -m src.etl.main transform
 ```
 
 ### Tips
 
 - `SELECT DISTINCT column` is an efficient way to analyze patterns in columns with millions of rows. Use it to discover new fecha_alta_str formats if they appear in future INEGI releases.
-- The Spanish month map is defined in `src_etl/transformers/date_normalizer.py` as `SPANISH_MONTHS`.
+- The Spanish month map is defined in `src/etl/transformers/date_normalizer.py` as `SPANISH_MONTHS`.
 - DuckDB `regexp_matches()` + `CASE WHEN` handles all format detection in a single UPDATE statement per period.
 
 ---
@@ -633,16 +633,16 @@ heartbeat every `PROGRESS_LOG_INTERVAL` rows all land in the right file.
 
 ```bash
 # Run only CLEE resolution radio (skip everything else)
-uv run python -m src_etl.main transform --only clee-radio
+uv run python -m src.etl.main transform --only clee-radio
 
 # Force re-resolve all periods (resets clee_propagado_radio to NULL first)
-uv run python -m src_etl.main transform --only clee-radio --force
+uv run python -m src.etl.main transform --only clee-radio --force
 
 # Or via Makefile
 docker compose run --rm etl transform ARGS="--only clee-radio"
 
 # Full transform (DENUE completo + SESNSP, todo prendido por default)
-uv run python -m src_etl.main transform
+uv run python -m src.etl.main transform
 ```
 
 ### Tips
@@ -775,7 +775,7 @@ re-resolución CLEE con el código actual (los ids `NEW_*` van a cambiar).
 
 ```bash
 docker compose run --rm etl build-entidades   # correr DESPUES de clee-resolution-radio --force
-# equivalente: uv run python -m src_etl.main build-entidades
+# equivalente: uv run python -m src.etl.main build-entidades
 ```
 
 Log del stage: `data/etl_entidades.log`. Tracking: job `entidades_build`
@@ -882,8 +882,12 @@ Línea base medida el 2026-07-30 (post nearest-first) en
 - **Language:** Python 3.12+
 - **Package Manager:** uv
 - **Frameworks:** FastAPI (API), Typer (CLI), SQLAlchemy 2.0 (ORM), Alembic (migrations)
-- **Data Engine:** DuckDB (OLAP) + Polars (DataFrames)
-- **Storage:** DuckDB (Silver + Gold warehouses), Apache Parquet (seeds)
+- **Base de datos:** PostgreSQL 17 — una base, tres schemas (`silver`,
+  `gold`, `meta`); driver psycopg3, escrituras masivas con `COPY`
+- **DataFrames:** Polars
+- **Almacenamiento:** `silver.establecimientos` particionada por `period`;
+  los seeds de catálogos, en Parquet versionado
+- **Ejecución:** Docker Compose, sin nada nativo
 - **Architecture:** Hexagonal/Clean Architecture with medallion data lake (Bronze/Silver/Gold)
 - **Design Decision:** Monolithic ETL -- YAGNI; single service doesn't justify microservices
 
@@ -893,7 +897,7 @@ Línea base medida el 2026-07-30 (post nearest-first) en
 
 ```
 etl-core/
-├── src_etl/                       # ETL application code
+├── src/etl/                       # ETL application code
 │   ├── main.py                    # CLI entry point (Typer)
 │   ├── core/                      # Configuration and infrastructure
 │   │   ├── config.py              # App settings (pydantic-settings)
@@ -933,12 +937,12 @@ etl-core/
 │       ├── matching.py            # Spatial + fuzzy matching utilities
 │       └── warehouse.py           # DuckDB BaseWarehouse class
 │
-├── src_api/                       # FastAPI REST API (separated)
+├── src/api/                       # FastAPI REST API (separated)
 │   ├── __init__.py
 │   ├── main.py                    # FastAPI app with lifespan, CORS
 │   └── schemas.py                 # Pydantic request/response models
 │
-├── src_metadata/                  # Metadata tracking service (separated)
+├── src/meta/                  # Metadata tracking service (separated)
 │   ├── __init__.py
 │   ├── models.py                  # Pydantic models (JobRun, tasks, lineage)
 │   ├── schema.py                  # DDL for metadata.duckdb
@@ -1063,7 +1067,7 @@ docker compose run --rm etl transform --only clee-radio --force
 | `docker compose run --rm tools python -m scripts.smoke_fase3` | Valida la Fase 3 contra Postgres |
 | `docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/` | Lint (`--fix` para corregir, `ruff format` para formatear) |
 
-### Inventario de flags del CLI (`uv run python -m src_etl.main <cmd>`)
+### Inventario de flags del CLI (`uv run python -m src.etl.main <cmd>`)
 
 Todo lo que va dentro de `ARGS="..."`. Los booleanos son flags de Typer
 (`--x/--no-x`); la columna Default dice cómo arranca **sin** pasar nada.
@@ -1335,7 +1339,7 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 
 **Regla:** el contenido de todo catálogo vive en `data/seeds/*.parquet`
 (versionados en git) y en ningún otro lado. NO hay enums de Python que lo
-dupliquen — `src_etl/db/enums.py` se eliminó justamente por eso: los mismos
+dupliquen — `src/etl/db/enums.py` se eliminó justamente por eso: los mismos
 valores existían como enum, como parquet generado desde el enum, y como
 lista `DOMAIN_CATALOGS` contra la que validaba el ingest, así que dar de
 alta una etiqueta nueva de INEGI obligaba a tocar código.
@@ -1526,7 +1530,7 @@ después. Con ellos se fue la maquinaria que esas conversiones exigían
 (capturar y recrear índices, commits intermedios a nivel DBAPI, tipos ENUM
 fantasma).
 
-El esquema se genera desde `src_etl.db.models` (metadata del ORM), así que
+El esquema se genera desde `src.etl.db.models` (metadata del ORM), así que
 **la migración no puede desincronizarse del modelo**.
 
 **Al consolidar se verificó** que la cadena nueva produce exactamente el
@@ -1627,8 +1631,8 @@ TEST_DB_PATH=data/mipymes_warehouse_most_recent.db
 ### MetadataTracker Usage
 
 ```python
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import JobStatus, TaskStatus
+from src.meta.tracker import MetadataTracker
+from src.meta.models import JobStatus, TaskStatus
 
 tracker = MetadataTracker(Path("data/metadata.duckdb"))
 
@@ -1734,12 +1738,12 @@ import polars as pl
 from pydantic import BaseModel
 
 # Local - ETL
-from src_etl.core.config import settings
-from src_etl.transformers.denue import DenuePipelineOrchestrator
+from src.etl.core.config import settings
+from src.etl.transformers.denue import DenuePipelineOrchestrator
 
 # Local - Metadata
-from src_metadata.tracker import MetadataTracker
-from src_metadata.models import JobStatus
+from src.meta.tracker import MetadataTracker
+from src.meta.models import JobStatus
 ```
 
 ---

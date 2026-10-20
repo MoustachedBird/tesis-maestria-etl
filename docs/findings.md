@@ -645,7 +645,7 @@ T = C : 'INNOVARE'
 
 ### La causa: `break` en el primer match, sin comparar scores
 
-`src_etl/utils/entity_resolution.py:215-221`, dentro del loop de vecinos:
+`src/etl/utils/entity_resolution.py:215-221`, dentro del loop de vecinos:
 
 ```python
 if is_match:

@@ -23,8 +23,8 @@ import duckdb
 
 from src.etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
 from src.etl.utils.warehouse import connect_configured, load_h3_extension
-from src.meta.models import JobStatus, TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
 _LOG_FILE = Path("./data/etl_h3_backfill.log")

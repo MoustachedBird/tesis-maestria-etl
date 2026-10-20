@@ -40,8 +40,8 @@ from src.etl.utils.entity_resolution import (
 )
 from src.etl.utils.matching import clean_contact_columns
 from src.etl.utils.warehouse import connect_configured, get_distinct_periods
-from src.meta.models import JobStatus, TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
 _LOG_FILE_TEMPLATE = "./data/etl_clee_resolution_{method}.log"

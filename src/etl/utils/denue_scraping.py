@@ -14,8 +14,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from src.meta.models import TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.enums import TaskStatus
 
 
 def clean_filename(text: str) -> str:

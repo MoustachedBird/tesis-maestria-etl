@@ -30,9 +30,9 @@ import truststore
 
 from src.etl.core.download_config import DownloadConfig
 from src.etl.utils.downloader import Downloader
-from src.meta.models import TaskStatus
 from src.meta.tracker import MetadataTracker
 from src.shared.config import settings
+from src.shared.enums import TaskStatus
 from src.shared.logging import PipelineLogger
 
 # datos.gob.mx sirve una cadena TLS incompleta (falta el intermedio): la
@@ -219,7 +219,7 @@ class SesnspExtractor:
 
         except Exception as e:
             log.error("sesnsp_extract_failed", error=str(e))
-            from src.meta.models import JobStatus
+            from src.shared.enums import JobStatus
 
             self.tracker.complete_run(self.run_id, JobStatus.FAILED, error_summary=str(e))
             raise

@@ -15,8 +15,8 @@ from pathlib import Path
 import duckdb
 
 from src.etl.utils.warehouse import connect_configured, get_distinct_periods
-from src.meta.models import JobStatus, TaskStatus
 from src.meta.tracker import MetadataTracker
+from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import get_stage_logger
 
 # Logging de stage centralizado (sin basicConfig: no toca el root logger)

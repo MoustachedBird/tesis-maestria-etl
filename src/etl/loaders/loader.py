@@ -10,9 +10,9 @@ import logging
 import shutil
 from pathlib import Path
 
-from src.meta.models import JobStatus, TaskStatus
 from src.meta.tracker import MetadataTracker
 from src.shared.config import settings
+from src.shared.enums import JobStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 
