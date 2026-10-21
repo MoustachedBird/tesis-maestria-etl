@@ -35,10 +35,14 @@ docker compose down -v
 docker run --rm --entrypoint sh -v "$PWD:/w" -w /w python:3.12-slim -c \
   'rm -rf logs/downloads data/bronze extract.log ingest.log clee.log htmlcov coverage.xml'
 git pull
-docker compose build
+docker compose --profile manual --profile tools build
 docker compose up -d
 docker compose logs migrate --no-log-prefix | tail -20
 ```
+
+`--profile manual --profile tools` no es opcional: `docker compose build`
+sin ellos salta los servicios que viven bajo profile, y `etl` es uno. Se
+queda con la imagen vieja sin avisar.
 
 Lo que escribieron corridas anteriores quedó con dueño root. El contenedor
 de arriba sí es root, así que borra sin `sudo`. A partir de este arranque

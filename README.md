@@ -17,7 +17,7 @@ interfaz. Lo único que hace falta en la máquina es Docker y git.
 git clone <url> && cd etl-core
 cp .env.example .env     # y poner POSTGRES_PASSWORD y POSTGRES_RO_PASSWORD
 
-docker compose build
+docker compose --profile manual --profile tools build
 docker compose up -d     # Postgres → migraciones → API
 ```
 

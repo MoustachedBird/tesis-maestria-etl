@@ -8,7 +8,8 @@
 # números de una máquina aquí.
 #
 # ── Levantar el stack ───────────────────────────────────────────────────────
-#   docker compose build                 # construye las imágenes
+#   docker compose --profile manual --profile tools build   # TODAS las imágenes
+#                                        (sin los profiles, `etl` se salta)
 #   docker compose up -d                 # Postgres + migraciones. Base lista.
 #   docker compose down                  # detiene (conserva los datos)
 #   docker compose down -v               # BORRA el volumen de datos
