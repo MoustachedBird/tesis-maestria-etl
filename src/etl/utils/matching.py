@@ -58,8 +58,8 @@ def clean_contact_columns(df: pl.DataFrame) -> pl.DataFrame:
     """
     Normaliza campos de contacto para comparacion exacta en el matching.
 
-    Punto UNICO de sanitizacion pre-matching (antes estaba repartida en
-    3 lugares: aqui, _load_period y build_single_period_kb):
+    Punto UNICO de sanitizacion pre-matching; `_load_period` y
+    `build_single_period_kb` dependen de que pase por aqui:
       1. Rellena con "" los nulos de TODAS las columnas de texto del
          matching (TEXT_COLS_TO_SANITIZE) presentes en el DataFrame
          (datos de encuesta: cualquier campo puede venir vacio).

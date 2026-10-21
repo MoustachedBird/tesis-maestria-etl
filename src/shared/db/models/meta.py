@@ -8,16 +8,16 @@ JOIN con los datos que describe (`meta.process_tasks` →
 `silver.establecimientos` por periodo), que es la razón de fondo para no
 tener una base de metadatos aparte.
 
-Dos propiedades que el esquema anterior no podía dar:
+Dos propiedades que el esquema sostiene por si mismo:
 
 **Las FKs son reales.** Cada tabla de tareas referencia su `job_runs.run_id`
 con `ON DELETE CASCADE`, así que borrar una corrida se lleva sus tareas y su
-linaje en vez de dejar huérfanos que nadie detecta. Antes la integridad se
-sostenía desde la aplicación, por una limitación del motor que ya no aplica.
+linaje en vez de dejar huérfanos que nadie detecta: la integridad la impone
+el motor, no la aplicación.
 
 **Los estados son enums de Python, no VARCHAR libres.** Se guardan como
-texto (los valores de `JobStatus`/`TaskStatus`, idénticos a los de hoy) pero
-el tipo los valida al escribir. Un `status='FINISHED'` deja de ser posible.
+texto (los valores de `JobStatus`/`TaskStatus`) pero el tipo los valida al
+escribir, así que un `status='FINISHED'` es imposible.
 """
 
 from datetime import date, datetime

@@ -12,7 +12,7 @@ console = Console()
 
 # Project paths
 # parents[2] y no [1]: este modulo vive en src/etl/, asi que la raiz del
-# proyecto esta dos niveles arriba (antes era src_etl/ y bastaba con uno).
+# proyecto esta dos niveles arriba.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = PROJECT_ROOT / "data"
 BRONZE_DIR = DATA_ROOT / "bronze" / "denue"
@@ -276,7 +276,7 @@ def transform(
     DENUE sub-steps (ordered): ingest -> clee-resolution-radio ->
     clee-resolution-h3, each gated by its flag (--no-denue skips the whole
     DENUE block). El ingest deriva la fecha y las celdas H3 en vuelo, asi
-    que ya no hay pasos sueltos para eso.
+    que no hay pasos sueltos para eso.
     SESNSP: CSV consolidado -> sesnsp_incidencia_municipal (--no-sesnsp skips).
     """
     selected = _expand_only(only)

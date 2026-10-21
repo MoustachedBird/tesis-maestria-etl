@@ -8,17 +8,16 @@ class Section(StrEnum):
     de grupo que se expanden a varias secciones atómicas. ``load`` solo
     aplica al comando ``pipeline`` (``transform`` y ``extract`` lo ignoran).
 
-    Vive en `shared` —antes era un enum local de `src/etl/main.py`— porque el
-    scheduler necesita nombrar qué sección corre en cada tick y el API las
-    valida al encolar en `meta.run_requests`; ninguno de los dos debe
-    importar del CLI del ETL.
+    Vive en `shared`, no en el CLI del ETL, porque el scheduler necesita
+    nombrar qué sección corre en cada tick y el API las valida al encolar en
+    `meta.run_requests`; ninguno de los dos debe importar del CLI.
 
     Los valores llevan guion (``normalize-dates``) porque son exactamente lo
     que el usuario teclea en la línea de comandos.
 
-    ``normalize-dates`` y ``h3-cells`` ya no existen: el ingest deriva la
-    fecha y las celdas H3 antes del ``COPY`` (ver `transformers/enrich.py`),
-    así que no quedan pasos sueltos que ejecutar.
+    No hay secciones para la fecha ni para las celdas H3: el ingest las
+    deriva antes del ``COPY`` (ver `transformers/enrich.py`), así que no son
+    pasos ejecutables por separado.
     """
 
     ingest = "ingest"

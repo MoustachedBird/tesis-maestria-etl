@@ -132,11 +132,10 @@ def scrape_denue_table(
 
     try:
         # Get existing successful downloads from metadata (only for normal mode).
-        # Cruza TODOS los runs: el run en curso todavia no tiene tareas
-        # cuando se raspa la tabla, asi que filtrar por el (como se hacia
-        # antes) dejaba el set vacio y mandaba cada archivo ya descargado a
-        # la rama de "sync desde disco", que crea un registro SUCCESS nuevo
-        # por corrida -- 943 registros para 484 archivos reales.
+        # Cruza TODOS los runs, no solo el actual: al momento del scrape el
+        # run en curso no tiene tareas, asi que filtrar por el daria un set
+        # vacio y mandaria cada archivo ya descargado a la rama de "sync
+        # desde disco", que crea un registro SUCCESS nuevo por corrida.
         existing_urls = set()
         if not force:
             existing_urls = tracker.get_successful_download_urls()

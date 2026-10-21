@@ -1,10 +1,10 @@
 """Derivaciones que el ingest calcula en vuelo, sobre el DataFrame.
 
-Antes eran dos etapas aparte que hacian `UPDATE` sobre la tabla ya cargada:
-una para la fecha y otra para las celdas H3. Sobre 82.9M filas eso es
-reescribir la tabla dos veces despues de haberla escrito una. Calcularlas
-aqui --cuando los datos todavia estan en memoria, antes del `COPY`-- las
-vuelve gratis: el ingest las lleva ya puestas y las etapas desaparecen.
+La fecha y las celdas H3 se calculan aqui, con los datos todavia en memoria
+y antes del `COPY`, en lugar de con un `UPDATE` sobre la tabla ya cargada:
+sobre 82.9M filas un UPDATE equivale a reescribir la tabla despues de
+haberla escrito. Calculadas en vuelo salen gratis y el ingest las lleva ya
+puestas.
 
 Son funciones puras sobre DataFrames de Polars: no abren conexion, no leen
 configuracion y no registran nada. Eso las hace probables sin servidor, que
