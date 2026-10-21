@@ -5,17 +5,43 @@ Scrapes the INEGI DENUE download page and synchronizes with metadata database.
 """
 
 import re
-import time
 import unicodedata
 from pathlib import Path
 
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.meta.tracker import MetadataTracker
+from src.shared.config import settings
 from src.shared.enums import TaskStatus
+
+TABLE_ID = "tblDescargaArchivos_denue"
+"""ID de la tabla de descargas en la pagina de INEGI."""
+
+ZIP_LINK_RE = re.compile(r"csv\.zip")
+"""Patron de los enlaces de descarga; filas sin esto no son descargables."""
+
+
+class ScrapeIncompleteError(RuntimeError):
+    """
+    La tabla de INEGI no entrego el catalogo completo.
+
+    Se levanta cuando la tabla no alcanza `DENUE_SCRAPE_MIN_LINKS` enlaces
+    .zip dentro del timeout. Es un error explicito a proposito: devolver una
+    lista vacia hacia que el job cerrara como SUCCESS con 0 tareas y la base
+    registrara una corrida limpia con 484 archivos sin descargar.
+    """
+
+
+def _count_zip_links(driver) -> int:
+    """
+    Cuenta los enlaces .zip presentes en la tabla en este instante.
+
+    Se usa como condicion de espera: mide poblacion real de la tabla, no la
+    existencia del elemento, que aparece vacio mucho antes que el AJAX.
+    """
+    return len(driver.find_elements(By.CSS_SELECTOR, f"#{TABLE_ID} tbody a[href*='csv.zip']"))
 
 
 def clean_filename(text: str) -> str:
@@ -72,26 +98,39 @@ def scrape_denue_table(
             2. Return ALL files for re-download (ignore metadata and disk)
     """
     new_tasks = []
-    wait = WebDriverWait(driver, wait_timeout)
     project_root = Path.cwd()
+    min_links = settings.DENUE_SCRAPE_MIN_LINKS
+
+    # Espera por CONTENIDO, no por presencia del elemento: la tabla existe
+    # casi de inmediato con filas placeholder y el catalogo entra despues
+    # por AJAX. El timeout aqui es el tope total de esa espera.
+    print(f"  ... Waiting for table '{TABLE_ID}' to reach {min_links}+ .zip links...")
+    try:
+        WebDriverWait(driver, wait_timeout).until(lambda d: _count_zip_links(d) >= min_links)
+    except Exception as e:
+        found = _count_zip_links(driver)
+        raise ScrapeIncompleteError(
+            f"La tabla de INEGI quedo con {found} enlaces .zip (minimo esperado: "
+            f"{min_links}) tras {wait_timeout}s. La pagina no termino de cargar "
+            f"o cambio de markup; no se descargo nada. Ajusta "
+            f"DENUE_SCRAPE_TIMEOUT_SECONDS / DENUE_SCRAPE_MIN_LINKS si el "
+            f"catalogo de INEGI cambio de tamano."
+        ) from e
+
+    # Parse table
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    table = soup.find("table", id=TABLE_ID)
+
+    if not table or not table.find("tbody"):
+        raise ScrapeIncompleteError(
+            f"La tabla '{TABLE_ID}' no tiene <tbody> en el HTML renderizado; "
+            "INEGI cambio el markup de la pagina de descargas."
+        )
+
+    rows = table.find("tbody").find_all("tr")
+    print(f"  ... Processing {len(rows)} rows from INEGI website")
 
     try:
-        # Wait for table to load
-        print("  ... Waiting for table 'tblDescargaArchivos_denue'...")
-        wait.until(EC.presence_of_element_located((By.ID, "tblDescargaArchivos_denue")))
-        time.sleep(3)  # Allow JS to finish rendering
-
-        # Parse table
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        table = soup.find("table", id="tblDescargaArchivos_denue")
-
-        if not table or not table.find("tbody"):
-            print("❌ Error: Table body not found in HTML")
-            return []
-
-        rows = table.find("tbody").find_all("tr")
-        print(f"  ... Processing {len(rows)} rows from INEGI website")
-
         # Get existing successful downloads from metadata (only for normal mode).
         # Cruza TODOS los runs: el run en curso todavia no tiene tareas
         # cuando se raspa la tabla, asi que filtrar por el (como se hacia
@@ -118,7 +157,7 @@ def scrape_denue_table(
             period = cols[1].get_text(strip=True).replace("/", "_")
 
             # Find ZIP link
-            link_tag = cols[2].find("a", href=re.compile(r"csv\.zip"))
+            link_tag = cols[2].find("a", href=ZIP_LINK_RE)
 
             if link_tag:
                 url = f"{base_url_inegi}{link_tag['href']}"
@@ -198,8 +237,12 @@ def scrape_denue_table(
         return new_tasks
 
     except Exception as e:
+        # Se relanza a proposito: antes se devolvia [] y el job cerraba como
+        # "0 archivos nuevos / SUCCESS", dejando en la base una corrida limpia
+        # con el catalogo entero sin descargar. El extractor es quien marca el
+        # run como FAILED con este mensaje.
         print(f"❌ Fatal error in scraper: {str(e)}")
         import traceback
 
         traceback.print_exc()
-        return []
+        raise

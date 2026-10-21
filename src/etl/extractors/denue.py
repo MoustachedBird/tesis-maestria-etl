@@ -14,7 +14,8 @@ from src.etl.utils.browser import get_chrome_driver
 from src.etl.utils.denue_scraping import scrape_denue_table
 from src.etl.utils.downloader import Downloader
 from src.meta.tracker import MetadataTracker
-from src.shared.enums import TaskStatus
+from src.shared.config import settings
+from src.shared.enums import JobStatus, TaskStatus
 from src.shared.logging import PipelineLogger
 
 
@@ -118,8 +119,12 @@ class DenueExtractor:
             return summary
 
         except Exception as e:
+            # Status explicito: sin tareas creadas, `complete_run` deduciria
+            # SUCCESS (total == 0) y la base registraria como limpia una
+            # corrida que no descargo nada. El error_summary deja el motivo
+            # en job_runs para poder auditarlo sin abrir los logs.
             log.error("download_job_failed", error=str(e))
-            self.tracker.complete_run(self.run_id)
+            self.tracker.complete_run(self.run_id, JobStatus.FAILED, error_summary=str(e))
             raise
 
     def _scrape_download_tasks(self, log) -> list[tuple[str, str, str]]:
@@ -140,7 +145,7 @@ class DenueExtractor:
             driver.get(self.base_url)
             tasks = scrape_denue_table(
                 driver=driver,
-                wait_timeout=30,
+                wait_timeout=settings.DENUE_SCRAPE_TIMEOUT_SECONDS,
                 tracker=self.tracker,
                 run_id=self.run_id,
                 output_dir=self.output_dir,
@@ -188,9 +193,33 @@ class DenueExtractor:
 
             # Sequential downloads (simpler for MVP)
             for task_id, period, activity, url, dest_path in task_mappings:
-                success = self._download_single_task(
-                    task_id, period, activity, url, dest_path, downloader, log
-                )
+                # Ningun archivo puede tumbar los que faltan. `download()` ya
+                # atrapa los fallos de red y devuelve un result, pero el resto
+                # de la tarea (mkdir, escrituras a metadata) si puede levantar,
+                # y un tropiezo en el archivo 89 no debe costar los 395
+                # restantes. El fallo se registra en la base y se sigue.
+                try:
+                    success = self._download_single_task(
+                        task_id, period, activity, url, dest_path, downloader, log
+                    )
+                except Exception as e:
+                    success = False
+                    log.error(
+                        "task_crashed",
+                        task_id=task_id,
+                        activity=activity,
+                        period=period,
+                        error=str(e),
+                    )
+                    try:
+                        self.tracker.complete_task(
+                            task_id=task_id,
+                            status=TaskStatus.FAILED,
+                            error_message=f"Excepcion no controlada: {e}",
+                        )
+                    except Exception as track_error:
+                        # La base tampoco responde: queda en el log y se sigue.
+                        log.error("task_status_unrecorded", task_id=task_id, error=str(track_error))
 
                 status_icon = "✅" if success else "❌"
                 progress.console.print(f"  {status_icon} {activity}.zip")

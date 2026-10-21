@@ -1616,6 +1616,13 @@ API_TITLE=DENUE ETL API
 API_VERSION=0.1.0
 API_PREFIX=/api/v1
 
+# DENUE scraping: la espera a la tabla de INEGI es por CONTENIDO (filas con
+# enlace .zip), no por presencia del elemento. Si no junta MIN_LINKS dentro
+# del timeout se levanta ScrapeIncompleteError y el run queda FAILED en
+# meta.job_runs; antes devolvia [] y cerraba como SUCCESS con 0 tareas.
+DENUE_SCRAPE_TIMEOUT_SECONDS=120
+DENUE_SCRAPE_MIN_LINKS=100
+
 # SESNSP (crime incidence, ver seccion SESNSP arriba)
 SESNSP_CKAN_PACKAGE_URL=https://www.datos.gob.mx/api/3/action/package_show?id=incidencia_delictiva
 SESNSP_RESOURCE_NAME=Incidencia delictiva municipal

@@ -43,23 +43,36 @@ def _expand_only(only: list[Section] | None) -> set[Section] | None:
 # ---------------------------------------------------------------------------
 # SHARED STEP HELPERS (reused by extract / transform / pipeline)
 # ---------------------------------------------------------------------------
-def _run_denue_extract(*, headless: bool, output: Path | None, force: bool) -> None:
+def _failed_tasks(summary: dict | None) -> int:
+    """
+    Tareas fallidas segun el resumen de una corrida.
+
+    Los extractores no siempre levantan excepcion cuando una descarga falla
+    (registran la tarea como FAILED y siguen), asi que el exit code del
+    comando se decide con esto y no solo con el try/except.
+    """
+    return int((summary or {}).get("actual_failed", 0) or 0)
+
+
+def _run_denue_extract(*, headless: bool, output: Path | None, force: bool) -> int:
     """Download the DENUE Bronze layer via Selenium into `output` (or BRONZE_DIR)."""
     denue_output = output or BRONZE_DIR
     console.print("[bold green]Starting DENUE Extractor[/bold green]")
     console.print(f"   Output: {denue_output}")
     console.print(f"   Headless: {headless}")
-    DenueExtractor(output_dir=denue_output, headless=headless, force=force).download_all()
+    summary = DenueExtractor(output_dir=denue_output, headless=headless, force=force).download_all()
+    return _failed_tasks(summary)
 
 
-def _run_sesnsp_extract(*, force: bool) -> None:
+def _run_sesnsp_extract(*, force: bool) -> int:
     """Download the SESNSP crime CSV (CKAN) into data/bronze/sesnsp/."""
     from src.etl.extractors.sesnsp import SesnspExtractor
 
     sesnsp_output = DATA_ROOT / "bronze" / "sesnsp"
     console.print("[bold green]Starting SESNSP Extractor[/bold green]")
     console.print(f"   Output: {sesnsp_output}")
-    SesnspExtractor(output_dir=sesnsp_output, force=force).download_all()
+    summary = SesnspExtractor(output_dir=sesnsp_output, force=force).download_all()
+    return _failed_tasks(summary)
 
 
 def _run_denue_transform(
@@ -133,11 +146,38 @@ def extract(
     if force:
         console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
+    # Cada fuente corre aislada: un fallo se reporta y la siguiente sigue su
+    # curso. Antes la excepcion de una abortaba el comando y se perdian las
+    # fuentes pendientes. El detalle queda en `meta.job_runs` (los extractores
+    # cierran su run como FAILED con error_summary); aqui solo se resume y se
+    # devuelve un exit code distinto de cero para que el scheduler lo note.
+    failures: list[str] = []
+
     if denue:
-        _run_denue_extract(headless=headless, output=output, force=force)
+        try:
+            failed = _run_denue_extract(headless=headless, output=output, force=force)
+            if failed:
+                failures.append(f"denue: {failed} archivo(s) con error")
+        except Exception as e:
+            failures.append(f"denue: {e}")
+            console.print(f"[bold red]✗ DENUE falló:[/bold red] {escape(str(e))}")
 
     if sesnsp:
-        _run_sesnsp_extract(force=force)
+        try:
+            failed = _run_sesnsp_extract(force=force)
+            if failed:
+                failures.append(f"sesnsp: {failed} archivo(s) con error")
+        except Exception as e:
+            failures.append(f"sesnsp: {e}")
+            console.print(f"[bold red]✗ SESNSP falló:[/bold red] {escape(str(e))}")
+
+    if failures:
+        console.print(
+            f"\n[bold red]Extract terminó con {len(failures)} fuente(s) fallida(s):"
+            f"[/bold red] {escape(', '.join(f.split(':')[0] for f in failures))}"
+        )
+        console.print("[dim]Detalle en meta.job_runs (status=FAILED, error_summary).[/dim]")
+        raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +211,9 @@ def sync_bronze_cmd(
         raise typer.Exit(code=1)
 
     if not registrados:
-        console.print("[bold green]Nada nuevo: todo lo de Bronze ya estaba registrado.[/bold green]")
+        console.print(
+            "[bold green]Nada nuevo: todo lo de Bronze ya estaba registrado.[/bold green]"
+        )
         return
 
     for period, archivos in sorted(registrados.items()):
