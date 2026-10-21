@@ -31,14 +31,16 @@ La API queda en `http://localhost:8000/docs`.
 
 ```bash
 # ETL (one-shot)
+docker compose run --rm etl sync-bronze                  # registra un Bronze copiado
 docker compose run --rm etl extract                      # → Bronze
 docker compose run --rm etl transform                    # Bronze → Silver
 docker compose run --rm etl transform --only clee-radio  # aislar un paso
+docker compose run --rm etl transform --period 03_2018   # aislar un corte
 docker compose run --rm etl pipeline                     # todo
 
 # Herramientas (one-shot)
 docker compose run --rm tools pytest
-docker compose run --rm tools python -m scripts.smoke_fase3
+docker compose run --rm tools pytest -m postgres
 docker compose run --rm tools alembic current --verbose
 docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/
 

@@ -1030,8 +1030,9 @@ docker compose run --rm etl transform --only clee-radio --force
 
 | Comando | Notas |
 |---|---|
+| `docker compose run --rm etl sync-bronze` | Registra en metadata un Bronze que llegó por copia; idempotente |
 | `docker compose run --rm etl extract` | DENUE (Selenium) + SESNSP (CKAN) → Bronze |
-| `docker compose run --rm etl transform` | 5 sub-pasos DENUE + SESNSP → Silver |
+| `docker compose run --rm etl transform` | DENUE + SESNSP → Silver. `--period 03_2018` carga un corte solo |
 | `docker compose run --rm etl load` | Silver → Gold (solo acepta `--force`) |
 | `docker compose run --rm etl pipeline` | `[Extract →] Transform → Load` |
 | `docker compose run --rm etl build-entidades` | Dimensión N3; correr DESPUÉS de la resolución CLEE |
@@ -1064,7 +1065,7 @@ docker compose run --rm etl transform --only clee-radio --force
 | `docker compose run --rm tools pytest -m unit` | Solo unitarios (`-m integration`, `-m db` análogos) |
 | `docker compose run --rm tools pytest -m postgres` | Los que exigen servidor; se saltan solos sin él |
 | `docker compose run --rm tools pytest --cov=src --cov-report=html` | Coverage → `htmlcov/index.html` |
-| `docker compose run --rm tools python -m scripts.smoke_fase3` | Valida la Fase 3 contra Postgres |
+| `docker compose run --rm tools pytest -m postgres` | Solo lo que exige servidor |
 | `docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/` | Lint (`--fix` para corregir, `ruff format` para formatear) |
 
 ### Inventario de flags del CLI (`uv run python -m src.etl.main <cmd>`)
