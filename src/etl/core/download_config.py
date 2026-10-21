@@ -74,6 +74,29 @@ class DownloadConfig(BaseSettings):
         le=60,
     )
 
+    # Tope TOTAL de una descarga, de la primera a la ultima byte.
+    #
+    # `timeout_seconds` se le pasa a requests como read timeout, y ese reloj
+    # se reinicia con cada chunk que llega: un servidor que gotea unos bytes
+    # cada pocos segundos lo mantiene vivo indefinidamente y `iter_content`
+    # se queda colgado sin log ni reintento (el job entero muere sin ruido).
+    # Este tope es independiente del ritmo de llegada y corta esa clase de
+    # cuelgue. Al dispararse levanta Timeout, que SI es retryable, asi que
+    # el archivo se reintenta con backoff y, si no cede, queda FAILED en
+    # metadata y lo recoge la siguiente corrida.
+    #
+    # Dimensionado contra lo observado: el ZIP mas grande de DENUE ronda los
+    # 60 MB y baja en ~36 s a 12-17 Mbps. 900 s equivalen a exigir ~0.53
+    # Mbps sostenidos en ese archivo -- holgura de mas de 20x sobre la
+    # velocidad real, asi que no corta descargas sanas ni en una red mala.
+    # Subirlo si alguna fuente publica archivos mucho mas grandes.
+    max_download_seconds: int = Field(
+        default=900,
+        description="Tope total por descarga en segundos, sin importar el ritmo de los chunks",
+        ge=30,
+        le=86_400,
+    )
+
     # Performance configuration
     chunk_size_bytes: int = Field(
         default=8192,

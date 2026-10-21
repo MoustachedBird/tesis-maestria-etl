@@ -215,3 +215,85 @@ class TestDownloaderErrorClassification:
         exc.response = None
         error_type, msg = d._classify_error(exc)
         assert error_type == ErrorType.NETWORK_ERROR
+
+
+@pytest.mark.unit
+class TestDownloadDeadline:
+    """Tope total de una descarga (`max_download_seconds`).
+
+    El read timeout de requests se reinicia con cada chunk, asi que un
+    servidor que gotea datos lo mantiene vivo para siempre y `iter_content`
+    se cuelga sin log ni reintento. Estos tests cubren el tope que si corta.
+    """
+
+    @staticmethod
+    def _config(tmp_path, **overrides) -> DownloadConfig:
+        """Config con reintentos apagados: los retries duermen 60s+."""
+        return DownloadConfig(
+            download_directory=tmp_path / "downloads",
+            log_directory=tmp_path / "logs",
+            max_retries=0,
+            validate_downloads=False,
+            **overrides,
+        )
+
+    @staticmethod
+    def _fake_response(chunks: list[bytes]) -> MagicMock:
+        """Respuesta de streaming que entrega `chunks` sin tocar la red."""
+        response = MagicMock()
+        response.headers = {"content-length": str(sum(len(c) for c in chunks))}
+        response.iter_content.return_value = iter(chunks)
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_goteo_se_corta_al_llegar_al_tope(self, tmp_path, monkeypatch):
+        """Un servidor lento indefinidamente ya no cuelga la descarga.
+
+        Se simula avanzando el reloj monotonico: la primera lectura fija el
+        deadline y la siguiente ya lo rebasa, como pasaria tras 900 s de
+        goteo real.
+        """
+        downloader = Downloader(config=self._config(tmp_path, max_download_seconds=900))
+        downloader.session.get = MagicMock(return_value=self._fake_response([b"a" * 64] * 5))
+
+        clock = iter([0.0, 1000.0, 1000.0, 1000.0])
+        monkeypatch.setattr("src.etl.utils.downloader.time.monotonic", lambda: next(clock, 1000.0))
+
+        result = downloader.download(
+            url="https://inegi.test/lento.zip", target_path=tmp_path / "lento.zip"
+        )
+
+        assert result.success is False
+        assert result.error_type == ErrorType.HTTP_TIMEOUT
+        assert "tope total" in result.error_message
+        assert not (tmp_path / "lento.zip").exists(), "no se publica un archivo incompleto"
+
+    def test_descarga_normal_no_se_corta(self, tmp_path):
+        """Con reloj real, una descarga que termina rapido pasa intacta."""
+        chunks = [b"z" * 1024] * 8
+        downloader = Downloader(config=self._config(tmp_path, max_download_seconds=30))
+        downloader.session.get = MagicMock(return_value=self._fake_response(chunks))
+
+        target = tmp_path / "rapido.zip"
+        result = downloader.download(url="https://inegi.test/rapido.zip", target_path=target)
+
+        assert result.success is True
+        assert result.size_bytes == sum(len(c) for c in chunks)
+        assert target.read_bytes() == b"".join(chunks)
+
+    def test_el_tope_es_configurable_por_entorno(self, tmp_path, monkeypatch):
+        """Viene de DOWNLOAD_MAX_DOWNLOAD_SECONDS, no hardcodeado."""
+        monkeypatch.setenv("DOWNLOAD_MAX_DOWNLOAD_SECONDS", "45")
+        config = DownloadConfig(
+            download_directory=tmp_path / "downloads",
+            log_directory=tmp_path / "logs",
+        )
+        assert config.max_download_seconds == 45
+
+    def test_default_del_tope(self, tmp_path):
+        """900 s: ~0.53 Mbps sostenidos en el ZIP mas grande de DENUE (60 MB)."""
+        config = DownloadConfig(
+            download_directory=tmp_path / "downloads",
+            log_directory=tmp_path / "logs",
+        )
+        assert config.max_download_seconds == 900

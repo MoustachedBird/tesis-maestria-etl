@@ -1616,6 +1616,13 @@ API_TITLE=DENUE ETL API
 API_VERSION=0.1.0
 API_PREFIX=/api/v1
 
+# Descargas: DOWNLOAD_TIMEOUT_SECONDS es el read timeout de requests y su
+# reloj se reinicia con cada chunk, asi que no acota la duracion total. El
+# tope real lo pone DOWNLOAD_MAX_DOWNLOAD_SECONDS (levanta Timeout, que es
+# retryable). Las descargas son secuenciales por decision: no hay variable
+# de paralelismo y no se va a agregar.
+DOWNLOAD_MAX_DOWNLOAD_SECONDS=900
+
 # DENUE scraping: la espera a la tabla de INEGI es por CONTENIDO (filas con
 # enlace .zip), no por presencia del elemento. Si no junta MIN_LINKS dentro
 # del timeout se levanta ScrapeIncompleteError y el run queda FAILED en

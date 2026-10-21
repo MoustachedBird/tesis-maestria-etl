@@ -346,6 +346,11 @@ class Downloader:
         # Get total size from headers
         total_size = int(response.headers.get("content-length", 0))
 
+        # Tope total de la transferencia. El read timeout que lleva la
+        # request se reinicia con cada chunk, asi que por si solo no acota
+        # nada frente a un servidor que gotea: este deadline si.
+        deadline = time.monotonic() + self.config.max_download_seconds
+
         # Download in chunks
         downloaded = 0
         with open(temp_path, "wb") as f:
@@ -353,6 +358,19 @@ class Downloader:
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
+
+                    if time.monotonic() > deadline:
+                        # Timeout y no otra excepcion: es la clase que
+                        # `_download_with_retry` reintenta con backoff.
+                        response.close()
+                        raise requests.exceptions.Timeout(
+                            f"Descarga abortada tras {self.config.max_download_seconds}s "
+                            f"(tope total): {downloaded} de "
+                            f"{total_size or 'tamano desconocido'} bytes. El servidor "
+                            f"sigue enviando datos pero demasiado lento; sube "
+                            f"DOWNLOAD_MAX_DOWNLOAD_SECONDS si el archivo es legitimamente "
+                            f"asi de grande."
+                        )
 
                     # Call progress callback
                     if progress_callback:
