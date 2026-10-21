@@ -129,6 +129,12 @@ services:
 
     command: ["alembic", "upgrade", "head"]
 
+    # Los contenedores escriben en bind mounts (logs/, data/). Sin esto
+    # corren como root y lo que escriben queda con dueno root: el usuario
+    # del host no puede borrar sus propios logs sin sudo. UID/GID salen del
+    # .env para no fijar los de una maquina.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     volumes:
       - ./src:/app/src
       - ./alembic:/app/alembic
@@ -161,6 +167,12 @@ services:
       # Bronze y los seeds entran por aquí; Silver y Gold ya viven en la base.
       - ./data:/app/data
       - ./logs:/app/logs
+
+    # Los contenedores escriben en bind mounts (logs/, data/). Sin esto
+    # corren como root y lo que escriben queda con dueno root: el usuario
+    # del host no puede borrar sus propios logs sin sudo. UID/GID salen del
+    # .env para no fijar los de una maquina.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
 
     # Chromium (scraping de DENUE) se cae en Docker sin memoria compartida.
     shm_size: ${ETL_SHM_SIZE:-2gb}
@@ -218,6 +230,12 @@ services:
       - ./alembic.ini:/app/alembic.ini:ro
       - ./.coveragerc:/app/.coveragerc:ro
       - ./pyproject.toml:/app/pyproject.toml:ro
+
+    # Los contenedores escriben en bind mounts (logs/, data/). Sin esto
+    # corren como root y lo que escriben queda con dueno root: el usuario
+    # del host no puede borrar sus propios logs sin sudo. UID/GID salen del
+    # .env para no fijar los de una maquina.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
 
     deploy:
       resources:

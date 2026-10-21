@@ -15,6 +15,13 @@ FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# `uv run` revisa el entorno y lo sincroniza antes de ejecutar. Dentro de un
+# contenedor eso es trabajo perdido --el venv ya quedo resuelto en el build--
+# y rompe en cuanto el contenedor no corre como root: el venv es de root y el
+# proceso no puede escribirlo. Se veia como "Installed 6 packages" en CADA
+# invocacion; eran las dependencias de desarrollo que la etapa `etl` no
+# instala a proposito y que `uv run` reponia al vuelo.
+ENV UV_NO_SYNC=1
 
 WORKDIR /app
 
