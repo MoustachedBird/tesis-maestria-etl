@@ -116,14 +116,12 @@ class TestDownloaderInit:
     def test_repr(self, tmp_path):
         config = DownloadConfig(
             max_retries=5,
-            max_parallel_downloads=2,
             download_directory=tmp_path / "downloads",
             log_directory=tmp_path / "logs",
         )
         downloader = Downloader(config=config)
         r = repr(downloader)
         assert "max_retries=5" in r
-        assert "parallel=2" in r
 
 
 @pytest.mark.unit

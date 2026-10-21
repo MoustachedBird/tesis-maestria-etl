@@ -7,12 +7,10 @@ Provides reusable download functionality with:
 - Progress callback support (Rich progress bars)
 - Automatic validation
 - Error classification
-- Parallel batch downloads
 """
 
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -96,7 +94,6 @@ class Downloader:
     - Progress callbacks for UI updates
     - File validation (hash, size, ZIP integrity)
     - Error classification for retry logic
-    - Parallel batch downloads
 
     Example:
         >>> config = DownloadConfig(max_retries=3)
@@ -412,60 +409,6 @@ class Downloader:
         # Unknown errors
         return (ErrorType.UNKNOWN, f"Unexpected error: {error_message}")
 
-    def download_batch(
-        self,
-        downloads: list[dict[str, Any]],
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[DownloadResult]:
-        """
-        Download multiple files in parallel.
-
-        Args:
-            downloads: List of download specs, each with:
-                - url: str
-                - target_path: Path
-                - expected_size_bytes: Optional[int]
-                - expected_hash: Optional[str]
-            progress_callback: Overall progress callback(completed, total)
-
-        Returns:
-            List of DownloadResults
-
-        Example:
-            >>> downloads = [
-            ...     {"url": "https://example.com/1.zip", "target_path": Path("1.zip")},
-            ...     {"url": "https://example.com/2.zip", "target_path": Path("2.zip")},
-            ... ]
-            >>> results = downloader.download_batch(downloads)
-        """
-        results = []
-        completed = 0
-        total = len(downloads)
-
-        with ThreadPoolExecutor(max_workers=self.config.max_parallel_downloads) as executor:
-            # Submit all downloads
-            future_to_download = {
-                executor.submit(
-                    self.download,
-                    url=d["url"],
-                    target_path=d["target_path"],
-                    expected_size_bytes=d.get("expected_size_bytes"),
-                    expected_hash=d.get("expected_hash"),
-                ): d
-                for d in downloads
-            }
-
-            # Process completed downloads
-            for future in as_completed(future_to_download):
-                result = future.result()
-                results.append(result)
-                completed += 1
-
-                if progress_callback:
-                    progress_callback(completed, total)
-
-        return results
-
     def close(self):
         """Close HTTP session."""
         self.session.close()
@@ -480,4 +423,4 @@ class Downloader:
 
     def __repr__(self) -> str:
         """String representation."""
-        return f"Downloader(max_retries={self.config.max_retries}, parallel={self.config.max_parallel_downloads})"
+        return f"Downloader(max_retries={self.config.max_retries})"

@@ -436,7 +436,7 @@ donde la paralelización NO es posible (con la razón).
 
 | Etapa | Paralelismo hoy | Estado |
 |-------|-----------------|--------|
-| Extract (descargas) | 3 descargas concurrentes (`max_parallel_downloads`) | ✅ OK — network-bound, más concurrencia no ayuda |
+| Extract (descargas) | Secuencial | ✅ OK — el cuello es el servidor de INEGI, que castiga la concurrencia: paralelizar sería más lento. Opción descartada, no pendiente |
 | Extract (scraping Selenium) | Secuencial | ⛔ No paralelizable (ver abajo) |
 | Ingest (ZIP→Silver) | Polars `read_csv` multihilo interno; loop de archivos secuencial | ✅ Aceptable — el parseo (lo caro) usa todos los cores; el INSERT es single-writer |
 | normalize-dates | UPDATE SQL → paralelismo interno de DuckDB | ✅ OK — DuckDB paraleliza el UPDATE internamente |
@@ -540,12 +540,12 @@ inferior al costo previo de los dicts.
 ## Variables de entorno normalizadas (2026-07-17)
 
 - [x] `extractors/denue.py` hardcodeaba `max_retries=3,
-      max_parallel_downloads=3, timeout_seconds=300` al construir
-      `DownloadConfig`, silenciando las env vars `DOWNLOAD_*`. Corregido:
-      solo fija `download_directory`; el resto viene del entorno.
-- [x] `.env`: `DOWNLOAD_MAX_PARALLEL_DOWNLOADS=3`, `DOWNLOAD_MAX_RETRIES=3`,
-      `DOWNLOAD_TIMEOUT_SECONDS=300` explícitas (mismos valores efectivos
-      que el hardcode — sin cambio de comportamiento).
+      timeout_seconds=300` al construir `DownloadConfig`, silenciando las
+      env vars `DOWNLOAD_*`. Corregido: solo fija `download_directory`; el
+      resto viene del entorno.
+- [x] `.env`: `DOWNLOAD_MAX_RETRIES=3`, `DOWNLOAD_TIMEOUT_SECONDS=300`
+      explícitas (mismos valores efectivos que el hardcode — sin cambio de
+      comportamiento).
 - [x] `.env.example`: todas las variables de recursos documentadas con
       ejemplos simples (qué hace cada una, regla práctica de MATCH_WORKERS,
       knob de RAM de KB_MAX_ROWS_PER_PARTITION, etc.).

@@ -26,13 +26,6 @@ class TestDownloadConfigDefaults:
         )
         assert config.timeout_seconds == 300
 
-    def test_default_parallel_downloads(self, tmp_path):
-        config = DownloadConfig(
-            download_directory=tmp_path / "downloads",
-            log_directory=tmp_path / "logs",
-        )
-        assert config.max_parallel_downloads == 3
-
     def test_default_hash_algorithm(self, tmp_path):
         config = DownloadConfig(
             download_directory=tmp_path / "downloads",

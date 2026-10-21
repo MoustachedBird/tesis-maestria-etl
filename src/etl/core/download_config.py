@@ -75,13 +75,6 @@ class DownloadConfig(BaseSettings):
     )
 
     # Performance configuration
-    max_parallel_downloads: int = Field(
-        default=3,
-        description="Maximum number of concurrent downloads",
-        ge=1,
-        le=10,
-    )
-
     chunk_size_bytes: int = Field(
         default=8192,
         description="Download chunk size in bytes (8KB default)",
@@ -331,7 +324,6 @@ class DownloadConfig(BaseSettings):
         return (
             f"DownloadConfig("
             f"max_retries={self.max_retries}, "
-            f"max_parallel={self.max_parallel_downloads}, "
             f"timeout={self.timeout_seconds}s, "
             f"validate={self.validate_downloads})"
         )
