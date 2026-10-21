@@ -66,7 +66,9 @@ class DenuePipelineOrchestrator:
 
         logger.info("DenuePipelineOrchestrator initialized")
 
-    def run_transform_stage(self, force: bool = False) -> bool:
+    def run_transform_stage(
+        self, force: bool = False, periods: list[str] | None = None
+    ) -> bool:
         """
         Run transform stage: ZIP -> Silver.
 
@@ -74,7 +76,8 @@ class DenuePipelineOrchestrator:
         nueva, con la fecha y las celdas H3 ya derivadas.
 
         Args:
-            force: reconstruir todos los cortes, no solo los pendientes
+            force: reconstruir aunque el corte ya este cargado
+            periods: cortes a procesar; por default, los pendientes
 
         Returns:
             True if successful, False otherwise
@@ -83,7 +86,7 @@ class DenuePipelineOrchestrator:
         logger.info(f"   Mode: {'FORCE (reconstruye todos los cortes)' if force else 'INCREMENTAL'}")
 
         try:
-            success = self.transformer.run(force=force)
+            success = self.transformer.run(force=force, periods=periods)
 
             if success:
                 logger.info("TRANSFORM stage completed successfully")

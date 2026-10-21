@@ -35,6 +35,7 @@ from src.etl.utils.denue_schema import (
     REQUIRED_COLUMNS,
 )
 from src.meta.tracker import MetadataTracker
+from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
 from src.shared.db.partitions import drop_partition, existing_partitions, partition_name
 from src.shared.db.staging import staging_partition
@@ -453,6 +454,20 @@ class BronzeToSilverProcessor:
             return 0
 
         corte = pl.concat(marcos, how="diagonal_relaxed")
+
+        # Deduplicar DESPUES de juntar los archivos, no dentro de cada uno.
+        # `id` es un hash del contenido de la fila, asi que dos ZIP del mismo
+        # corte pueden traer la misma fila --un establecimiento que aparece
+        # en dos cortes sectoriales-- y producir el mismo id. Deduplicar solo
+        # por archivo dejaba pasar esos choques, y ahora que la particion se
+        # carga de una vez, un id repetido rompe la PK y tumba el corte
+        # entero. Antes no se notaba porque el INSERT los ignoraba en
+        # silencio.
+        antes = corte.height
+        corte = corte.unique(subset=["id"], keep="first")
+        if repetidos := antes - corte.height:
+            logger.info(f"   {repetidos:,} filas repetidas entre archivos del corte")
+
         logger.info(f"   {corte.height:,} filas de {len(marcos)} archivos, cargando...")
 
         with self.engine.begin() as conn:
@@ -465,19 +480,38 @@ class BronzeToSilverProcessor:
                 logger.info(f"   la particion de {period} ya existia, se reconstruye")
                 drop_partition(conn, fecha)
 
+            # Solo las columnas que la tabla tiene. La limpieza produce
+            # columnas intermedias --nombres de catalogo resueltos para
+            # validar, por ejemplo-- que no son parte del esquema; mandarlas
+            # al COPY lo hace fallar con "column ... does not exist".
+            del_modelo = [c.name for c in get_table(TARGET_TABLE).columns]
+            columnas = [c for c in del_modelo if c in corte.columns]
+
             with staging_partition(conn, fecha) as destino:
-                copy_dataframe(conn, corte, destino.table, destino.schema)
+                copy_dataframe(
+                    conn, corte, destino.table, destino.schema, columns=columnas
+                )
 
         return corte.height
 
-    def run(self, force: bool = False) -> bool:
-        """Carga los cortes que falten, o todos con `force`.
+    def run(self, force: bool = False, periods: list[str] | None = None) -> bool:
+        """Carga los cortes que falten, o los que se pidan.
+
+        `periods` existe para no estrenar el ingest con los veinte cortes de
+        golpe: cargar uno, revisarlo contra la base y seguir. Un corte que no
+        tenga descargas se reporta en vez de ignorarse en silencio -- casi
+        siempre es un nombre mal escrito.
 
         Args:
-            force: reconstruir todos los cortes, no solo los pendientes.
+            force: reconstruir aunque el corte ya este cargado.
+            periods: cortes a procesar (p. ej. ["03_2018"]); por default,
+                los que tengan trabajo pendiente.
 
         Returns:
             bool: True si ningun corte fallo.
+
+        Raises:
+            ValueError: si algun corte pedido no tiene descargas.
         """
         run_id = self.tracker.create_run(
             job_name="denue_transform", job_type="TRANSFORM", trigger_type="MANUAL"
@@ -490,7 +524,16 @@ class BronzeToSilverProcessor:
             if descarga["period"]:
                 por_corte[descarga["period"]].append(descarga)
 
-        if force:
+        if periods:
+            desconocidos = sorted(set(periods) - por_corte.keys())
+            if desconocidos:
+                raise ValueError(
+                    f"sin descargas para el/los corte(s) {desconocidos}. "
+                    f"Disponibles: {sorted(por_corte)}"
+                )
+            pendientes = sorted(set(periods))
+            logger.info(f"Cortes pedidos explicitamente: {', '.join(pendientes)}")
+        elif force:
             logger.warning("MODO FORCE: se reconstruyen todos los cortes")
             pendientes = sorted(por_corte)
         else:

@@ -68,6 +68,7 @@ def _run_denue_transform(
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
     force: bool,
+    periods: list[str] | None = None,
 ) -> bool:
     """Run the enabled DENUE Bronze->Silver sub-steps in order; return True on success."""
     from src.etl.transformers.denue import DenuePipelineOrchestrator
@@ -77,7 +78,7 @@ def _run_denue_transform(
 
     if ingest:
         console.print("[bold blue]   Running: ingest[/bold blue]")
-        success = transformer.run_transform_stage(force=force)
+        success = transformer.run_transform_stage(force=force, periods=periods)
     if clee_resolution_radio and success:
         console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
         success = transformer.run_clee_resolution_stage(force=force)
@@ -171,6 +172,14 @@ def transform(
             "sesnsp (+ groups denue, clee). Overrides --no-* defaults."
         ),
     ),
+    period: list[str] = typer.Option(
+        None,
+        "--period",
+        help=(
+            "Cargar SOLO estos cortes (repetible), p. ej. --period 03_2018. "
+            "Util para estrenar el ingest con uno antes de soltar los veinte."
+        ),
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
@@ -209,6 +218,7 @@ def transform(
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
                     force=force,
+                    periods=period,
                 )
                 and overall_ok
             )
