@@ -14,13 +14,14 @@
 #   docker compose down -v               # BORRA el volumen de datos
 #
 # ── Pipeline (one-shot, profile `manual`) ───────────────────────────────────
+#   docker compose run --rm etl sync-bronze               # Bronze copiado a mano
 #   docker compose run --rm etl extract
-#   docker compose run --rm etl transform --only clee-radio
+#   docker compose run --rm etl transform --only ingest --period 03_2018
 #   docker compose run --rm etl pipeline
 #
 # ── Herramientas (one-shot, profile `tools`) ────────────────────────────────
 #   docker compose run --rm tools pytest
-#   docker compose run --rm tools python -m scripts.smoke_fase3
+#   docker compose run --rm tools python scripts/clee_propagation_stats.py
 #   docker compose run --rm tools alembic current --verbose
 #   docker compose run --rm tools ruff check src/ tests/ scripts/ alembic/
 #
@@ -154,6 +155,13 @@ services:
       # Bronze y los seeds entran por aquí; Silver y Gold ya viven en la base.
       - ./data:/app/data
       - ./logs:/app/logs
+      # El código también se monta, aunque la imagen lo lleve horneado: el
+      # montaje lo tapa, así que un `git pull` toma efecto sin reconstruir.
+      # Sin esto, `docker compose run --rm etl <comando nuevo>` responde
+      # "No such command" después de un pull, y el mensaje no dice por qué.
+      # La copia en la imagen se queda para que valga por sí sola fuera del
+      # repo (en un registry, en otra máquina).
+      - ./src:/app/src
 
     # Chromium (scraping de DENUE) se cae en Docker sin memoria compartida.
     shm_size: ${ETL_SHM_SIZE:-2gb}
@@ -169,7 +177,7 @@ services:
   # un modo "nativo" aparte.
   #
   #   docker compose run --rm tools pytest
-  #   docker compose run --rm tools python -m scripts.smoke_fase3
+  #   docker compose run --rm tools python scripts/evaluate_masked_clee.py extract
   #   docker compose run --rm tools ruff check src/
   #
   # El entrypoint de la imagen es `uv run`, asi que el comando va tal cual.
