@@ -13,6 +13,12 @@
 #   docker compose down                  # detiene (conserva los datos)
 #   docker compose down -v               # BORRA el volumen de datos
 #
+# El código va HORNEADO en la imagen `etl`: tras un `git pull` que toque
+# src/, hay que `docker compose build etl`. Es a propósito — una corrida del
+# pipeline debe ser reproducible desde la imagen, no depender del working
+# tree. Los servicios de herramientas sí lo montan, porque ahí el ciclo de
+# edición importa más que la reproducibilidad.
+#
 # ── Pipeline (one-shot, profile `manual`) ───────────────────────────────────
 #   docker compose run --rm etl sync-bronze               # Bronze copiado a mano
 #   docker compose run --rm etl extract
@@ -155,13 +161,6 @@ services:
       # Bronze y los seeds entran por aquí; Silver y Gold ya viven en la base.
       - ./data:/app/data
       - ./logs:/app/logs
-      # El código también se monta, aunque la imagen lo lleve horneado: el
-      # montaje lo tapa, así que un `git pull` toma efecto sin reconstruir.
-      # Sin esto, `docker compose run --rm etl <comando nuevo>` responde
-      # "No such command" después de un pull, y el mensaje no dice por qué.
-      # La copia en la imagen se queda para que valga por sí sola fuera del
-      # repo (en un registry, en otra máquina).
-      - ./src:/app/src
 
     # Chromium (scraping de DENUE) se cae en Docker sin memoria compartida.
     shm_size: ${ETL_SHM_SIZE:-2gb}
