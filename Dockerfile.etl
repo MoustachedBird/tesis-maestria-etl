@@ -15,19 +15,6 @@ FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-# `uv run` revisa el entorno y lo sincroniza antes de ejecutar. Dentro de un
-# contenedor eso es trabajo perdido --el venv ya quedo resuelto en el build--
-# y rompe en cuanto el contenedor no corre como root: el venv es de root y el
-# proceso no puede escribirlo. Se veia como "Installed 6 packages" en CADA
-# invocacion; eran las dependencias de desarrollo que la etapa `etl` no
-# instala a proposito y que `uv run` reponia al vuelo.
-# El venv en el PATH: `uv` es una herramienta de BUILD y no se usa en
-# runtime. Lanzar con `uv run` arrastraba dos problemas que no tenian por
-# que existir -- resincronizaba el entorno en cada invocacion ("Installed 6
-# packages" cada vez) e inicializaba su cache, que falla en cuanto el
-# contenedor no corre como root: el UID del host no tiene entrada en
-# /etc/passwd, `HOME` queda en `/` y no hay donde escribirla.
-ENV PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 
@@ -47,9 +34,9 @@ FROM base AS tools
 
 RUN uv sync --frozen
 
-# Sin entrypoint: con el venv en el PATH, compose pasa la herramienta tal
-# cual --`pytest`, `alembic upgrade head`, `python -m scripts...`-- y se
-# ejecuta la del entorno.
+# `uv run` como entrypoint deja que compose pase la herramienta como
+# argumento: `alembic upgrade head`, `pytest`, `python -m scripts...`.
+ENTRYPOINT ["uv", "run"]
 CMD ["pytest"]
 
 # ─── etl: el pipeline, con el navegador del scraping ────────────────────────
@@ -73,4 +60,4 @@ http://dl.google.com/linux/chrome/deb/ stable main" \
 # separado dejaba la imagen sin el paquete compartido).
 COPY src/ ./src/
 
-ENTRYPOINT ["python", "-m", "src.etl.main"]
+ENTRYPOINT ["uv", "run", "python", "-m", "src.etl.main"]

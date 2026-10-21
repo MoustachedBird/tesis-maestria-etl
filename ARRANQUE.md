@@ -7,20 +7,13 @@ Copiar y pegar. Cada bloque es independiente; correr en orden la primera vez.
 ```bash
 cd ~/tesis-maestria-etl
 cp -n .env.example .env
-grep -q '^HOST_UID=' .env || echo "HOST_UID=$(id -u)" >> .env
-grep -q '^HOST_GID=' .env || echo "HOST_GID=$(id -g)" >> .env
-sed -i "s/^HOST_UID=.*/HOST_UID=$(id -u)/" .env
-sed -i "s/^HOST_GID=.*/HOST_GID=$(id -g)/" .env
 ```
 
 Editar `.env` y poner `POSTGRES_PASSWORD` y `POSTGRES_RO_PASSWORD`.
 
-Si ya hay archivos con dueño root de corridas anteriores:
-
-```bash
-docker run --rm --entrypoint sh -v "$PWD:/w" -w /w python:3.12-slim -c \
-  "chown -R $(id -u):$(id -g) logs data"
-```
+Los contenedores corren como root, así que lo que escriben en `logs/` y
+`data/` queda con dueño root. Para borrarlo sin `sudo`, el bloque 1 usa un
+contenedor.
 
 ## 1. Borrar todo y reconstruir
 
@@ -45,8 +38,7 @@ sin ellos salta los servicios que viven bajo profile, y `etl` es uno. Se
 queda con la imagen vieja sin avisar.
 
 Lo que escribieron corridas anteriores quedó con dueño root. El contenedor
-de arriba sí es root, así que borra sin `sudo`. A partir de este arranque
-los contenedores usan tu UID y ya no vuelve a pasar.
+de arriba también es root, así que borra sin `sudo`.
 
 Esperado: `silver: 12 tablas`, `meta: 6 tablas`, y las cuatro líneas de siembra.
 
