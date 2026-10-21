@@ -308,25 +308,24 @@ def pipeline(
         help="Run CLEE resolution (H3 blocking), comparison track",
     ),
     sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
-    load_gold: bool = typer.Option(True, "--load/--no-load", help="Load Silver -> Gold at the end"),
     only: list[Section] = typer.Option(
         None,
         "--only",
         help=(
             "Run ONLY these sections (repeatable): ingest, "
-            "clee-radio, clee-h3, sesnsp, load (+ groups denue, clee). Overrides --no-*."
+            "clee-radio, clee-h3, sesnsp (+ groups denue, clee). Overrides --no-*."
         ),
     ),
     headless: bool = typer.Option(True, help="Run browser in headless mode (denue extract only)"),
     force: bool = typer.Option(False, "--force", "-f", help="Force reprocess all files"),
 ):
     """
-    Run the full pipeline globally: [Extract ->] Transform -> Load.
+    Run the full pipeline globally: [Extract ->] Transform.
 
     Like `transform`, this runs EVERY section by default -- DENUE (all
-    sub-steps incl. CLEE) + SESNSP -> Silver, then Load Silver -> Gold. Opt out
-    of any section with a --no-* flag, or allowlist with --only (the `load`
-    token also applies here). Extract is OFF by default (it re-scrapes INEGI);
+    sub-steps incl. CLEE) + SESNSP -> Silver. Opt out of any section with a
+    --no-* flag, or allowlist with --only. Gold no existe todavia: la Fase 5
+    define que significa derivarlo. Extract is OFF by default (re-scrapes INEGI);
     enable it with --extract.
     """
     selected = _expand_only(only)
@@ -335,7 +334,6 @@ def pipeline(
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
         sesnsp = Section.sesnsp in selected
-        load_gold = Section.load in selected
         denue = ingest or clee_resolution_radio or clee_resolution_h3
 
     console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
@@ -373,20 +371,17 @@ def pipeline(
                 console.print("[bold yellow]SESNSP transform failed. Check logs.[/bold yellow]")
                 overall_ok = False
 
-        if load_gold:
-            console.print("[bold cyan]== Load Silver -> Gold ==[/bold cyan]")
-            transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
-            if not transformer.run_load_stage(force=force):
-                console.print("[bold yellow]Load stage failed. Check logs.[/bold yellow]")
-                overall_ok = False
-
         console.print("=" * 60)
         if overall_ok:
             console.print("[bold green]Pipeline completed successfully![/bold green]")
             status = DenuePipelineOrchestrator(data_root=DATA_ROOT).get_pipeline_status()
             console.print("\n[bold]Pipeline Summary:[/bold]")
-            console.print(f"  Silver: {status['silver_db']}")
-            console.print(f"  Gold: {status['gold_db']}")
+            for etapa in ("latest_transform_run", "latest_clee_resolution_run"):
+                resumen = status[etapa]
+                console.print(
+                    f"  {etapa}: {resumen['status']} "
+                    f"({resumen['succeeded']} ok, {resumen['failed']} fallidos)"
+                )
         else:
             console.print("[bold yellow]Pipeline completed with errors. Check logs.[/bold yellow]")
             raise typer.Exit(code=1)

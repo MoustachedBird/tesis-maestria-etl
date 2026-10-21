@@ -25,7 +25,6 @@ class Section(StrEnum):
     clee_radio = "clee-radio"
     clee_h3 = "clee-h3"
     sesnsp = "sesnsp"
-    load = "load"
     denue = "denue"  # group -> all DENUE sub-steps
     clee = "clee"  # group -> clee-radio + clee-h3
 

@@ -23,15 +23,16 @@ class DenuePipelineOrchestrator:
     """
     Unified transformer for DENUE data pipeline.
 
-    Coordinates transform, CLEE resolution, and load stages with full
-    metadata tracking and observability.
+    Coordina el ingest y las dos resoluciones de identidad, con su registro
+    de metadatos. Gold no existe todavia: la Fase 5 define que significa
+    derivarlo desde Silver.
 
     Usage:
         transformer = DenuePipelineOrchestrator(data_root=Path("data"))
 
         # Run individual stages
         transformer.run_transform_stage(force=False)
-        transformer.run_load_stage()
+        transformer.run_clee_resolution_stage(force=False)
 
         # Or run complete pipeline
         transformer.run_full_pipeline(force=False)
