@@ -141,6 +141,48 @@ def extract(
 
 
 # ---------------------------------------------------------------------------
+# SYNC-BRONZE
+# ---------------------------------------------------------------------------
+@app.command("sync-bronze")
+def sync_bronze_cmd(
+    bronze: Path = typer.Option(
+        None, "--bronze", help="Directorio de Bronze. Default: data/bronze/denue"
+    ),
+):
+    """
+    Registra en metadata los ZIP que ya estan en Bronze.
+
+    El ingest lee de metadata que archivos hay, no del disco. Esto hace
+    falta cuando Bronze llego por una via distinta a `extract`: una copia
+    desde otra maquina, un respaldo restaurado, un ZIP puesto a mano.
+
+    Es idempotente: lo ya registrado se omite.
+    """
+    from src.etl.extractors.bronze_sync import sync_bronze
+    from src.meta.tracker import MetadataTracker
+
+    bronze_dir = bronze or DATA_ROOT / "bronze" / "denue"
+    console.print(f"[bold cyan]Sincronizando Bronze desde {bronze_dir}[/bold cyan]")
+
+    try:
+        registrados = sync_bronze(bronze_dir, MetadataTracker())
+    except FileNotFoundError as e:
+        console.print(f"[bold red]{escape(str(e))}[/bold red]")
+        raise typer.Exit(code=1)
+
+    if not registrados:
+        console.print("[bold green]Nada nuevo: todo lo de Bronze ya estaba registrado.[/bold green]")
+        return
+
+    for period, archivos in sorted(registrados.items()):
+        console.print(f"   {period}: {archivos} archivo(s)")
+    console.print(
+        f"[bold green]{sum(registrados.values())} archivo(s) en "
+        f"{len(registrados)} corte(s) registrados.[/bold green]"
+    )
+
+
+# ---------------------------------------------------------------------------
 # TRANSFORM
 # ---------------------------------------------------------------------------
 @app.command()
