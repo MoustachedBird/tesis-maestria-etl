@@ -73,10 +73,8 @@ class Settings(BaseSettings):
     # Segundos a esperar a que la tabla `tblDescargaArchivos_denue` termine
     # de poblarse por AJAX. No basta con que el elemento exista: INEGI
     # renderiza primero unas pocas filas placeholder y despues inyecta el
-    # catalogo completo (~484 archivos). Antes se esperaba la presencia del
-    # elemento y se dormia 3 s fijos, y una carga lenta devolvia 4 filas sin
-    # un solo enlace .zip -- scrape vacio tomado por exito. La espera ahora
-    # es por contenido (filas con enlace csv.zip) con este tope.
+    # catalogo completo (~484 archivos), asi que la espera es por contenido
+    # (filas con enlace csv.zip) y este es su tope.
     DENUE_SCRAPE_TIMEOUT_SECONDS: int = 120
     # Minimo de filas con enlace .zip para considerar el scrape completo.
     # El catalogo trae ~484; cualquier cosa por debajo de esto es una tabla

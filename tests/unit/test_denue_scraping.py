@@ -108,9 +108,9 @@ def test_reintenta_los_fallidos_y_baja_los_nuevos(catalog_html, tmp_path):
     """El contrato entre corridas: SUCCESS se salta, FAILED se reintenta.
 
     `get_successful_download_urls` solo devuelve SUCCESS, asi que un archivo
-    que fallo antes no esta en ese set y vuelve a la cola junto con los
-    nuevos. Es lo que permite relanzar el ETL sin flags para completar una
-    corrida interrumpida.
+    fallido no esta en ese set y vuelve a la cola junto con los nuevos. Es lo
+    que permite relanzar el ETL sin flags para completar una corrida
+    interrumpida.
     """
     # Solo el primero quedo SUCCESS; el segundo fallo y el tercero es nuevo.
     tracker = FakeTracker(successful_urls={f"{BASE_URL}{OK_HREF}"})
@@ -169,11 +169,11 @@ def test_fila_sin_enlace_queda_registrada_como_fallida(catalog_html, tmp_path):
 
 
 def test_tabla_a_medio_renderizar_levanta_error(tmp_path):
-    """El fallo del 2026-10-21: 4 filas placeholder sin enlaces.
+    """Una tabla con solo filas placeholder y cero enlaces es un error.
 
-    Antes devolvia [] y el run cerraba como SUCCESS con 0 tareas, dejando
-    484 archivos sin bajar y la base diciendo que todo estuvo bien. Ahora
-    revienta para que el extractor marque el run FAILED.
+    Sin enlaces no se puede concluir que no haya archivos nuevos, asi que
+    revienta para que el extractor marque el run FAILED en lugar de cerrarlo
+    limpio con 0 tareas.
     """
     html = _page(
         [

@@ -28,9 +28,9 @@ class ScrapeIncompleteError(RuntimeError):
     La tabla de INEGI no entrego el catalogo completo.
 
     Se levanta cuando la tabla no alcanza `DENUE_SCRAPE_MIN_LINKS` enlaces
-    .zip dentro del timeout. Es un error explicito a proposito: devolver una
-    lista vacia hacia que el job cerrara como SUCCESS con 0 tareas y la base
-    registrara una corrida limpia con 484 archivos sin descargar.
+    .zip dentro del timeout. Tiene que ser un error y no una lista vacia: sin
+    enlaces no hay nada que descargar, pero tampoco se puede concluir que no
+    haya archivos nuevos, y el run debe quedar FAILED en lugar de limpio.
     """
 
 
@@ -237,10 +237,8 @@ def scrape_denue_table(
         return new_tasks
 
     except Exception as e:
-        # Se relanza a proposito: antes se devolvia [] y el job cerraba como
-        # "0 archivos nuevos / SUCCESS", dejando en la base una corrida limpia
-        # con el catalogo entero sin descargar. El extractor es quien marca el
-        # run como FAILED con este mensaje.
+        # Propaga: un scrape roto no es "0 archivos nuevos". El extractor
+        # cierra el run como FAILED con este mensaje.
         print(f"❌ Fatal error in scraper: {str(e)}")
         import traceback
 

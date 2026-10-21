@@ -222,8 +222,8 @@ class TestDownloadDeadline:
     """Tope total de una descarga (`max_download_seconds`).
 
     El read timeout de requests se reinicia con cada chunk, asi que un
-    servidor que gotea datos lo mantiene vivo para siempre y `iter_content`
-    se cuelga sin log ni reintento. Estos tests cubren el tope que si corta.
+    servidor que gotea datos lo mantiene vivo para siempre. Este tope es el
+    unico que acota la duracion de la transferencia.
     """
 
     @staticmethod
@@ -247,7 +247,7 @@ class TestDownloadDeadline:
         return response
 
     def test_goteo_se_corta_al_llegar_al_tope(self, tmp_path, monkeypatch):
-        """Un servidor lento indefinidamente ya no cuelga la descarga.
+        """Un servidor indefinidamente lento no cuelga la descarga.
 
         Se simula avanzando el reloj monotonico: la primera lectura fija el
         deadline y la siguiente ya lo rebasa, como pasaria tras 900 s de

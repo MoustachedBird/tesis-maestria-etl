@@ -1619,14 +1619,13 @@ API_PREFIX=/api/v1
 # Descargas: DOWNLOAD_TIMEOUT_SECONDS es el read timeout de requests y su
 # reloj se reinicia con cada chunk, asi que no acota la duracion total. El
 # tope real lo pone DOWNLOAD_MAX_DOWNLOAD_SECONDS (levanta Timeout, que es
-# retryable). Las descargas son secuenciales por decision: no hay variable
-# de paralelismo y no se va a agregar.
+# retryable). Las descargas son secuenciales por decision.
 DOWNLOAD_MAX_DOWNLOAD_SECONDS=900
 
 # DENUE scraping: la espera a la tabla de INEGI es por CONTENIDO (filas con
 # enlace .zip), no por presencia del elemento. Si no junta MIN_LINKS dentro
 # del timeout se levanta ScrapeIncompleteError y el run queda FAILED en
-# meta.job_runs; antes devolvia [] y cerraba como SUCCESS con 0 tareas.
+# meta.job_runs.
 DENUE_SCRAPE_TIMEOUT_SECONDS=120
 DENUE_SCRAPE_MIN_LINKS=100
 

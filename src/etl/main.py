@@ -147,10 +147,9 @@ def extract(
         console.print("[bold yellow]   FORCE MODE: Re-downloading ALL files[/bold yellow]")
 
     # Cada fuente corre aislada: un fallo se reporta y la siguiente sigue su
-    # curso. Antes la excepcion de una abortaba el comando y se perdian las
-    # fuentes pendientes. El detalle queda en `meta.job_runs` (los extractores
-    # cierran su run como FAILED con error_summary); aqui solo se resume y se
-    # devuelve un exit code distinto de cero para que el scheduler lo note.
+    # curso. El detalle queda en `meta.job_runs` (los extractores cierran su
+    # run como FAILED con error_summary); aqui solo se resume y se devuelve un
+    # exit code distinto de cero para que el scheduler lo note.
     failures: list[str] = []
 
     if denue:

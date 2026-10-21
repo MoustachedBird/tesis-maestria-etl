@@ -193,11 +193,11 @@ class DenueExtractor:
 
             # Sequential downloads (simpler for MVP)
             for task_id, period, activity, url, dest_path in task_mappings:
-                # Ningun archivo puede tumbar los que faltan. `download()` ya
-                # atrapa los fallos de red y devuelve un result, pero el resto
-                # de la tarea (mkdir, escrituras a metadata) si puede levantar,
-                # y un tropiezo en el archivo 89 no debe costar los 395
-                # restantes. El fallo se registra en la base y se sigue.
+                # Ningun archivo puede tumbar los que faltan. `download()`
+                # atrapa los fallos de red y devuelve un result, pero el
+                # resto de la tarea (mkdir, escrituras a metadata) si puede
+                # levantar: se registra el fallo en la base y se sigue con el
+                # resto del catalogo.
                 try:
                     success = self._download_single_task(
                         task_id, period, activity, url, dest_path, downloader, log
