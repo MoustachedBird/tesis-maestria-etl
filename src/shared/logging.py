@@ -10,6 +10,7 @@ Provides three-tier logging:
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 import structlog
 from rich.console import Console
@@ -105,10 +106,20 @@ class PipelineLogger:
         date_dir = self.log_dir / date_str
         date_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create run directory (run_YYYYMMDD_HHMMSS)
+        # El nombre lleva la hora porque es lo que se lee de un vistazo,
+        # pero la unicidad NO se deja al reloj: dos corridas del mismo
+        # segundo compartirian directorio y mezclarian sus lineas en un
+        # mismo app.log, con el enlace `latest` apuntando al revoltijo. Si
+        # el nombre ya existe se numera, que no depende de la resolucion
+        # del reloj ni de cuanto tarde en arrancar una corrida.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = date_dir / f"run_{timestamp}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        nombre = f"run_{timestamp}"
+        intento = 1
+        while (date_dir / nombre).exists():
+            intento += 1
+            nombre = f"run_{timestamp}_{intento}"
+        run_dir = date_dir / nombre
+        run_dir.mkdir(parents=True)
 
         # Update 'latest' symlink
         latest_link = self.log_dir / "latest"
@@ -116,88 +127,109 @@ class PipelineLogger:
             latest_link.unlink()
 
         # Create relative symlink for portability
-        relative_path = Path(date_str) / f"run_{timestamp}"
+        relative_path = Path(date_str) / nombre
         latest_link.symlink_to(relative_path)
 
         return run_dir
 
-    def _configure_structlog(self):
-        """Configure structlog with processors and outputs."""
-        processors = [
-            # Add log level
+    #: Handlers que esta clase instalo en el root logger. Se guardan para
+    #: poder retirarlos: sin esto, crear un segundo `PipelineLogger` en el
+    #: mismo proceso --dos corridas, o un test tras otro-- apila handlers y
+    #: cada linea se escribe tantas veces como corridas hubo.
+    _instalados: ClassVar[list[logging.Handler]] = []
+
+    def _configure_structlog(self) -> None:
+        """Enchufa structlog al logging estandar, con un render por destino.
+
+        El punto delicado de integrar structlog con `logging` es que el
+        renderizado NO va en la cadena de procesadores: va en el *formatter*
+        de cada handler. structlog deja el `event_dict` a medio camino
+        (`wrap_for_formatter`) y cada handler decide como volverlo texto --la
+        consola como linea legible, los archivos como JSON.
+
+        Omitir ese formatter no falla: el handler escribe la repr del
+        diccionario. Es lo que pasaba aqui, y por eso la consola mostraba
+        `{'event': 'download_started', 'level': 'info', ...}` en vez de una
+        linea, y `app.log` lo mismo en lugar de JSON por linea.
+
+        `foreign_pre_chain` aplica los mismos procesadores a los registros
+        que NO vienen de structlog --los de `logging.getLogger()` de las
+        librerias-- para que el archivo salga homogeneo.
+        """
+        compartidos = [
             structlog.stdlib.add_log_level,
-            # Add timestamp
-            structlog.processors.TimeStamper(fmt="iso"),
-            # Add logger name
             structlog.stdlib.add_logger_name,
-            # Stack info for exceptions
+            structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
-            # Format exceptions
             structlog.processors.format_exc_info,
-            # Decode unicode
             structlog.processors.UnicodeDecoder(),
         ]
 
-        # Console output (Rich)
-        if self.enable_console:
-            console = Console(stderr=True)
-            console_handler = RichHandler(
-                console=console,
-                rich_tracebacks=True,
-                tracebacks_show_locals=True,
-                show_time=True,
-                show_level=True,
-                show_path=True,
-                markup=True,
-            )
-
-            # Configure stdlib logging for Rich
-            import logging
-
-            logging.basicConfig(
-                level=self.log_level,
-                format="%(message)s",
-                handlers=[console_handler],
-            )
-
-        # JSON file output
-        if self.enable_json:
-            json_file = self.run_dir / "app.log"
-            processors_json = processors + [structlog.processors.JSONRenderer()]
-
-            # Create file handler
-            import logging
-
-            json_handler = logging.FileHandler(json_file)
-            json_handler.setLevel(self.log_level)
-
-            # Add to root logger
-            logging.getLogger().addHandler(json_handler)
-
-        # Error file output
-        if self.enable_errors:
-            error_file = self.run_dir / "errors.log"
-            processors_error = processors + [structlog.processors.JSONRenderer()]
-
-            # Create error handler
-            import logging
-
-            error_handler = logging.FileHandler(error_file)
-            error_handler.setLevel(logging.ERROR)
-
-            # Add to root logger
-            logging.getLogger().addHandler(error_handler)
-
-        # Configure structlog
         structlog.configure(
-            processors=processors
-            + [
+            processors=[
+                *compartidos,
                 structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
             ],
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
             cache_logger_on_first_use=True,
         )
+
+        def formatter(render) -> structlog.stdlib.ProcessorFormatter:
+            """Formatter de un handler, con el render que le corresponde."""
+            return structlog.stdlib.ProcessorFormatter(
+                processors=[
+                    structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                    render,
+                ],
+                foreign_pre_chain=compartidos,
+            )
+
+        root = logging.getLogger()
+        for viejo in self._instalados:
+            root.removeHandler(viejo)
+            viejo.close()
+        self._instalados.clear()
+
+        nuevos: list[logging.Handler] = []
+
+        if self.enable_console:
+            # RichHandler ya pone hora, nivel y origen, asi que el render
+            # solo aporta el evento y sus campos. `markup=False` porque el
+            # contenido trae corchetes (URLs, listas) que Rich interpretaria
+            # como etiquetas y se comeria.
+            consola = RichHandler(
+                console=Console(stderr=True),
+                rich_tracebacks=True,
+                show_time=True,
+                show_level=True,
+                show_path=False,
+                markup=False,
+            )
+            consola.setFormatter(
+                formatter(structlog.dev.ConsoleRenderer(colors=False))
+            )
+            nuevos.append(consola)
+
+        if self.enable_json:
+            archivo = logging.FileHandler(self.json_log_path)
+            archivo.setLevel(self.log_level)
+            archivo.setFormatter(formatter(structlog.processors.JSONRenderer()))
+            nuevos.append(archivo)
+
+        if self.enable_errors:
+            # Mismo contenido que app.log pero solo lo accionable: en una
+            # corrida de 484 descargas, el archivo de errores es el que se
+            # abre primero.
+            errores = logging.FileHandler(self.error_log_path)
+            errores.setLevel(logging.ERROR)
+            errores.setFormatter(formatter(structlog.processors.JSONRenderer()))
+            nuevos.append(errores)
+
+        for handler in nuevos:
+            root.addHandler(handler)
+        self._instalados.extend(nuevos)
+        root.setLevel(self.log_level)
 
     def get_logger(self) -> structlog.BoundLogger:
         """
