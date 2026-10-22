@@ -67,9 +67,7 @@ def sync_bronze(
         )
 
     raiz = Path(project_root or Path.cwd())
-    ya_registrados = {
-        tarea["source_path"] for tarea in tracker.get_all_successful_downloads()
-    }
+    ya_registrados = {tarea["source_path"] for tarea in tracker.get_all_successful_downloads()}
 
     # Un corte por subdirectorio, en orden para que el log sea legible.
     cortes = sorted(d for d in bronze_dir.iterdir() if d.is_dir())

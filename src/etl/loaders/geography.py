@@ -24,9 +24,7 @@ def build_rows(seeds_dir: Path | None = None) -> dict[str, list[dict]]:
     return {table: read_seed(table, f, seeds_dir).to_dicts() for f, table in SEED_MAPPINGS}
 
 
-def load_seeds(
-    connection, seeds_dir: Path | None = None, truncate: bool = True
-) -> dict[str, int]:
+def load_seeds(connection, seeds_dir: Path | None = None, truncate: bool = True) -> dict[str, int]:
     """Siembra los catalogos del modulo."""
     stats: dict[str, int] = {}
     for file_name, table in SEED_MAPPINGS:

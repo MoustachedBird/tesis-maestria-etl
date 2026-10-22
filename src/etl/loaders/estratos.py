@@ -29,9 +29,7 @@ def build_rows(seeds_dir: Path | None = None) -> list[dict]:
     return read_seed(TABLE_NAME, SEED_FILE, seeds_dir).to_dicts()
 
 
-def load_seeds(
-    connection, seeds_dir: Path | None = None, truncate: bool = True
-) -> dict[str, int]:
+def load_seeds(connection, seeds_dir: Path | None = None, truncate: bool = True) -> dict[str, int]:
     """Siembra el catalogo via SQLAlchemy (migraciones Alembic)."""
     df = read_seed(TABLE_NAME, SEED_FILE, seeds_dir)
     seed_table(connection, TABLE_NAME, df, truncate=truncate)

@@ -80,8 +80,7 @@ def validate_seed(df: pl.DataFrame, table_name: str, source: str) -> pl.DataFram
     )
     if faltantes:
         raise ValueError(
-            f"❌ Seed invalido {source}: faltan columnas obligatorias de "
-            f"{table_name}: {faltantes}"
+            f"❌ Seed invalido {source}: faltan columnas obligatorias de {table_name}: {faltantes}"
         )
 
     if df.height == 0:
@@ -101,12 +100,7 @@ def validate_seed(df: pl.DataFrame, table_name: str, source: str) -> pl.DataFram
         cols = [c for c in key if c in df.columns]
         if len(cols) != len(key):
             continue
-        dup = (
-            df.group_by(cols)
-            .len()
-            .filter(pl.col("len") > 1)
-            .sort(cols)
-        )
+        dup = df.group_by(cols).len().filter(pl.col("len") > 1).sort(cols)
         if dup.height:
             ejemplos = dup.head(5).select(cols).rows()
             raise ValueError(
@@ -118,8 +112,7 @@ def validate_seed(df: pl.DataFrame, table_name: str, source: str) -> pl.DataFram
     extra = sorted(set(df.columns) - model_cols)
     if extra:
         raise ValueError(
-            f"❌ Seed invalido {source}: columnas que no existen en "
-            f"{table_name}: {extra}"
+            f"❌ Seed invalido {source}: columnas que no existen en {table_name}: {extra}"
         )
 
     return df
@@ -192,9 +185,7 @@ def read_seed(
 # ---------------------------------------------------------------------------
 
 
-def seed_table(
-    connection, table_name: str, df: pl.DataFrame, truncate: bool = True
-) -> int:
+def seed_table(connection, table_name: str, df: pl.DataFrame, truncate: bool = True) -> int:
     """
     Siembra un catalogo.
 

@@ -206,9 +206,7 @@ class PipelineLogger:
                 show_path=False,
                 markup=False,
             )
-            consola.setFormatter(
-                formatter(structlog.dev.ConsoleRenderer(colors=False))
-            )
+            consola.setFormatter(formatter(structlog.dev.ConsoleRenderer(colors=False)))
             nuevos.append(consola)
 
         if self.enable_json:

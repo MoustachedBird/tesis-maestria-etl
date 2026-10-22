@@ -174,10 +174,7 @@ def _attach(conn: Connection, target: StagingTarget, parent: str) -> str:
     # El CHECK ya es redundante con el limite de la particion y le cuesta una
     # evaluacion a cada INSERT futuro sobre ese corte.
     conn.execute(
-        text(
-            f'ALTER TABLE "{target.schema}"."{final}" '
-            f"DROP CONSTRAINT {target.table}_period_check"
-        )
+        text(f'ALTER TABLE "{target.schema}"."{final}" DROP CONSTRAINT {target.table}_period_check')
     )
     return final
 
@@ -245,6 +242,8 @@ def staging_partition(
     rows = _validate(conn, target, min_rows=min_rows)
     final = _attach(conn, target, parent=parent)
     logger.info(
-        "particion enganchada", partition=f"{schema}.{final}", rows=rows,
+        "particion enganchada",
+        partition=f"{schema}.{final}",
+        rows=rows,
         period=period.isoformat(),
     )

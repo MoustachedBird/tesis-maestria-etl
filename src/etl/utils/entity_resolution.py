@@ -75,6 +75,7 @@ def set_matching_logger(stage_logger: logging.Logger) -> None:
     global logger
     logger = stage_logger
 
+
 KB_COLUMNS = [
     "clee_id",
     "latitud",
@@ -646,9 +647,7 @@ def _propagate_single_kb(
     n_matched = sum(1 for clee in match_results if clee is not None)
     logger.info(f"{prefix}{n_matched:,} matches encontrados en esta particion")
 
-    df_result = df_pending.with_columns(
-        pl.Series(master_column, match_results, dtype=pl.Utf8)
-    )
+    df_result = df_pending.with_columns(pl.Series(master_column, match_results, dtype=pl.Utf8))
 
     # 7. Limpiar referencias globales (liberar KB para GC)
     _shared_kb_clee_ids = []
@@ -782,9 +781,7 @@ def propagate_clees_h3(
     H3 (misma cascada de matching que el metodo radio); el post-filtro exacto
     conserva la misma semantica de radio (SPATIAL_RADIUS_M).
     """
-    return _propagate_clees(
-        df_target, ref_kb, spatial_tol, "clee_propagado_h3", find_h3_neighbors
-    )
+    return _propagate_clees(df_target, ref_kb, spatial_tol, "clee_propagado_h3", find_h3_neighbors)
 
 
 def assign_new_clees(
@@ -806,17 +803,13 @@ def assign_new_clees(
     df_resolved = df_target.filter(
         (pl.col(master_column).is_not_null()) & (pl.col(master_column) != "")
     )
-    df_missing = df_target.filter(
-        (pl.col(master_column).is_null()) | (pl.col(master_column) == "")
-    )
+    df_missing = df_target.filter((pl.col(master_column).is_null()) | (pl.col(master_column) == ""))
 
     if df_missing.height == 0:
         return df_target
 
     # UUIDs generados en bulk (evita map_elements fila por fila).
     new_ids = [f"NEW_{region_prefix}-{generate_temp_clee()}" for _ in range(df_missing.height)]
-    df_assigned = df_missing.with_columns(
-        pl.Series(master_column, new_ids, dtype=pl.Utf8)
-    )
+    df_assigned = df_missing.with_columns(pl.Series(master_column, new_ids, dtype=pl.Utf8))
 
     return df_resolved.vstack(df_assigned.select(df_resolved.columns))

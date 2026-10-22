@@ -136,9 +136,7 @@ class CLEEResolver:
         # KB cache por metodo: la identidad cacheada difiere entre radio y
         # h3, asi que cada metodo tiene su subdirectorio. Es cache en disco,
         # no almacenamiento: se puede borrar y se reconstruye.
-        self.kb_cache_dir = (
-            kb_cache_dir or get_settings().DATA_DIR / "kb_cache"
-        ) / method
+        self.kb_cache_dir = (kb_cache_dir or get_settings().DATA_DIR / "kb_cache") / method
 
     @property
     def engine(self) -> Engine:
@@ -154,9 +152,7 @@ class CLEEResolver:
         estab = get_table("establecimientos")
         with self.engine.connect() as conn:
             return conn.execute(
-                select(func.count())
-                .select_from(estab)
-                .where(estab.c[self.master_column].is_(None))
+                select(func.count()).select_from(estab).where(estab.c[self.master_column].is_(None))
             ).scalar_one()
 
     def _get_sorted_periods(self) -> list[date]:
@@ -168,9 +164,7 @@ class CLEEResolver:
         estab = get_table("establecimientos")
         with self.engine.connect() as conn:
             return list(
-                conn.execute(
-                    select(estab.c.period).distinct().order_by(estab.c.period)
-                ).scalars()
+                conn.execute(select(estab.c.period).distinct().order_by(estab.c.period)).scalars()
             )
 
     def _get_periods_with_clee_coverage(self) -> dict[date, bool]:
@@ -560,9 +554,7 @@ class CLEEResolver:
         estab = get_table("establecimientos")
         with self.engine.connect() as conn:
             entidades = list(
-                conn.execute(
-                    select(estab.c.cve_ent).distinct().order_by(estab.c.cve_ent)
-                ).scalars()
+                conn.execute(select(estab.c.cve_ent).distinct().order_by(estab.c.cve_ent)).scalars()
             )
         state_list = entidades or ["NATIONAL"]
         prefix = get_region_prefix(state_list) + self._prefix_suffix

@@ -96,12 +96,7 @@ def _valid_coords_mask(coords_deg: np.ndarray) -> np.ndarray:
     """
     lat = coords_deg[:, 0]
     lon = coords_deg[:, 1]
-    return (
-        np.isfinite(lat)
-        & np.isfinite(lon)
-        & (np.abs(lat) <= 90.0)
-        & (np.abs(lon) <= 180.0)
-    )
+    return np.isfinite(lat) & np.isfinite(lon) & (np.abs(lat) <= 90.0) & (np.abs(lon) <= 180.0)
 
 
 def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
@@ -134,8 +129,14 @@ def find_spatial_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius
         indices[i] = np.array([], dtype=np.int64)
         distances[i] = np.array([], dtype=np.float64)
 
-    ref_valid = _valid_coords_mask(ref_coords_deg) if ref_coords_deg.size else np.array([], dtype=bool)
-    tgt_valid = _valid_coords_mask(target_coords_deg) if target_coords_deg.size else np.array([], dtype=bool)
+    ref_valid = (
+        _valid_coords_mask(ref_coords_deg) if ref_coords_deg.size else np.array([], dtype=bool)
+    )
+    tgt_valid = (
+        _valid_coords_mask(target_coords_deg)
+        if target_coords_deg.size
+        else np.array([], dtype=bool)
+    )
     if not ref_valid.any() or not tgt_valid.any():
         return indices, distances
 

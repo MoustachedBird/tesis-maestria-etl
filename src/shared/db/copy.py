@@ -128,7 +128,7 @@ def copy_dataframe(
     chunk_rows = chunk_rows if chunk_rows is not None else get_settings().COPY_CHUNK_ROWS
     quoted_cols = ", ".join(f'"{c}"' for c in cols)
     destino = f'"{schema}"."{table}"' if schema else f'"{table}"'
-    statement = f'COPY {destino} ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE \'"\')'
+    statement = f"COPY {destino} ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE '\"')"
 
     projected = df.select(cols)
     written = 0

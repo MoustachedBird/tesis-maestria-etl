@@ -144,13 +144,9 @@ def validate_geografia(conn: Connection, df: pl.DataFrame) -> None:
 
         catalogo = get_table(tabla)
         conocidas = {
-            tuple(fila)
-            for fila in conn.execute(select(*[catalogo.c[c] for c in columnas])).all()
+            tuple(fila) for fila in conn.execute(select(*[catalogo.c[c] for c in columnas])).all()
         }
-        presentes = {
-            tuple(fila)
-            for fila in df.select(columnas).unique().drop_nulls().iter_rows()
-        }
+        presentes = {tuple(fila) for fila in df.select(columnas).unique().drop_nulls().iter_rows()}
         intrusas = sorted(presentes - conocidas)
         if intrusas:
             raise CatalogoDesactualizado(

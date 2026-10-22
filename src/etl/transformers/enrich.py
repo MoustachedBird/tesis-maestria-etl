@@ -84,9 +84,7 @@ def normalize_fecha_alta(df: pl.DataFrame) -> pl.DataFrame:
     mes_traducido = mes_ano.str.split(" ").list.first()
     for nombre, numero in SPANISH_MONTHS.items():
         mes_traducido = mes_traducido.str.replace_all(f"^{nombre}$", numero)
-    desde_mes_ano = (
-        mes_ano.str.split(" ").list.last() + pl.lit("-") + mes_traducido + pl.lit("-01")
-    )
+    desde_mes_ano = mes_ano.str.split(" ").list.last() + pl.lit("-") + mes_traducido + pl.lit("-01")
 
     # Formato 6: DD/MM/YYYY -> se toma ano y mes, el dia se descarta.
     # `null_on_oob` no es opcional: Polars evalua TODAS las ramas de un
@@ -110,9 +108,7 @@ def normalize_fecha_alta(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(None)
     )
 
-    return df.with_columns(
-        fecha_alta_date=texto_iso.str.to_date("%Y-%m-%d", strict=False)
-    )
+    return df.with_columns(fecha_alta_date=texto_iso.str.to_date("%Y-%m-%d", strict=False))
 
 
 def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
@@ -172,19 +168,21 @@ def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
 
     # `map_elements` sobre una struct y no dos columnas sueltas: asi
     # `cell_to_parent` reusa la celda ya calculada en vez de recalcularla.
-    return df.with_columns(
-        pl.when(geolocalizable)
-        .then(
-            pl.struct("latitud", "longitud").map_elements(
-                celdas,
-                return_dtype=pl.Struct(
-                    {"h3_cell_9": pl.Int64, "h3_cell_5": pl.Int64}
-                ),
+    return (
+        df.with_columns(
+            pl.when(geolocalizable)
+            .then(
+                pl.struct("latitud", "longitud").map_elements(
+                    celdas,
+                    return_dtype=pl.Struct({"h3_cell_9": pl.Int64, "h3_cell_5": pl.Int64}),
+                )
             )
+            .otherwise(None)
+            .alias("_h3")
         )
-        .otherwise(None)
-        .alias("_h3")
-    ).with_columns(
-        h3_cell_9=pl.col("_h3").struct.field("h3_cell_9"),
-        h3_cell_5=pl.col("_h3").struct.field("h3_cell_5"),
-    ).drop("_h3")
+        .with_columns(
+            h3_cell_9=pl.col("_h3").struct.field("h3_cell_9"),
+            h3_cell_5=pl.col("_h3").struct.field("h3_cell_5"),
+        )
+        .drop("_h3")
+    )

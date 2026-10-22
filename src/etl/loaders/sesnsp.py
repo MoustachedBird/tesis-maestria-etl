@@ -55,9 +55,7 @@ def build_delitos_rows(seeds_dir: Path | None = None) -> list[dict]:
     return read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir).to_dicts()
 
 
-def load_seeds(
-    connection, seeds_dir: Path | None = None, truncate: bool = True
-) -> dict[str, int]:
+def load_seeds(connection, seeds_dir: Path | None = None, truncate: bool = True) -> dict[str, int]:
     """Siembra `sesnsp_delitos` desde el parquet (entry point de la migracion)."""
     df = read_seed(DELITOS_TABLE, SEED_DELITOS_FILE, seeds_dir)
     seed_table(connection, DELITOS_TABLE, df, truncate=truncate)
@@ -83,13 +81,10 @@ def validate_delitos_del_csv(conn: Connection, distinct_delitos: pl.DataFrame) -
     catalogo = get_table(DELITOS_TABLE)
     conocidos = {
         tuple(fila)
-        for fila in conn.execute(
-            select(*[catalogo.c[c] for c in DELITO_KEY_COLUMNS])
-        ).all()
+        for fila in conn.execute(select(*[catalogo.c[c] for c in DELITO_KEY_COLUMNS])).all()
     }
     presentes = {
-        tuple(fila)
-        for fila in distinct_delitos.select(DELITO_KEY_COLUMNS).unique().iter_rows()
+        tuple(fila) for fila in distinct_delitos.select(DELITO_KEY_COLUMNS).unique().iter_rows()
     }
     faltantes = sorted(presentes - conocidos)
     if faltantes:
@@ -117,9 +112,7 @@ def validate_municipios_del_csv(conn: Connection, distinct_municipios: pl.DataFr
     catalogo = get_table("denue_municipios")
     conocidos = {
         tuple(fila)
-        for fila in conn.execute(
-            select(catalogo.c["cve_ent"], catalogo.c["cve_mun"])
-        ).all()
+        for fila in conn.execute(select(catalogo.c["cve_ent"], catalogo.c["cve_mun"])).all()
     }
     presentes = {
         tuple(fila)

@@ -35,14 +35,10 @@ def seed_path(table: str, seeds_dir: Path | None = None) -> Path:
 
 def build_rows(seeds_dir: Path | None = None) -> dict[str, list[dict]]:
     """Filas de cada catalogo leidas de su parquet, ya validadas."""
-    return {
-        table: read_seed(table, SEED_FILES[table], seeds_dir).to_dicts() for table, _ in TABLES
-    }
+    return {table: read_seed(table, SEED_FILES[table], seeds_dir).to_dicts() for table, _ in TABLES}
 
 
-def load_seeds(
-    connection, seeds_dir: Path | None = None, truncate: bool = True
-) -> dict[str, int]:
+def load_seeds(connection, seeds_dir: Path | None = None, truncate: bool = True) -> dict[str, int]:
     """Siembra los catalogos del modulo."""
     stats: dict[str, int] = {}
     for table, _label in TABLES:

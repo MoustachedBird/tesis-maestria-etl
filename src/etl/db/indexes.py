@@ -106,8 +106,7 @@ def expected_indexes() -> dict[str, str]:
         for index in table.indexes:
             cols = ", ".join(f'"{c}"' for c in _index_columns(index))
             out[index.name] = (
-                f'CREATE INDEX IF NOT EXISTS "{index.name}" '
-                f'ON "{schema}"."{table_name}" ({cols})'
+                f'CREATE INDEX IF NOT EXISTS "{index.name}" ON "{schema}"."{table_name}" ({cols})'
             )
     return out
 
@@ -216,10 +215,7 @@ def _create_concurrently(conn, name: str) -> None:
     # ON ONLY: el padre queda con un indice vacio e invalido hasta que todas
     # las particiones enganchen el suyo.
     conn.execute(
-        text(
-            f'CREATE INDEX IF NOT EXISTS "{name}" '
-            f'ON ONLY "{schema}"."{table.name}" ({cols})'
-        )
+        text(f'CREATE INDEX IF NOT EXISTS "{name}" ON ONLY "{schema}"."{table.name}" ({cols})')
     )
 
     for partition in existing_partitions(conn, schema):
@@ -230,9 +226,7 @@ def _create_concurrently(conn, name: str) -> None:
                 f'ON "{schema}"."{partition}" ({cols})'
             )
         )
-        conn.execute(
-            text(f'ALTER INDEX "{schema}"."{name}" ATTACH PARTITION "{schema}"."{child}"')
-        )
+        conn.execute(text(f'ALTER INDEX "{schema}"."{name}" ATTACH PARTITION "{schema}"."{child}"'))
 
 
 def ensure_indexes(conn, concurrently: bool = False) -> list[str]:

@@ -488,9 +488,7 @@ class BronzeToSilverProcessor:
             columnas = [c for c in del_modelo if c in corte.columns]
 
             with staging_partition(conn, fecha) as destino:
-                copy_dataframe(
-                    conn, corte, destino.table, destino.schema, columns=columnas
-                )
+                copy_dataframe(conn, corte, destino.table, destino.schema, columns=columnas)
 
         return corte.height
 
@@ -566,7 +564,9 @@ class BronzeToSilverProcessor:
         estado = JobStatus.SUCCESS if not fallidos else JobStatus.PARTIAL
         self.tracker.complete_run(run_id, estado)
 
-        logger.info(f"Ingest terminado: {total:,} filas en {len(pendientes) - len(fallidos)} corte(s)")
+        logger.info(
+            f"Ingest terminado: {total:,} filas en {len(pendientes) - len(fallidos)} corte(s)"
+        )
         if fallidos:
             logger.error(f"   cortes fallidos: {', '.join(fallidos)}")
         return not fallidos
