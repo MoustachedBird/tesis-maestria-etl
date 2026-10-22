@@ -1,9 +1,10 @@
 # Separar el ingest de la resolución CLEE
 
-**Estado:** código completo (pasos 1–4, 2026-10-22). **La verificación
-contra base real no ha ocurrido**: la Mac no tiene Docker, así que los 154
-tests marcados `postgres` solo corren en indominus. No correr el ingest ni
-la resolución antes de que esa suite pase en verde. El ingest y la
+**Estado:** completo y verificado (2026-10-22). Los cuatro pasos están
+implementados y la suite entera pasa en indominus: **406 tests, cero skips**,
+incluidos los 155 que tocan base. Las tres revisiones quedaron aplicadas
+(`b0003saca_clee_del_hecho`) sin perder ninguna de las 484 descargas de
+Bronze: `establecimientos` conserva solo `clee`, el dato de INEGI. El ingest y la
 resolución **no se corren hasta terminarlos**: no tiene sentido gastar horas
 de CLEE sobre un esquema que va a cambiar.
 
