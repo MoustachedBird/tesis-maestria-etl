@@ -10,6 +10,8 @@ Complementa, no reemplaza:
 - `AGENTS.md` — guía de desarrollo canónica; se actualiza al cierre de cada fase.
 - `docs/entorno_linux.md` — inventario de la workstation de corridas reales
   y la configuración de Postgres derivada de él.
+- `docs/comandos.md` — los comandos de operación: base de pruebas, extract,
+  cada paso del transform por separado, seguimiento y estado de la base.
 - `docs/separacion_ingest_clee.md` — propuesta de sacar el resultado de la
   propagación CLEE a una tabla por método (`silver.clee_radio`,
   `silver.clee_h3`, y la futura `silver.clee_llm`), para que una falla de una
