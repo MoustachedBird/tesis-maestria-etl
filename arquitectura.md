@@ -1069,11 +1069,30 @@ DENUE×SESNSP se responde con un `SELECT` a `gold` sin tocar `silver`.
       `POSTGRES_USER`/`POSTGRES_PASSWORD`, de donde sale `DATABASE_URL`. No
       hay rama por rol en el código ni una `DATABASE_URL_READ_ONLY` aparte —
       un solo camino de conexión, y el rol lo decide quien lanza el proceso.
-- [ ] `Dockerfile.api` separado, sin Selenium ni rapidfuzz. Pendiente: hoy el
-      servicio comparte la imagen `tools`. Adelgazarlo de verdad exige
-      partir las dependencias de `pyproject.toml` en grupos (el API no
-      necesita polars, scikit-learn, rapidfuzz, selenium ni h3), así que es
-      un cambio de empaquetado, no solo un Dockerfile nuevo.
+- [~] `Dockerfile.api` separado, sin Selenium ni rapidfuzz: **descartado por
+      ahora**, medido el 2026-10-22. El API comparte la imagen `tools`.
+
+      Lo que recortaría son ~297 MB de los 581 MB de `site-packages`
+      (pyarrow 117M, scipy 80M, scikit-learn 34M, numpy 24M, selenium 23M,
+      polars 8.2M, rapidfuzz 5M, h3 2.3M) contra los ~26 MB que el API sí
+      usa. Y no compra nada medible: la workstation tiene 844 GB libres, una
+      librería que no se importa no ocupa RAM (el API corre en 82 MiB con o
+      sin ellas), el arranque no cambia y sería una cuarta imagen que
+      construir. El costo, en cambio, es real: partir
+      `[project.dependencies]` en grupos puede romper la imagen del ETL.
+
+      El único beneficio no cosmético era que el build impidiera a un
+      endpoint importar un transformer y arrancar un ingest dentro del
+      proceso del API —que con `api_ro` moriría con un error de permisos
+      irrelevante al problema—. Eso se consiguió sin tocar el empaquetado:
+      `tests/unit/test_layer_boundaries.py` lee los imports con `ast` y
+      falla si `src.api` toca `src.etl` (y declara las fronteras de las
+      cuatro capas, incluido `src.scheduler` de la Fase 7 antes de que
+      exista).
+
+      Si el criterio de aceptación de "imagen del API como fracción de la
+      del ETL" importa para la defensa, reconsiderarlo junto con el
+      empaquetado de la Fase 9, no aquí.
 
 **Depende de una credencial del despliegue:** el baseline crea `api_ro` con
 `LOGIN` solo si `POSTGRES_RO_PASSWORD` tenía valor al correr la migración; si
@@ -1086,8 +1105,9 @@ ya existe, el API no puede conectarse. El arreglo es un
 a `GET /ops/health/pipeline` cuando la Fase 5 implemente Gold; `normalize` no
 vuelve, porque el ingest deriva la fecha en vuelo (ver más abajo).
 
-**Criterio de aceptación:** la imagen del API pesa una fracción de la del
-ETL y `GET /ops/runs` devuelve el historial de la Fase 4.
+**Criterio de aceptación:** `GET /ops/runs` devuelve el historial de la
+Fase 4 y el API no puede escribir en la base. El tamaño de la imagen sale
+del criterio: se midió y no discrimina nada (ver arriba).
 
 #### Código eliminado en esta fase
 
