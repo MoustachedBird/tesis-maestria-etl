@@ -185,8 +185,7 @@ class TestEstructura:
 
         indices_hijos = conn.execute(
             text(
-                "SELECT COUNT(*) FROM pg_indexes "
-                "WHERE schemaname = 'silver' AND tablename = :tabla"
+                "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'silver' AND tablename = :tabla"
             ),
             {"tabla": partition_name(PERIODO)},
         ).scalar_one()

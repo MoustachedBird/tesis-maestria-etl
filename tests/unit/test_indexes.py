@@ -32,9 +32,7 @@ class TestDefinicion:
     def test_se_derivan_del_modelo(self):
         esperados = expected_indexes()
         assert esperados
-        declarados = {
-            i.name for t in MANAGED_TABLES for i in get_table(t).indexes
-        }
+        declarados = {i.name for t in MANAGED_TABLES for i in get_table(t).indexes}
         assert set(esperados) == declarados
 
     def test_son_sentencias_create_index(self):

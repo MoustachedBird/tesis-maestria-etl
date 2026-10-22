@@ -57,8 +57,18 @@ class TestFormatosDeINEGI:
         """Un mes mal traducido se lleva un mes entero de datos."""
         esperado = [date(2015, m, 1) for m in range(1, 13)]
         nombres = [
-            "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
-            "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+            "ENERO",
+            "FEBRERO",
+            "MARZO",
+            "ABRIL",
+            "MAYO",
+            "JUNIO",
+            "JULIO",
+            "AGOSTO",
+            "SEPTIEMBRE",
+            "OCTUBRE",
+            "NOVIEMBRE",
+            "DICIEMBRE",
         ]
         assert fechas_de(*[f"{n} 2015" for n in nombres]) == esperado
 
@@ -90,11 +100,11 @@ class TestLoNoReconocido:
             "",
             "   ",
             "basura",
-            "2010",           # falta el mes
-            "07-2010",        # invertido
-            "2010-13",        # mes imposible
+            "2010",  # falta el mes
+            "07-2010",  # invertido
+            "2010-13",  # mes imposible
             "MARCIANO 2010",  # mes que no existe
-            "2010/07",        # separador no contemplado
+            "2010/07",  # separador no contemplado
         ],
     )
     def test_queda_en_null(self, valor):
@@ -167,9 +177,9 @@ class TestSinCoordenadas:
             (None, None),
             (19.4326, None),
             (None, -99.1332),
-            (91.0, 0.0),     # latitud fuera de rango
+            (91.0, 0.0),  # latitud fuera de rango
             (-91.0, 0.0),
-            (0.0, 181.0),    # longitud fuera de rango
+            (0.0, 181.0),  # longitud fuera de rango
             (0.0, -181.0),
         ],
     )
@@ -219,6 +229,6 @@ class TestJuntas:
         )
         una = add_h3_cells(normalize_fecha_alta(df))
         otra = normalize_fecha_alta(add_h3_cells(df))
-        assert una.sort(by="fecha_alta_date").to_dicts() == otra.sort(
-            by="fecha_alta_date"
-        ).to_dicts()
+        assert (
+            una.sort(by="fecha_alta_date").to_dicts() == otra.sort(by="fecha_alta_date").to_dicts()
+        )

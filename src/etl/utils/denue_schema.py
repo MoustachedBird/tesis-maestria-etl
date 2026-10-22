@@ -49,49 +49,6 @@ MASTER_COLUMNS = [
     "period",
 ]
 
-# Columnas que realmente se guardarán en la tabla 'establecimientos'
-DB_FACT_COLUMNS = [
-    "id",  # <--- Cambiado de 'row_id' a 'id' para coincidir con el procesador
-    "clee",
-    "clee_propagado_radio",
-    "nom_estab",
-    "raz_social",
-    "codigo_act",
-    "tipo_vial",  # dominio: catalogo denue_tipos_vialidad
-    "tipo_asent",  # dominio: catalogo denue_tipos_asentamiento
-    "tipounieco",  # dominio: catalogo denue_tipos_unidad_economica
-    "per_ocu",  # dominio: catalogo denue_estratos_personal
-    "nom_vial",
-    "tipo_v_e_1",
-    "nom_v_e_1",
-    "tipo_v_e_2",
-    "nom_v_e_2",
-    "tipo_v_e_3",
-    "nom_v_e_3",
-    "numero_ext",
-    "letra_ext",
-    "edificio",
-    "edificio_e",
-    "numero_int",
-    "letra_int",
-    "nomb_asent",
-    "nom_cencom",
-    "num_local",
-    "cod_postal",
-    "cve_ent",
-    "cve_mun",
-    "cve_loc",
-    "ageb",
-    "manzana",
-    "telefono",
-    "correoelec",
-    "www",
-    "latitud",
-    "longitud",
-    "fecha_alta_str",
-    "fecha_alta_date",
-    "period",
-]
 
 # REQUIRED COLUMNS: Columnas indispensables para que el registro sea procesado.
 REQUIRED_COLUMNS = ["codigo_act", "entidad", "municipio"]

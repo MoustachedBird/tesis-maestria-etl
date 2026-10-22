@@ -102,10 +102,7 @@ def linked_session(silver_engine):
             [EstratoPersonal(**r) for r in build_estrato_rows()]
             + [TipoVialidad(**r) for r in build_rows()["denue_tipos_vialidad"]]
             + [TipoAsentamientoCat(**r) for r in build_rows()["denue_tipos_asentamiento"]]
-            + [
-                TipoUnidadEconomicaCat(**r)
-                for r in build_rows()["denue_tipos_unidad_economica"]
-            ]
+            + [TipoUnidadEconomicaCat(**r) for r in build_rows()["denue_tipos_unidad_economica"]]
         )
         session.add(
             ActividadEconomica(
@@ -170,9 +167,7 @@ class TestEstablecimientoLinks:
         """El FK es fisico: un id fuera de catalogo debe fallar al insertar."""
         from sqlalchemy.exc import DBAPIError
 
-        linked_session.add(
-            Establecimiento(id="test-estab-bad", per_ocu_id=999, period=PERIODO)
-        )
+        linked_session.add(Establecimiento(id="test-estab-bad", per_ocu_id=999, period=PERIODO))
         with pytest.raises(DBAPIError):
             linked_session.commit()
         linked_session.rollback()

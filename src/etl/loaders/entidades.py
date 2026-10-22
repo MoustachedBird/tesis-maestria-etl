@@ -3,7 +3,7 @@ Dimension de entidad economica (N3): una fila por negocio resuelto.
 
 `entidades_economicas` colapsa las observaciones de `establecimientos`
 (una fila por negocio POR PERIODO) a una fila por identidad resuelta
-(`clee_propagado_radio`), con los atributos del periodo mas reciente y el
+(`silver.clee_radio.clee_resuelto`), con los atributos del periodo mas reciente y el
 rango de vida observado (`primer_periodo`/`ultimo_periodo`). Es la tabla
 contra la que se calculan supervivencia y mortalidad en la tesis, y el
 punto natural de cruce con `sesnsp_incidencia_municipal` (por
@@ -40,46 +40,58 @@ logger = get_stage_logger(__name__, Path("./data/etl_entidades.log"))
 TABLE_NAME = "entidades_economicas"
 """Nombre de la tabla dimension en Silver (Gold la hereda en make load)."""
 
-BUILD_SQL = """
+IDENTITY_TABLE = "clee_radio"
+"""Metodo cuya identidad define la dimension.
+
+El baseline de la tesis. H3 es pista de comparacion: se mide contra esta,
+no sustituye a la unidad de analisis (ver `docs/separacion_ingest_clee.md`).
+"""
+
+BUILD_SQL = f"""
 INSERT INTO silver.entidades_economicas
 WITH obs AS (
     SELECT
-        clee_propagado_radio, id, period, nom_estab, raz_social,
-        codigo_act, cve_ent, cve_mun, cod_postal, latitud, longitud,
-        h3_cell_9, fecha_alta_date
-    FROM silver.establecimientos
-    WHERE clee_propagado_radio IS NOT NULL AND clee_propagado_radio != ''
+        i.clee_resuelto, e.id, e.period, e.nom_estab, e.raz_social,
+        e.codigo_act, e.cve_ent, e.cve_mun, e.cod_postal, e.latitud, e.longitud,
+        e.h3_cell_9, e.fecha_alta_date
+    FROM silver.establecimientos e
+    JOIN silver.{IDENTITY_TABLE} i ON i.id = e.id AND i.period = e.period
+    WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto != ''
 ),
 vida AS (
     SELECT
-        clee_propagado_radio,
+        clee_resuelto,
         MIN(period) AS primer_periodo,
         MAX(period) AS ultimo_periodo,
         COUNT(DISTINCT period) AS n_periodos,
         MIN(fecha_alta_date) AS fecha_alta_date
     FROM obs
-    GROUP BY clee_propagado_radio
+    GROUP BY clee_resuelto
 ),
 representante AS (
     SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY clee_propagado_radio
+        PARTITION BY clee_resuelto
         ORDER BY period DESC, id
     ) AS rn
     FROM obs
 )
 SELECT
-    r.clee_propagado_radio,
-    starts_with(r.clee_propagado_radio, 'NEW_') AS es_sintetica,
+    r.clee_resuelto,
+    starts_with(r.clee_resuelto, 'NEW_') AS es_sintetica,
     r.nom_estab, r.raz_social, r.codigo_act, r.cve_ent, r.cve_mun,
     r.cod_postal, r.latitud, r.longitud, r.h3_cell_9,
     v.primer_periodo, v.ultimo_periodo, v.n_periodos, v.fecha_alta_date
 FROM representante r
-JOIN vida v USING (clee_propagado_radio)
+JOIN vida v USING (clee_resuelto)
 WHERE r.rn = 1
 """
 """Agregacion de observaciones -> dimension. La fila representativa es la
 del periodo mas reciente (rn=1, desempate por id); el rango de vida y la
-fecha de alta vienen del agregado por identidad."""
+fecha de alta vienen del agregado por identidad.
+
+El JOIN con la tabla del metodo es INNER y no LEFT: una observacion sin
+identidad resuelta no puede ser parte de la dimension de negocios. El JOIN
+incluye `period` para que sea partition-wise."""
 
 
 def build_entidades_economicas(conn: Connection) -> int:
@@ -150,7 +162,7 @@ class EntidadesDimensionBuilder:
         """
         Construye la dimension con tracking; True si no hubo errores.
 
-        Precondicion: `clee_propagado_radio` poblada (resolucion CLEE
+        Precondicion: `silver.clee_radio` poblada (resolucion CLEE
         terminada). Si esta vacia, la dimension queda en 0 filas y se
         reporta como advertencia (no es error: permite correr el stage
         en bases nuevas).
@@ -191,7 +203,7 @@ class EntidadesDimensionBuilder:
 
             if rows == 0:
                 logger.warning(
-                    "⚠️ Dimension vacia: clee_propagado_radio sin poblar. "
+                    "⚠️ Dimension vacia: silver.clee_radio sin poblar. "
                     "Corre primero la resolucion CLEE."
                 )
             else:

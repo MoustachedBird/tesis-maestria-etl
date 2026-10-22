@@ -4,7 +4,7 @@ Entity Resolution: Funciones de propagacion de CLEEs entre periodos.
 Este modulo contiene la logica aislada de propagacion de identidades.
 La funcion principal `propagate_clees()` es el punto de intercambio
 para futuros algoritmos de matching -- mientras respete la interfaz
-(recibe target + ref_kb, retorna target con clee_propagado_radio parcialmente
+(recibe target + ref_kb, retorna target con la identidad parcialmente
 poblado), el orquestador no necesita cambios.
 
 Paralelismo: El loop de matching es embarrassingly parallel (cada fila
@@ -95,8 +95,8 @@ KB_COLUMNS = [
 Contrato de `build_single_period_kb()`: la KB retornada tiene EXACTAMENTE
 estas columnas. `clee_id` es la identidad a propagar, NEUTRAL respecto al
 metodo: `build_single_period_kb(df_ref, master_column)` copia ahi el valor
-de la columna del metodo correspondiente (clee_propagado_radio o
-clee_propagado_h3). `latitud`/`longitud` alimentan el post-filtro exacto y
+de la columna de identidad (`clee_resuelto`). `latitud`/`longitud`
+alimentan el post-filtro exacto y
 `h3_cell_9` el blocking H3 (ignorada por el generador BallTree). Las de
 texto ausentes en el periodo se crean como "".
 """
@@ -370,8 +370,8 @@ def build_single_period_kb(
 
     Args:
         df_ref: DataFrame de un periodo ya resuelto.
-        master_column: Columna de identidad del metodo (clee_propagado_radio
-            o clee_propagado_h3). Se copia a la columna neutral `clee_id`.
+        master_column: Columna de identidad (`clee_resuelto`). Se copia a la
+            columna neutral `clee_id`.
 
     Returns:
         DataFrame con columnas KB_COLUMNS, solo filas con master_column valido.
@@ -567,7 +567,7 @@ def _propagate_single_kb(
         kb_partition: Particion de KB (o KB completa si no se particiono).
         spatial_tol: Radio de busqueda espacial en metros.
         master_column: Columna destino donde escribir la identidad propagada
-            (clee_propagado_radio o clee_propagado_h3).
+            (`clee_resuelto`).
         neighbor_finder: Generador de candidatos (ref_df, target_df, radius)
             -> (indices, distances). find_spatial_neighbors (BallTree) o
             find_h3_neighbors (blocking H3).
@@ -686,7 +686,7 @@ def _propagate_clees(
         df_target: DataFrame del periodo a resolver (incluye master_column).
         ref_kb: KB de un periodo de referencia (build_single_period_kb).
         spatial_tol: Radio de busqueda espacial en metros.
-        master_column: Columna destino (clee_propagado_radio | clee_propagado_h3).
+        master_column: Columna destino de la identidad (`clee_resuelto`).
         neighbor_finder: Generador de candidatos (BallTree o H3).
 
     Returns:
@@ -762,12 +762,10 @@ def propagate_clees_radio(
     """
     Propagacion por RADIO DE TOLERANCIA (BallTree haversine).
 
-    Escribe en la columna `clee_propagado_radio`. Metodo baseline: pre-filtro
+    Metodo baseline, cuyo resultado va a `silver.clee_radio`: pre-filtro
     espacial con BallTree + cascada de matching.
     """
-    return _propagate_clees(
-        df_target, ref_kb, spatial_tol, "clee_propagado_radio", find_spatial_neighbors
-    )
+    return _propagate_clees(df_target, ref_kb, spatial_tol, RESOLVED_COLUMN, find_spatial_neighbors)
 
 
 def propagate_clees_h3(
@@ -778,11 +776,11 @@ def propagate_clees_h3(
     """
     Propagacion por BLOCKING H3 (grid_disk + post-filtro haversine exacto).
 
-    Escribe en la columna `clee_propagado_h3`. Genera candidatos por celdas
+    Su resultado va a `silver.clee_h3`. Genera candidatos por celdas
     H3 (misma cascada de matching que el metodo radio); el post-filtro exacto
     conserva la misma semantica de radio (SPATIAL_RADIUS_M).
     """
-    return _propagate_clees(df_target, ref_kb, spatial_tol, "clee_propagado_h3", find_h3_neighbors)
+    return _propagate_clees(df_target, ref_kb, spatial_tol, RESOLVED_COLUMN, find_h3_neighbors)
 
 
 def assign_new_clees(
@@ -796,7 +794,7 @@ def assign_new_clees(
     Args:
         df_target: DataFrame con master_column parcialmente poblado.
         region_prefix: Prefijo para generar CLEEs temporales.
-        master_column: Columna destino (clee_propagado_radio | clee_propagado_h3).
+        master_column: Columna destino de la identidad (`clee_resuelto`).
 
     Returns:
         df_target con todos los master_column poblados (sin NULLs).

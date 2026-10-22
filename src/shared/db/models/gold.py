@@ -8,7 +8,7 @@ estructura de `models/` no cambie cuando se llene.
 Lo que vendrá aquí, con el contrato ya escrito en
 `docs/cruce_denue_sesnsp.md`:
 
-- `Establecimiento` — una fila por negocio resuelto (`clee_propagado_radio`)
+- `Establecimiento` — una fila por negocio resuelto (`clee_resuelto`)
   con su ventana de vida `primer_periodo..ultimo_periodo`. **Mismo nombre
   que `silver.Establecimiento` y grano distinto**: 10.45M negocios frente a
   82.9M observaciones. Como vista materializada, no tabla (§Fase 5).

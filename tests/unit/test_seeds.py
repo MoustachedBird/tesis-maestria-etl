@@ -53,7 +53,10 @@ class TestSeedMalFormado:
 
     def test_null_en_columna_not_null(self, seed):
         roto = seed.with_columns(
-            pl.when(pl.col("id") == 1).then(None).otherwise(pl.col("descripcion")).alias("descripcion")
+            pl.when(pl.col("id") == 1)
+            .then(None)
+            .otherwise(pl.col("descripcion"))
+            .alias("descripcion")
         )
         with pytest.raises(ValueError, match="NULL"):
             validate_seed(roto, TABLA, "x.parquet")
@@ -81,9 +84,7 @@ class TestSeedMalFormado:
         from src.etl.loaders.sesnsp import delitos_seed_path
 
         delitos = pl.read_parquet(delitos_seed_path())
-        otro_id = delitos.head(1).with_columns(
-            pl.lit(9999, dtype=delitos["id"].dtype).alias("id")
-        )
+        otro_id = delitos.head(1).with_columns(pl.lit(9999, dtype=delitos["id"].dtype).alias("id"))
         with pytest.raises(ValueError, match="bien_juridico, tipo, subtipo, modalidad"):
             validate_seed(pl.concat([delitos, otro_id]), "sesnsp_delitos", "x.parquet")
 

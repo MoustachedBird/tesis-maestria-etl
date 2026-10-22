@@ -83,7 +83,7 @@ class TestValoresQueSobreviven:
 
     def test_preserva_texto_con_comas_comillas_y_saltos(self, conn):
         """El CSV se arma en el cliente: si el escapado falla, se corre todo."""
-        raros = ['con,coma', 'con"comilla', "con\nsalto", "con\ttab", "acentós ñ"]
+        raros = ["con,coma", 'con"comilla', "con\nsalto", "con\ttab", "acentós ñ"]
         copy_dataframe(conn, filas(len(raros), nom_estab=raros), "establecimientos")
 
         estab = get_table("establecimientos")
@@ -151,9 +151,7 @@ class TestContrato:
     def test_respeta_el_orden_de_columnas_pedido(self, conn):
         """El orden lo manda `columns`, no el del DataFrame."""
         df = filas(1, nom_estab=["Primero"])
-        copy_dataframe(
-            conn, df, "establecimientos", columns=["nom_estab", "period", "id"]
-        )
+        copy_dataframe(conn, df, "establecimientos", columns=["nom_estab", "period", "id"])
         estab = get_table("establecimientos")
         assert conn.execute(select(estab.c.nom_estab)).scalar_one() == "Primero"
 

@@ -235,12 +235,12 @@ def transform(
     clee_resolution_radio: bool = typer.Option(
         True,
         "--clee-resolution-radio/--no-clee-resolution-radio",
-        help="Run CLEE resolution (radio/BallTree -> clee_propagado_radio)",
+        help="Run CLEE resolution (radio/BallTree -> silver.clee_radio)",
     ),
     clee_resolution_h3: bool = typer.Option(
         True,
         "--clee-resolution-h3/--no-clee-resolution-h3",
-        help="Run CLEE resolution (H3 blocking -> clee_propagado_h3), comparison track",
+        help="Run CLEE resolution (H3 blocking -> silver.clee_h3), comparison track",
     ),
     sesnsp: bool = typer.Option(
         True,
@@ -443,7 +443,7 @@ def build_entidades():
     Build the entidades_economicas dimension (one row per resolved business).
 
     Run AFTER CLEE resolution: aggregates establecimientos by
-    clee_propagado_radio in Silver (full rebuild -- NEW_* ids are not
+    silver.clee_radio (full rebuild -- NEW_* ids are not
     stable across --force resolutions). Gold inherits on `make load`.
     """
     console.print("[bold blue]Building entidades_economicas dimension[/bold blue]")

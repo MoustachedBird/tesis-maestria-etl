@@ -134,14 +134,16 @@ class TestPrecedenciaDePaths:
         # El combinado llega primero (mas cercano) pero el directo debe ganar.
         kb = _kb(
             [
-                {"clee": "COMBINADO", "name": "TAQUERIA EL BUEN", "cp": "01000",
-                 "tel": "5555555555"},
+                {
+                    "clee": "COMBINADO",
+                    "name": "TAQUERIA EL BUEN",
+                    "cp": "01000",
+                    "tel": "5555555555",
+                },
                 {"clee": "DIRECTO", "name": "TAQUERIA EL BUEN SABOR"},
             ]
         )
-        got = _call(
-            [0, 1], kb, name="TAQUERIA EL BUEN SABOR", cp="01000", tel="5555555555"
-        )
+        got = _call([0, 1], kb, name="TAQUERIA EL BUEN SABOR", cp="01000", tel="5555555555")
         assert got == "DIRECTO"
 
 
@@ -166,8 +168,20 @@ class TestCorteTemprano:
         kb = _kb([{"clee": "A", "name": "FERRETERIA CENTRAL"}])
         assert _call([0], kb, name="FERRETERIA CENTRAL") == "A"
         _, _, score = calculate_match_score(
-            "FERRETERIA CENTRAL", "", ACT, "", "", "", "",
-            "FERRETERIA CENTRAL", "", ACT, "", "", "", "",
+            "FERRETERIA CENTRAL",
+            "",
+            ACT,
+            "",
+            "",
+            "",
+            "",
+            "FERRETERIA CENTRAL",
+            "",
+            ACT,
+            "",
+            "",
+            "",
+            "",
         )
         assert score == PERFECT_NAME_SCORE
 
@@ -184,9 +198,7 @@ class TestSinMatch:
 
     def test_gate_de_actividad_descarta_antes_de_comparar(self):
         # Mismo nombre exacto, pero giro distinto: el gate manda.
-        kb = _kb(
-            [{"clee": "X", "name": "LA PASADITA", "act": "Bufetes juridicos"}]
-        )
+        kb = _kb([{"clee": "X", "name": "LA PASADITA", "act": "Bufetes juridicos"}])
         assert _call([0], kb, name="LA PASADITA") is None
 
 
@@ -202,8 +214,20 @@ class TestContratoDelScore:
     )
     def test_no_match_devuelve_score_cero(self, t_act, kb_act, estrategia):
         is_match, strategy, score = calculate_match_score(
-            "FLORERIA DON PEPE", "", t_act, "", "", "", "",
-            "TALLER HERMANOS LOPEZ", "", kb_act, "", "", "", "",
+            "FLORERIA DON PEPE",
+            "",
+            t_act,
+            "",
+            "",
+            "",
+            "",
+            "TALLER HERMANOS LOPEZ",
+            "",
+            kb_act,
+            "",
+            "",
+            "",
+            "",
         )
         assert is_match is False
         assert strategy == estrategia

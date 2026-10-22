@@ -246,12 +246,13 @@ def silver_read_query(clee_table: str | None) -> str:
     """
     if clee_table is None:
         identidad = (
-            f"CAST(NULL AS VARCHAR) AS {RESOLVED_COLUMN}, "
-            f"CAST(NULL AS VARCHAR) AS {ORIGEN_COLUMN}"
+            f"CAST(NULL AS VARCHAR) AS {RESOLVED_COLUMN}, CAST(NULL AS VARCHAR) AS {ORIGEN_COLUMN}"
         )
         join = ""
     else:
-        identidad = f"r.{RESOLVED_COLUMN} AS {RESOLVED_COLUMN}, r.{ORIGEN_COLUMN} AS {ORIGEN_COLUMN}"
+        identidad = (
+            f"r.{RESOLVED_COLUMN} AS {RESOLVED_COLUMN}, r.{ORIGEN_COLUMN} AS {ORIGEN_COLUMN}"
+        )
         join = f"\n    LEFT JOIN {clee_table} r ON r.id = e.id AND r.period = e.period"
 
     return f"""

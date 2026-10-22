@@ -52,7 +52,7 @@ MAX_IDENTIFIER_LEN = 63
 def _child_index_name(parent_index: str, partition: str) -> str:
     """Nombre del indice de una particion, acotado a lo que Postgres acepta.
 
-    `ix_silver_establecimientos_clee_propagado_radio` (47) +
+    Un nombre de indice largo (p. ej. 47 caracteres) mas
     `establecimientos_2024_11` (24) se pasa de 63, asi que el sufijo es solo
     la parte `YYYY_MM` de la particion y, si aun asi no cabe, lo que se
     recorta es el nombre del indice --nunca el sufijo, que es lo unico que

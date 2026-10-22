@@ -8,7 +8,7 @@ maquinaria de produccion contra los demas periodos oficiales como
 referencia, y compara la asignacion contra la verdad.
 
 Protocolo completo en todo.md (seccion "Protocolo de evaluacion",
-2026-07-20). Independiente de las columnas clee_propagado_*: la verdad
+2026-07-20). Independiente de la resolucion materializada: la verdad
 es `clee` oficial, asi que puede correrse antes/despues de cualquier
 re-resolucion. JAMAS escribe en el Silver real: `extract` lee read-only
 a parquets y `evaluate` trabaja solo sobre esos parquets.

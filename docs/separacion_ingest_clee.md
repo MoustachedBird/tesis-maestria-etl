@@ -1,8 +1,9 @@
 # Separar el ingest de la resolución CLEE
 
-**Estado:** en curso. Pasos 1 y 2 hechos; 3 y 4 pendientes. **La
-verificación contra base real no ha ocurrido**: la Mac no tiene Docker, así
-que los 154 tests marcados `postgres` solo corren en indominus. El ingest y la
+**Estado:** código completo (pasos 1–4, 2026-10-22). **La verificación
+contra base real no ha ocurrido**: la Mac no tiene Docker, así que los 154
+tests marcados `postgres` solo corren en indominus. No correr el ingest ni
+la resolución antes de que esa suite pase en verde. El ingest y la
 resolución **no se corren hasta terminarlos**: no tiene sentido gastar horas
 de CLEE sobre un esquema que va a cambiar.
 
@@ -211,13 +212,30 @@ Cada paso es un commit verificable por su cuenta.
 - [x] **2. Cada resolución escribe su tabla** (2026-10-22). Staging + `ATTACH PARTITION`,
       sin `UPDATE` y **sin reset previo**. Aquí muere el borrón de la fase
       determinista.
-- [ ] **3. Vistas puente y migración de lectores.** Una vista por método
-      para el join, más `silver.clee_resuelto` para la comparación; y mover
-      `loaders/entidades.py`, el matching y los scripts uno por uno, cada
-      cual con sus tests.
-- [ ] **4. Migración final.** Tirar `clee_propagado_radio` y
-      `clee_propagado_h3` de `establecimientos`, solo cuando ya nadie las
-      lea.
+- [x] **3. Migración de lectores** (2026-10-22). Resultó haber **un solo**
+      lector de código: el `BUILD_SQL` de `loaders/entidades.py`, que ahora
+      hace `JOIN silver.clee_radio USING (id, period)` — INNER y no LEFT,
+      porque una observación sin identidad no puede ser parte de la
+      dimensión de negocios.
+
+      **Las vistas puente no se crearon.** Existían para no reescribir
+      muchos consumidores de golpe, y con uno solo habrían sido una capa sin
+      función. La vista `UNION ALL` de comparación tampoco: `metodo_source` y
+      `comparacion_source` de `clee_propagation_stats` ya hacen ese join
+      inline, y una vista que nadie consulta es estructura muerta.
+- [x] **4. Migración final** (2026-10-22, revisión
+      `b0003saca_clee_del_hecho`). `establecimientos` pierde
+      `clee_propagado_radio` y `clee_propagado_h3`; sus índices se van con
+      ellas. `clee` NO se toca: es el dato de INEGI, no una derivación.
+
+      De paso, `entidades_economicas.clee_propagado_radio` pasa a
+      `clee_resuelto`: la dimensión guarda la identidad del negocio, y el
+      nombre viejo quedaba huérfano al no existir ya esa columna en el
+      hecho.
+
+      Tras aplicarla hay que correr la resolución para poblar
+      `silver.clee_radio`; hasta entonces la dimensión se reconstruye
+      vacía (y lo dice en el log).
 
 **Hacerlo antes de la Fase 5.** Esto reescribe el contrato Silver→Gold, y
 Gold todavía no existe: cambiarlo ahora es más barato que después.

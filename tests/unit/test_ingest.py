@@ -117,9 +117,7 @@ def catalogos(silver_engine):
 @pytest.fixture
 def ingest(catalogos, tracker, tmp_path):
     """Procesador apuntando al Postgres y al Bronze de prueba."""
-    return BronzeToSilverProcessor(
-        data_root=tmp_path, tracker=tracker, engine=catalogos
-    )
+    return BronzeToSilverProcessor(data_root=tmp_path, tracker=tracker, engine=catalogos)
 
 
 def registrar_descargas(tracker: MetadataTracker, archivos: dict[str, list]) -> None:
@@ -299,10 +297,7 @@ class TestAislamientoEntreCortes:
         assert contar(ingest.engine) == 1
 
         tareas = pl.DataFrame(
-            [
-                (t["task_name"], t["status"])
-                for t in _process_tasks(ingest.engine)
-            ],
+            [(t["task_name"], t["status"]) for t in _process_tasks(ingest.engine)],
             schema=["task_name", "status"],
             orient="row",
         )

@@ -16,6 +16,7 @@ from src.etl.loaders.entidades import TABLE_NAME, build_entidades_economicas
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
 from src.shared.db.partitions import create_partition
+from src.shared.enums import OrigenClee
 
 pytestmark = pytest.mark.postgres
 
@@ -23,7 +24,8 @@ pytestmark = pytest.mark.postgres
 CORTES = [date(2019, 11, 1), date(2021, 5, 1), date(2022, 11, 1), date(2016, 1, 1)]
 
 #: Un negocio visto en 3 cortes (con mudanza de CP en el ultimo), uno
-#: sintetico visto una vez, y una fila sin resolver que debe quedar fuera.
+#: sintetico visto una vez, y una fila sin resolver (identidad None, sin
+#: entrada en `clee_radio`) que debe quedar fuera de la dimension.
 OBSERVACIONES = [
     ("a1", "14TAC123", date(2019, 11, 1), "TACOS EL GUERO", "44100", date(2010, 7, 1)),
     ("a2", "14TAC123", date(2021, 5, 1), "TACOS EL GUERO", "44100", date(2010, 7, 1)),
@@ -39,13 +41,14 @@ def conn(silver_engine):
     with silver_engine.begin() as conn:
         for corte in CORTES:
             create_partition(conn, corte)
+            create_partition(conn, corte, table="clee_radio")
+
         copy_dataframe(
             conn,
             pl.DataFrame(
-                OBSERVACIONES,
+                [(o[0], o[2], o[3], o[4], o[5]) for o in OBSERVACIONES],
                 schema={
                     "id": pl.Utf8,
-                    "clee_propagado_radio": pl.Utf8,
                     "period": pl.Date,
                     "nom_estab": pl.Utf8,
                     "cod_postal": pl.Utf8,
@@ -55,20 +58,48 @@ def conn(silver_engine):
             ),
             "establecimientos",
         )
+        # La identidad vive en la tabla del metodo. La fila sin resolver no
+        # tiene entrada ahi: su pendiente es la ausencia de fila, y el JOIN
+        # de la dimension la deja fuera sola.
+        resueltas = [o for o in OBSERVACIONES if o[1] is not None]
+        copy_dataframe(
+            conn,
+            pl.DataFrame(
+                [
+                    (
+                        o[0],
+                        o[2],
+                        o[1],
+                        OrigenClee.NUEVO.value
+                        if o[1].startswith("NEW_")
+                        else OrigenClee.PROPAGADO.value,
+                    )
+                    for o in resueltas
+                ],
+                schema={
+                    "id": pl.Utf8,
+                    "period": pl.Date,
+                    "clee_resuelto": pl.Utf8,
+                    "origen": pl.Utf8,
+                },
+                orient="row",
+            ),
+            "clee_radio",
+        )
         yield conn
 
 
 def dimension(conn):
     """La dimension como lista de diccionarios, ordenada por identidad."""
     tabla = get_table(TABLE_NAME)
-    filas = conn.execute(select(tabla).order_by(tabla.c.clee_propagado_radio)).mappings()
+    filas = conn.execute(select(tabla).order_by(tabla.c.clee_resuelto)).mappings()
     return [dict(f) for f in filas]
 
 
 class TestColapso:
     def test_una_fila_por_identidad(self, conn):
         assert build_entidades_economicas(conn) == 2
-        assert [f["clee_propagado_radio"] for f in dimension(conn)] == [
+        assert [f["clee_resuelto"] for f in dimension(conn)] == [
             "14TAC123",
             "NEW_14H3-abc",
         ]
@@ -102,7 +133,7 @@ class TestAtributos:
     def test_las_identidades_sinteticas_quedan_marcadas(self, conn):
         """Los NEW_* son negocios sin match: el analisis debe distinguirlos."""
         build_entidades_economicas(conn)
-        por_id = {f["clee_propagado_radio"]: f for f in dimension(conn)}
+        por_id = {f["clee_resuelto"]: f for f in dimension(conn)}
         assert por_id["14TAC123"]["es_sintetica"] is False
         assert por_id["NEW_14H3-abc"]["es_sintetica"] is True
 
@@ -114,9 +145,9 @@ class TestRebuild:
         assert build_entidades_economicas(conn) == 2
 
     def test_sin_identidades_resueltas_la_dimension_queda_vacia(self, conn):
-        estab = get_table("establecimientos")
-        conn.execute(estab.update().values(clee_propagado_radio=None))
+        """Sin filas en la tabla del metodo no hay negocios que colapsar."""
+        conn.execute(get_table("clee_radio").delete())
         assert build_entidades_economicas(conn) == 0
-        assert conn.execute(
-            select(func.count()).select_from(get_table(TABLE_NAME))
-        ).scalar_one() == 0
+        assert (
+            conn.execute(select(func.count()).select_from(get_table(TABLE_NAME))).scalar_one() == 0
+        )

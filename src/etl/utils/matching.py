@@ -173,8 +173,8 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
     Genera candidatos espaciales por blocking de celdas H3.
 
     NO sustituye al BallTree: es el generador del metodo COMPLEMENTARIO de
-    propagacion (columna `clee_propagado_h3`), que corre en paralelo al
-    baseline por radio (`clee_propagado_radio`) para comparar ambos metodos
+    propagacion (tabla `silver.clee_h3`), que corre en paralelo al
+    baseline por radio (`silver.clee_radio`) para comparar ambos metodos
     lado a lado. Misma interfaz de retorno que find_spatial_neighbors:
     (indices, distances).
 

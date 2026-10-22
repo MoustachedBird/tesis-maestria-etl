@@ -56,9 +56,9 @@ class TestSiembraCadaCatalogo:
         scian.load_seeds(connection)
         actividades = get_table("denue_actividades_economicas")
         row = connection.execute(
-            select(
-                actividades.c.sector, actividades.c.subsector, actividades.c.rama
-            ).where(actividades.c.codigo_act == "461110")
+            select(actividades.c.sector, actividades.c.subsector, actividades.c.rama).where(
+                actividades.c.codigo_act == "461110"
+            )
         ).one()
         assert tuple(row) == ("46", "461", "4611")
 

@@ -54,7 +54,6 @@ def test_get_pipeline_status(temp_transformer):
     assert "clee_resolution_metrics" in status
 
 
-
 def test_transformer_repr(temp_transformer):
     """El repr dice de donde lee: su unica configuracion es la raiz de datos."""
     repr_str = repr(temp_transformer)

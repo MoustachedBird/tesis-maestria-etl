@@ -1,8 +1,8 @@
 """Tests de paridad del generador de candidatos H3 vs BallTree.
 
-`find_h3_neighbors` (blocking H3, columna clee_propagado_h3) debe producir
+`find_h3_neighbors` (blocking H3, tabla silver.clee_h3) debe producir
 EXACTAMENTE los mismos conjuntos de vecinos dentro de SPATIAL_RADIUS_M que
-`find_spatial_neighbors` (BallTree, columna clee_propagado_radio): mismo
+`find_spatial_neighbors` (BallTree, tabla silver.clee_radio): mismo
 radio, misma semantica; solo cambia el algoritmo de generacion.
 
 Ambos generadores retornan distancias en METROS y comparten el mismo

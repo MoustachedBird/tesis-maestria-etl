@@ -21,9 +21,7 @@ def pipeline_logger(tmp_path):
     Sin consola: RichHandler escribe a stderr y aqui solo interesan los
     archivos, que son el registro duradero.
     """
-    pl = PipelineLogger(
-        log_dir=tmp_path / "downloads", run_id="corrida-1", enable_console=False
-    )
+    pl = PipelineLogger(log_dir=tmp_path / "downloads", run_id="corrida-1", enable_console=False)
     yield pl
     # El root logger es global: dejarlo con los handlers de este test
     # contaminaria los siguientes.
@@ -85,9 +83,7 @@ class TestArchivoDeErrores:
     def test_el_error_tambien_queda_en_app_log(self, pipeline_logger):
         """errors.log es un filtro, no un desvio: no se pierde del completo."""
         pipeline_logger.get_logger().error("descarga_fallida")
-        assert "descarga_fallida" in [
-            r["event"] for r in leer_jsonl(pipeline_logger.json_log_path)
-        ]
+        assert "descarga_fallida" in [r["event"] for r in leer_jsonl(pipeline_logger.json_log_path)]
 
     def test_una_excepcion_deja_su_traza(self, pipeline_logger):
         try:
@@ -118,12 +114,8 @@ class TestLogsDeLibrerias:
 class TestNoDuplicar:
     def test_dos_corridas_no_duplican_las_lineas(self, tmp_path):
         """Crear un segundo logger apilaba handlers y todo se escribia dos veces."""
-        primero = PipelineLogger(
-            log_dir=tmp_path / "d", run_id="r1", enable_console=False
-        )
-        segundo = PipelineLogger(
-            log_dir=tmp_path / "d", run_id="r2", enable_console=False
-        )
+        primero = PipelineLogger(log_dir=tmp_path / "d", run_id="r1", enable_console=False)
+        segundo = PipelineLogger(log_dir=tmp_path / "d", run_id="r2", enable_console=False)
         segundo.get_logger().info("una_sola_vez")
 
         assert len(leer_jsonl(segundo.json_log_path)) == 1

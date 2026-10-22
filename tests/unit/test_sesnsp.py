@@ -57,8 +57,8 @@ def _write_sample_csv(path: Path, encoding: str = "latin-1") -> None:
 
 def _seed_delitos(tmp_path: Path) -> Path:
     """Escribe un seed del catalogo con las 2 combinaciones de muestra."""
-    catalogo = _sample_delitos().with_row_index("id", offset=1).with_columns(
-        pl.col("id").cast(pl.Int32)
+    catalogo = (
+        _sample_delitos().with_row_index("id", offset=1).with_columns(pl.col("id").cast(pl.Int32))
     )
     path = tmp_path / SEED_DELITOS_FILE
     catalogo.write_parquet(path)
@@ -98,9 +98,7 @@ def catalogos(silver_engine, tmp_path):
     """
     _seed_delitos(tmp_path)
     with silver_engine.begin() as conn:
-        conn.execute(
-            insert(get_table(DELITOS_TABLE)), build_delitos_rows(tmp_path)
-        )
+        conn.execute(insert(get_table(DELITOS_TABLE)), build_delitos_rows(tmp_path))
         conn.execute(
             insert(get_table("denue_entidades")),
             [{"cve_ent": "01", "entidad": "Aguascalientes"}],
@@ -255,9 +253,9 @@ class TestLoadCsv:
         """El SESNSP las publica como enteros; las FKs las exigen con ceros."""
         self._cargar(catalogos, tmp_path, "latin-1")
         hechos = get_table("sesnsp_incidencia_municipal")
-        assert catalogos.execute(
-            select(hechos.c.cve_ent, hechos.c.cve_mun).distinct()
-        ).all() == [("01", "001")]
+        assert catalogos.execute(select(hechos.c.cve_ent, hechos.c.cve_mun).distinct()).all() == [
+            ("01", "001")
+        ]
 
     def test_utf8_carga_identico(self, catalogos, tmp_path):
         """El corte llega en latin-1 o utf-8 segun quien lo publique."""
@@ -272,6 +270,4 @@ class TestLoadCsv:
         self._cargar(catalogos, tmp_path, "latin-1")
 
         hechos = get_table("sesnsp_incidencia_municipal")
-        assert catalogos.execute(
-            select(func.count()).select_from(hechos)
-        ).scalar_one() == 24
+        assert catalogos.execute(select(func.count()).select_from(hechos)).scalar_one() == 24

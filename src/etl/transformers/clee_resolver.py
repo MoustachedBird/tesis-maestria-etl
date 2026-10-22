@@ -10,12 +10,12 @@ is compared against one reference period at a time (instead of a
 monolithic growing KB), keeping peak RAM to ~5-8 GB.
 
 For periods that already have CLEE assigned by INEGI (2021+), resolution
-is deterministic (clee_propagado_radio = clee). For older periods without CLEE
+is deterministic (clee_resuelto = clee). For older periods without CLEE
 (2015-2020), a spatial tolerance radius (BallTree) pre-filter and a
 conditional matching cascade resolve identities probabilistically.
 
 Lee y escribe directamente sobre `silver.establecimientos`,
-populating the `clee_propagado_radio` column on the `establecimientos` table.
+populating the resolution table of the active method.
 """
 
 import gc
@@ -65,14 +65,14 @@ class CLEEResolver:
 
     Uses a sliding-window approach: for each target period without CLEE,
     iterates over all already-resolved periods one at a time as reference,
-    propagating clee_propagado_radio where spatial + fuzzy matching finds a hit.
+    propagating the identity where spatial + fuzzy matching finds a hit.
 
     Peak memory: ~5-8 GB (1 reference period + 1 target period).
 
     Modes:
-        force=True:  Reset all clee_propagado_radio, re-resolve from scratch.
-        force=False: Only process records where clee_propagado_radio IS NULL
-                     (incremental, preserves already-assigned values).
+        force=True:  rebuild the method's table from scratch.
+        force=False: only resolve observations without a row in it
+                     (incremental, preserves already-assigned identities).
     """
 
     # Metodos disponibles: mapea method -> (columna destino, funcion de
@@ -262,7 +262,7 @@ class CLEEResolver:
         return ref_kb
 
     def _invalidate_kb_cache(self, period: date) -> None:
-        """Borra la KB cacheada de un periodo (tras re-escribir sus clee_propagado_radio)."""
+        """Borra la KB cacheada de un periodo (tras re-escribir su identidad)."""
         cache_path = self._kb_cache_path(period)
         if cache_path.exists():
             cache_path.unlink()
@@ -584,12 +584,12 @@ class CLEEResolver:
         """
         Process all periods using sliding-window entity resolution.
 
-        Phase 1 (deterministic): Periods with CLEE get clee_propagado_radio = clee
+        Phase 1 (deterministic): Periods with CLEE get clee_resuelto = clee
         Phase 2 (probabilistic): Periods without CLEE are resolved via
         sliding-window comparison against all already-resolved periods.
 
         Args:
-            force: If True, reset all clee_propagado_radio and re-resolve from scratch.
+            force: If True, rebuild the method's table from scratch.
 
         Returns:
             Dict with resolution statistics.
@@ -645,11 +645,11 @@ class CLEEResolver:
         Run CLEE resolution pipeline.
 
         Lee Silver corte por corte, resuelve identidades
-        identities, and writes `clee_propagado_radio` back to the same table.
+        identities, and writes them to the method's resolution table.
 
         Args:
-            force: If True, reset all clee_propagado_radio values and re-run from scratch.
-                   If False, only process rows where clee_propagado_radio IS NULL (incremental).
+            force: If True, rebuild the method's table from scratch.
+                   If False, only resolve rows without a row in it (incremental).
 
         Returns:
             True if successful, False otherwise

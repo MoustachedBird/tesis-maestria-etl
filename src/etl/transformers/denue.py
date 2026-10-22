@@ -106,15 +106,15 @@ class DenuePipelineOrchestrator:
 
         Matches establishments across time periods and generates
         master identifiers (CLEEs) for entity tracking. Results are
-        written back to the `clee_propagado_radio` column.
+        written to `silver.clee_radio`.
 
         Args:
-            force: If True, reset all clee_propagado_radio values and re-run from scratch.
+            force: If True, rebuild silver.clee_radio from scratch.
 
         Returns:
             True if successful, False otherwise
         """
-        logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> clee_propagado_radio)")
+        logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> silver.clee_radio)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
 
         try:
@@ -137,16 +137,16 @@ class DenuePipelineOrchestrator:
 
         Same sliding-window entity resolution as the radio method, but
         candidates come from H3 cell blocking (grid_disk + exact haversine
-        post-filter). Results are written to the `clee_propagado_h3` column,
-        independent from `clee_propagado_radio` (side-by-side comparison).
+        post-filter). Results are written to `silver.clee_h3`, independent
+        from `silver.clee_radio` (side-by-side comparison).
 
         Args:
-            force: If True, reset all clee_propagado_h3 values and re-run.
+            force: If True, rebuild silver.clee_h3 from scratch.
 
         Returns:
             True if successful, False otherwise
         """
-        logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> clee_propagado_h3)")
+        logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> silver.clee_h3)")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
 
         try:

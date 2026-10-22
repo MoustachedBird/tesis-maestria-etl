@@ -66,19 +66,6 @@ class Establecimiento(Base):
     clee: Mapped[str | None] = mapped_column(
         String, index=True, comment="CLEE - Clave Larga de Establecimiento Económico"
     )
-    clee_propagado_radio: Mapped[str | None] = mapped_column(
-        String,
-        index=True,
-        comment="Resolved CLEE: official INEGI CLEE or generated via entity resolution",
-    )
-    clee_propagado_h3: Mapped[str | None] = mapped_column(
-        String,
-        comment=(
-            "Resolved CLEE via H3 cell blocking (comparison track vs clee_propagado_radio). "
-            "Deliberately unindexed: ART maintenance makes massive resolution "
-            "writes ~1000x slower; index after resolution if needed"
-        ),
-    )
     nom_estab: Mapped[str | None] = mapped_column(String(500), comment="Establishment name")
     raz_social: Mapped[str | None] = mapped_column(
         String(500), comment="Business legal name (razón social)"
@@ -741,7 +728,7 @@ class EntidadEconomica(Base):
     Economic Entity Dimension (N3) -- one row per resolved business.
 
     Collapses per-period observations in `establecimientos` to one row per
-    resolved identity (`clee_propagado_radio`): attributes from the most
+    resolved identity (`silver.clee_radio.clee_resuelto`): attributes from the most
     recent period plus the observed lifespan (primer/ultimo periodo). This
     is the survival/mortality unit of analysis for the thesis.
 
@@ -754,7 +741,7 @@ class EntidadEconomica(Base):
 
     __tablename__ = "entidades_economicas"
 
-    clee_propagado_radio: Mapped[str] = mapped_column(
+    clee_resuelto: Mapped[str] = mapped_column(
         String(50), primary_key=True, comment="Resolved identity (CLEE or NEW_* synthetic)"
     )
     es_sintetica: Mapped[bool] = mapped_column(
@@ -798,6 +785,6 @@ class EntidadEconomica(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<EntidadEconomica(clee={self.clee_propagado_radio}, "
+            f"<EntidadEconomica(clee={self.clee_resuelto}, "
             f"{self.primer_periodo}..{self.ultimo_periodo}, n={self.n_periodos})>"
         )

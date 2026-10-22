@@ -3,7 +3,7 @@ Metricas de exito de la propagacion CLEE sobre una base ya resuelta.
 
 Complementa `scripts/evaluate_masked_clee.py`: aquel mide PRECISION contra
 ground truth sobre una muestra enmascarada; este mide COBERTURA y salud
-estructural de las columnas `clee_propagado_*` tal como quedaron en el
+estructural de las tablas de resolucion tal como quedaron en el
 warehouse real, sobre las 77M de filas y sin ground truth.
 
 Las tres preguntas que responde:
@@ -28,7 +28,7 @@ escribe en Silver.
 Uso:
     uv run python scripts/clee_propagation_stats.py            # Silver real
     docker compose run --rm tools python scripts/clee_propagation_stats.py
-    uv run python scripts/clee_propagation_stats.py --column clee_propagado_radio
+    uv run python scripts/clee_propagation_stats.py --method radio
 
 Salida: tabla en el log + JSON en data/eval/propagation_stats/.
 """
@@ -56,7 +56,7 @@ from src.shared.logging import get_stage_logger  # noqa: E402
 
 logger = get_stage_logger(__name__, Path("./data/etl_propagation_stats.log"))
 
-app = typer.Typer(help="Metricas de cobertura/salud de las columnas clee_propagado_*")
+app = typer.Typer(help="Metricas de cobertura/salud de la resolucion CLEE por metodo")
 
 STATS_DIR = settings.DATA_DIR / "eval" / "propagation_stats"
 """Directorio de salida de los JSON de metricas. Vive bajo data/eval/ (no
@@ -66,7 +66,7 @@ que la evaluacion de Fase 7."""
 SYNTHETIC_PREFIX = "NEW_"
 """Prefijo de las identidades sinteticas que asigna `assign_new_clees()`
 (`NEW_{prefijo_region}-{uuid12}`). NO es configurable por .env: esta
-acoplado al formato materializado en las columnas clee_propagado_* y a
+acoplado al formato materializado en `clee_resuelto` y a
 `entidades_economicas.es_sintetica`, que lo usa con el mismo literal."""
 
 DEFAULT_METHODS = list(CLEEResolver.METHODS)
