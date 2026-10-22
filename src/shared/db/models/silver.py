@@ -121,15 +121,25 @@ class Establecimiento(Base):
     )
 
     # Building/location details
-    numero_ext: Mapped[str | None] = mapped_column(String(20), comment="External number")
+    #
+    # Sin tope de largo: son texto libre tal como INEGI lo publica. El
+    # diccionario los describe como numero y letra, pero los CSV traen
+    # frases enteras ("DOMICILIO CONOCIDO", "LOTE 01 Y 02 MANZANA",
+    # "KILOMETRO 304+800"). Un `varchar(n)` sobre un dato que no
+    # controlamos no valida nada: convierte un valor sucio en el fallo de
+    # un COPY de 6M filas, y en PostgreSQL no compra ni espacio ni
+    # velocidad frente a `text`. El tope se conserva solo donde es
+    # validacion real -- los codigos que cruzan con los catalogos de
+    # geografia (cve_ent, cve_mun, cve_loc).
+    numero_ext: Mapped[str | None] = mapped_column(String, comment="External number")
     letra_ext: Mapped[str | None] = mapped_column(
-        String(10), comment="External number letter/suffix"
+        String, comment="External number letter/suffix"
     )
     edificio: Mapped[str | None] = mapped_column(String(100), comment="Building name")
     edificio_e: Mapped[str | None] = mapped_column(String(100), comment="Building name (extended)")
-    numero_int: Mapped[str | None] = mapped_column(String(20), comment="Internal/apartment number")
+    numero_int: Mapped[str | None] = mapped_column(String, comment="Internal/apartment number")
     letra_int: Mapped[str | None] = mapped_column(
-        String(10), comment="Internal number letter/suffix"
+        String, comment="Internal number letter/suffix"
     )
 
     # Settlement/neighborhood
@@ -145,12 +155,12 @@ class Establecimiento(Base):
     # Shopping center
     nom_cencom: Mapped[str | None] = mapped_column(String(200), comment="Shopping center name")
     num_local: Mapped[str | None] = mapped_column(
-        String(20), comment="Local/store number within shopping center"
+        String, comment="Local/store number within shopping center"
     )
 
     # Postal code
     cod_postal: Mapped[str | None] = mapped_column(
-        String(5), index=True, comment="5-digit postal code"
+        String, index=True, comment="Postal code as published (nominalmente 5 digitos)"
     )
 
     # ===== GEOGRAPHIC CODES (ADMINISTRATIVE DIVISIONS) =====
@@ -159,8 +169,8 @@ class Establecimiento(Base):
     )
     cve_mun: Mapped[str | None] = mapped_column(String(3), index=True, comment="Municipality code")
     cve_loc: Mapped[str | None] = mapped_column(String(4), comment="Locality code")
-    ageb: Mapped[str | None] = mapped_column(String(4), comment="AGEB - Área Geoestadística Básica")
-    manzana: Mapped[str | None] = mapped_column(String(3), comment="Block (manzana) code")
+    ageb: Mapped[str | None] = mapped_column(String, comment="AGEB - Área Geoestadística Básica")
+    manzana: Mapped[str | None] = mapped_column(String, comment="Block (manzana) code")
 
     # ===== GEOGRAPHIC COORDINATES =====
     # Double (no Float): el DDL canonico del writer usa DOUBLE y FLOAT de
@@ -186,7 +196,7 @@ class Establecimiento(Base):
 
     # ===== TEMPORAL TRACKING =====
     fecha_alta_str: Mapped[str | None] = mapped_column(
-        String(10), comment="Registration date in DENUE (any format) as string"
+        String, comment="Registration date in DENUE (any format) as string"
     )
     fecha_alta_date: Mapped[Date | None] = mapped_column(
         Date, comment="Registration date in DENUE (YYYY-MM-01) as Date"

@@ -111,3 +111,45 @@ class TestEstablecimientoHelpers:
 # ============================================================================
 # SCHEMA ALIGNMENT (INTEGRATION TESTS - REAL DB)
 # ============================================================================
+
+
+@pytest.mark.unit
+class TestLargoDeTextoDeOrigen:
+    """El texto libre de INEGI no lleva tope de largo.
+
+    El primer ingest contra Postgres fallo en los 20 cortes porque INEGI
+    publica frases enteras en campos que su diccionario describe como
+    numero y letra. Un tope sobre un dato que no controlamos no valida
+    nada: convierte un valor sucio en el fallo de un COPY de 6M filas.
+    """
+
+    #: Campos que llegan como texto libre desde los CSV.
+    LIBRES = (
+        "numero_ext",
+        "letra_ext",
+        "numero_int",
+        "letra_int",
+        "num_local",
+        "cod_postal",
+        "ageb",
+        "manzana",
+        "fecha_alta_str",
+    )
+
+    #: Campos donde el tope SI es validacion: codigos que cruzan con los
+    #: catalogos de geografia y de actividad economica.
+    ACOTADOS = {"cve_ent": 2, "cve_mun": 3, "cve_loc": 4, "codigo_act": 10}
+
+    def test_el_texto_libre_no_tiene_tope(self):
+        from src.shared.db.models.silver import Establecimiento
+
+        tabla = Establecimiento.__table__
+        con_tope = {c: tabla.c[c].type.length for c in self.LIBRES if tabla.c[c].type.length}
+        assert not con_tope, f"texto libre de INEGI con tope de largo: {con_tope}"
+
+    def test_los_codigos_conservan_su_tope(self):
+        """Ahi el largo es parte del formato, no una suposicion."""
+        from src.shared.db.models.silver import Establecimiento
+
+        tabla = Establecimiento.__table__
+        assert {c: tabla.c[c].type.length for c in self.ACOTADOS} == self.ACOTADOS
