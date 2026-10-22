@@ -76,10 +76,38 @@ Todas particionadas por `LIST (period)` con los mismos límites que
 `establecimientos`, para que el join sea partition-wise y la recuperación
 siga siendo por corte.
 
-La clave de join sale gratis: el PK de `establecimientos` es `(id, period)` y
-**`id` es un hash del contenido de la fila**, así que es determinista y
-reproducible — re-ingestar un periodo regenera los mismos ids y las tablas de
-CLEE siguen válidas.
+### La clave: por qué `(id, period)` si `id` ya es único
+
+`id` **es** único globalmente, y no por suerte: `period` es uno de los cinco
+componentes del hash (`clee`, `nom_estab`, `raz_social`, `codigo_act`,
+`period`, en `transformers/processor.py`). El mismo negocio censado en dos
+cortes produce dos `id` distintos por construcción; sin `period` dentro del
+hash, dos filas idénticas en cortes distintos colisionarían.
+
+Y como el hash es determinista, re-ingestar un periodo regenera los mismos
+ids y las tablas de CLEE siguen válidas.
+
+`period` va en la clave por dos razones **físicas**, no de unicidad:
+
+1. **Postgres lo exige.** En una tabla particionada la clave de partición
+   tiene que estar contenida en toda PK/UNIQUE, y no admite un índice único
+   global que la excluya (ver el comentario del PK en
+   `shared/db/models/silver.py` y `arquitectura.md` Fase 3.2).
+2. **Sin `period` no hay partition-wise join.** Unir por `id` solo obligaría
+   al planeador a cruzar las 20 particiones de un lado contra las 20 del
+   otro sin emparejarlas: un hash join de 82.9M × 82.9M en vez de 20 joins
+   de ~4M. Y una consulta de un corte no podría hacer pruning en ambos
+   lados.
+
+Particionar es lo que da el reemplazo atómico por `ATTACH PARTITION`, que es
+el mecanismo central de este diseño. Sin particionar, re-resolver un corte
+sería `DELETE WHERE period = X` + `INSERT`: ventana sin datos, muertos para
+VACUUM, y de vuelta al problema del que se huye.
+
+Costo de llevar la columna: ~4 bytes por fila (`DATE`), unos 330 MB por tabla
+de método. Y no es redundancia dañina — `period` está determinado
+funcionalmente por `id`, así que almacenarlo es desnormalización por layout
+físico, no ambigüedad de modelo.
 
 ### Por qué una tabla por método y no columnas en una sola
 
