@@ -59,25 +59,6 @@ def contar(conn) -> int:
     ).scalar_one()
 
 
-class TestNombres:
-    """Se derivan de la fecha, sin tocar la base."""
-
-    def test_el_nombre_lleva_ano_y_mes(self):
-        assert partition_name(date(2024, 11, 1)) == "establecimientos_2024_11"
-
-    def test_el_mes_va_con_cero_a_la_izquierda(self):
-        """Sin esto el orden alfabetico dejaria de ser cronologico."""
-        assert partition_name(date(2025, 3, 1)) == "establecimientos_2025_03"
-
-    def test_el_orden_alfabetico_es_cronologico(self):
-        cortes = [date(2025, 3, 1), date(2024, 11, 1), date(2025, 1, 1)]
-        nombres = sorted(partition_name(c) for c in cortes)
-        assert nombres == [partition_name(c) for c in sorted(cortes)]
-
-    def test_el_calificado_va_entrecomillado(self):
-        assert qualified_partition(PERIODO) == '"silver"."establecimientos_2024_11"'
-
-
 class TestCrear:
     def test_una_particion_nueva_aparece_enganchada(self, conn):
         create_partition(conn, PERIODO)

@@ -21,41 +21,50 @@ from sqlalchemy.engine import Connection
 
 from src.shared.db.base import DEFAULT_SCHEMA
 
-#: Tabla particionada. Sus particiones se llaman `<tabla>_YYYY_MM`
-#: (p. ej. `establecimientos_2024_11`). Unica por ahora; si se suman mas,
-#: esto pasa a ser un parametro en vez de una constante del modulo.
+#: Tabla particionada por default. Las particiones se llaman
+#: `<tabla>_YYYY_MM` (p. ej. `establecimientos_2024_11`).
+#:
+#: Es un default y no la unica: `silver.clee_radio` y `silver.clee_h3`
+#: tambien estan particionadas por corte, asi que toda funcion de aqui
+#: acepta `table`. El default cubre la tabla de hechos, que es el caso
+#: dominante; quien opera sobre otra la nombra.
 PARTITIONED_TABLE = "establecimientos"
 
 
-def partition_name(period: date) -> str:
+def partition_name(period: date, table: str = PARTITIONED_TABLE) -> str:
     """Nombre de la particion de un corte.
 
     Args:
         period: fecha del corte (primer dia del mes, por convencion DENUE).
+        table: tabla particionada padre.
 
     Returns:
         str: identificador sin comillas, p. ej. `establecimientos_2024_11`.
     """
-    return f"{PARTITIONED_TABLE}_{period.year:04d}_{period.month:02d}"
+    return f"{table}_{period.year:04d}_{period.month:02d}"
 
 
-def qualified_partition(period: date, schema: str = DEFAULT_SCHEMA) -> str:
+def qualified_partition(
+    period: date, schema: str = DEFAULT_SCHEMA, table: str = PARTITIONED_TABLE
+) -> str:
     """Nombre calificado y entrecomillado de la particion.
 
     Args:
         period: fecha del corte.
         schema: schema donde vive la tabla particionada.
+        table: tabla particionada padre.
 
     Returns:
         str: p. ej. `"silver"."establecimientos_2024_11"`.
     """
-    return f'"{schema}"."{partition_name(period)}"'
+    return f'"{schema}"."{partition_name(period, table)}"'
 
 
 def create_partition(
     conn: Connection,
     period: date,
     schema: str = DEFAULT_SCHEMA,
+    table: str = PARTITIONED_TABLE,
     if_not_exists: bool = True,
 ) -> str:
     """Crea una particion vacia, ya enganchada a la tabla padre.
@@ -72,6 +81,7 @@ def create_partition(
         conn: conexion con permisos de DDL.
         period: fecha del corte.
         schema: schema de la tabla particionada.
+        table: tabla particionada padre.
         if_not_exists: si False, falla cuando la particion ya existe.
 
     Returns:
@@ -83,15 +93,20 @@ def create_partition(
     # su representacion ISO es segura por construccion.
     conn.execute(
         text(
-            f"CREATE TABLE {exists_clause}{qualified_partition(period, schema)} "
-            f'PARTITION OF "{schema}"."{PARTITIONED_TABLE}" '
+            f"CREATE TABLE {exists_clause}{qualified_partition(period, schema, table)} "
+            f'PARTITION OF "{schema}"."{table}" '
             f"FOR VALUES IN (DATE '{period.isoformat()}')"
         )
     )
-    return partition_name(period)
+    return partition_name(period, table)
 
 
-def detach_partition(conn: Connection, period: date, schema: str = DEFAULT_SCHEMA) -> None:
+def detach_partition(
+    conn: Connection,
+    period: date,
+    schema: str = DEFAULT_SCHEMA,
+    table: str = PARTITIONED_TABLE,
+) -> None:
     """Desengancha la particion de un corte sin borrar sus datos.
 
     El paso previo a recargar un corte: la particion queda como tabla suelta
@@ -101,17 +116,22 @@ def detach_partition(conn: Connection, period: date, schema: str = DEFAULT_SCHEM
         conn: conexion con permisos de DDL.
         period: fecha del corte.
         schema: schema de la tabla particionada.
+        table: tabla particionada padre.
     """
     conn.execute(
         text(
-            f'ALTER TABLE "{schema}"."{PARTITIONED_TABLE}" '
-            f"DETACH PARTITION {qualified_partition(period, schema)}"
+            f'ALTER TABLE "{schema}"."{table}" '
+            f"DETACH PARTITION {qualified_partition(period, schema, table)}"
         )
     )
 
 
 def drop_partition(
-    conn: Connection, period: date, schema: str = DEFAULT_SCHEMA, if_exists: bool = True
+    conn: Connection,
+    period: date,
+    schema: str = DEFAULT_SCHEMA,
+    table: str = PARTITIONED_TABLE,
+    if_exists: bool = True,
 ) -> None:
     """Elimina la particion de un corte y sus filas.
 
@@ -119,18 +139,22 @@ def drop_partition(
         conn: conexion con permisos de DDL.
         period: fecha del corte.
         schema: schema de la tabla particionada.
+        table: tabla particionada padre.
         if_exists: si False, falla cuando la particion no existe.
     """
     exists_clause = "IF EXISTS " if if_exists else ""
-    conn.execute(text(f"DROP TABLE {exists_clause}{qualified_partition(period, schema)}"))
+    conn.execute(text(f"DROP TABLE {exists_clause}{qualified_partition(period, schema, table)}"))
 
 
-def existing_partitions(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[str]:
+def existing_partitions(
+    conn: Connection, schema: str = DEFAULT_SCHEMA, table: str = PARTITIONED_TABLE
+) -> list[str]:
     """Particiones enganchadas hoy a la tabla padre.
 
     Args:
         conn: conexion de lectura.
         schema: schema de la tabla particionada.
+        table: tabla particionada padre.
 
     Returns:
         list[str]: nombres sin calificar, ordenados (el nombre lleva la
@@ -148,6 +172,6 @@ def existing_partitions(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[
             ORDER BY child.relname
             """
         ),
-        {"schema": schema, "parent": PARTITIONED_TABLE},
+        {"schema": schema, "parent": table},
     ).scalars()
     return list(rows)

@@ -55,11 +55,13 @@ class StagingTarget:
         schema: schema donde vive la tabla de staging.
         table: nombre de la tabla de staging (sin calificar).
         period: corte que se esta cargando.
+        parent: tabla particionada a la que se enganchara.
     """
 
     schema: str
     table: str
     period: date
+    parent: str = PARTITIONED_TABLE
 
     @property
     def qualified(self) -> str:
@@ -169,7 +171,7 @@ def _attach(conn: Connection, target: StagingTarget, parent: str) -> str:
         )
     )
 
-    final = partition_name(target.period)
+    final = partition_name(target.period, parent)
     conn.execute(text(f'ALTER TABLE {target.qualified} RENAME TO "{final}"'))
     # El CHECK ya es redundante con el limite de la particion y le cuesta una
     # evaluacion a cada INSERT futuro sobre ese corte.
@@ -214,8 +216,13 @@ def staging_partition(
     Raises:
         StagingValidationError: si lo cargado no cuadra con el corte.
     """
+    # El nombre lleva el padre: sin eso, cargar el mismo corte en
+    # `clee_radio` y en `clee_h3` apuntaria a la misma tabla de staging.
     target = StagingTarget(
-        schema=schema, table=f"{partition_name(period)}{STAGING_SUFFIX}", period=period
+        schema=schema,
+        table=f"{partition_name(period, parent)}{STAGING_SUFFIX}",
+        period=period,
+        parent=parent,
     )
     _create_staging_table(conn, target, unlogged=unlogged, parent=parent)
     logger.info(
