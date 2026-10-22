@@ -5,6 +5,9 @@ Se importan **por módulo**, no plano:
     from src.shared.db.models import silver
     silver.Establecimiento        # 82.9M observaciones (negocio, periodo)
 
+    from src.shared.db.models import clee
+    clee.CleeRadio                # identidad resuelta, una tabla por método
+
     from src.shared.db.models import gold
     gold.Establecimiento          # 10.45M negocios resueltos
 
@@ -20,7 +23,8 @@ Establecimiento`). Ese re-export se retira cuando `gold` tenga su propia
 `Establecimiento` (Fase 5), porque ahí el nombre pasa a ser ambiguo.
 """
 
-from src.shared.db.models import gold, meta, silver
+from src.shared.db.models import clee, gold, meta, silver
+from src.shared.db.models.clee import CleeH3, CleeRadio
 from src.shared.db.models.silver import (
     ActividadEconomica,
     Entidad,
@@ -38,11 +42,14 @@ from src.shared.db.models.silver import (
 
 __all__ = [
     # Módulos por capa — la forma preferida de importar
+    "clee",
     "gold",
     "meta",
     "silver",
     # Re-export plano de silver (compatibilidad; se retira en la Fase 5)
     "ActividadEconomica",
+    "CleeH3",
+    "CleeRadio",
     "Entidad",
     "EntidadEconomica",
     "Establecimiento",

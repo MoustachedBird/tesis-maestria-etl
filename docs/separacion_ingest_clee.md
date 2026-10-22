@@ -1,8 +1,11 @@
 # Separar el ingest de la resolución CLEE
 
-**Estado:** propuesto, sin implementar. Decidido el 2026-10-22: se descarta
-el schema `bronze` y se va a **una tabla por método de resolución**. Los
-pasos de la §4 están pendientes de arranque.
+**Estado:** en curso. Paso 1 hecho; los pasos 2–4 pendientes. El ingest y la
+resolución **no se corren hasta terminarlos**: no tiene sentido gastar horas
+de CLEE sobre un esquema que va a cambiar.
+
+Decidido el 2026-10-22: se descarta el schema `bronze` y se va a **una tabla
+por método de resolución**.
 
 **Motivación:** que una falla de la propagación CLEE no pueda dañar la tabla
 de hechos, ni destruir el resultado bueno de la corrida anterior, ni
@@ -185,12 +188,24 @@ observación**, que ya está materializada hoy: solo cambia de tabla.
 
 Cada paso es un commit verificable por su cuenta.
 
-- [ ] **1. Mixin y las dos tablas.** El núcleo `(id, period,
+- [x] **1. Mixin y las dos tablas** (2026-10-22, revisión
+      `b0002clee_por_metodo`). El núcleo `(id, period,
       clee_resuelto)` en un mixin de SQLAlchemy; `silver.clee_radio` y
       `silver.clee_h3` particionadas por `LIST (period)`, cada una con sus
       columnas de evidencia. No toca `establecimientos` ni
       `meta.download_tasks`, así que los ZIPs descargados y su metadata
       quedan intactos.
+
+      Las columnas de evidencia quedaron **fuera** a propósito: hoy
+      `_best_candidate` calcula el score y lo descarta, así que declararlas
+      ahora serían columnas condenadas a NULL. Entran en el paso 2, con el
+      código que las llena.
+
+      Lo que sí entró y hoy se pierde: `origen` (`OrigenClee`: DIRECTO,
+      PROPAGADO, NUEVO). Separa lo que INEGI publicó de lo que el pipeline
+      infirió por similitud y de lo sintético — hoy solo se podía adivinar
+      con un `starts_with(id, 'NEW_')`. Para una tesis que compara métodos
+      de resolución, esa distinción es el dato.
 - [ ] **2. Cada resolución escribe su tabla.** Staging + `ATTACH PARTITION`,
       sin `UPDATE` y **sin reset previo**. Aquí muere el borrón de la fase
       determinista.

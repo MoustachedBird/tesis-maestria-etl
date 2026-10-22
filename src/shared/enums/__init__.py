@@ -6,6 +6,7 @@ no en el paquete que lo usa — la regla es que si más de un paquete lo
 necesita, va en `shared` para que ninguno dependa del otro.
 """
 
+from src.shared.enums.clee import OrigenClee
 from src.shared.enums.jobs import ErrorType, JobStatus, TaskStatus, TriggerType
 from src.shared.enums.layer import Layer
 from src.shared.enums.sections import DENUE_ATOMIC, SECTION_GROUPS, Section
@@ -17,6 +18,7 @@ __all__ = [
     "ErrorType",
     "JobStatus",
     "Layer",
+    "OrigenClee",
     "Section",
     "SourceSystem",
     "TaskStatus",
