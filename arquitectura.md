@@ -11,9 +11,10 @@ Complementa, no reemplaza:
 - `docs/entorno_linux.md` — inventario de la workstation de corridas reales
   y la configuración de Postgres derivada de él.
 - `docs/separacion_ingest_clee.md` — propuesta de sacar el resultado de la
-  propagación CLEE a `silver.clee_resolucion`, para que una falla de la
-  resolución no pueda dañar la tabla de hechos. **Va antes de la Fase 5**:
-  reescribe el contrato Silver→Gold.
+  propagación CLEE a una tabla por método (`silver.clee_radio`,
+  `silver.clee_h3`, y la futura `silver.clee_llm`), para que una falla de una
+  resolución no pueda dañar la tabla de hechos ni los otros métodos. **Va
+  antes de la Fase 5**: reescribe el contrato Silver→Gold.
 
 ---
 
@@ -966,8 +967,8 @@ horas de rebuild es evitable.
 ### Fase 5 — Gold, implementada por primera vez
 
 **Antes de empezar:** `docs/separacion_ingest_clee.md` propone separar el
-ingest de la resolución CLEE y mover `clee_propagado_radio`/`_h3` a
-`silver.clee_resolucion`. Eso cambia de dónde lee Gold la identidad, así que
+ingest de la resolución CLEE y mover `clee_propagado_radio`/`_h3` a una tabla
+por método. Eso cambia de dónde lee Gold la identidad, así que
 conviene resolverlo primero: hacerlo después significa reescribir el
 contrato Silver→Gold dos veces.
 
