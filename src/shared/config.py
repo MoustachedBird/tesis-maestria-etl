@@ -130,31 +130,17 @@ class Settings(BaseSettings):
         """
         return self._get_postgresql_url()
 
-    @computed_field
-    @property
-    def DATABASE_URL_READ_ONLY(self) -> str:
-        """
-        Connection URL for the API's read-only role (`api_ro`).
-
-        Separado de DATABASE_URL a proposito: el API nunca debe conectarse
-        con el rol dueno. Con `api_ro` los GRANT solo cubren gold y meta, asi
-        que un bug en un endpoint no puede tocar silver ni confundir los dos
-        granos de `establecimientos` (arquitectura.md §2.3.1).
-
-        Returns:
-            str: SQLAlchemy-compatible read-only database URL
-        """
-        return self._get_postgresql_url(read_only=True)
-
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
-    def _get_postgresql_url(self, read_only: bool = False) -> str:
+    def _get_postgresql_url(self) -> str:
         """
         Construct PostgreSQL URL with proper driver.
 
-        Args:
-            read_only: If True, use the api_ro role instead of the owner
+        El rol sale de `POSTGRES_USER`, y quien decide cual es el entorno del
+        proceso: el servicio `api` de compose recibe `api_ro` (GRANT solo en
+        gold y meta, arquitectura.md §2.3.1) y el ETL el rol dueno. Un solo
+        camino de conexion, sin ramas por rol en el codigo.
 
         Returns:
             str: PostgreSQL connection URL
@@ -163,17 +149,15 @@ class Settings(BaseSettings):
         # lo pide `shared/db/copy.py` para el COPY por bloques.
         driver = "postgresql+psycopg"
 
-        user = self.POSTGRES_RO_USER if read_only else self.POSTGRES_USER
-        raw_password = self.POSTGRES_RO_PASSWORD if read_only else self.POSTGRES_PASSWORD
+        if not self.POSTGRES_USER:
+            raise ValueError("POSTGRES_USER must be set for PostgreSQL backend")
 
-        if not user:
-            role = "POSTGRES_RO_USER" if read_only else "POSTGRES_USER"
-            raise ValueError(f"{role} must be set for PostgreSQL backend")
+        user = self.POSTGRES_USER
 
         # URL encode password if it contains special characters
         from urllib.parse import quote_plus
 
-        password = quote_plus(raw_password) if raw_password else ""
+        password = quote_plus(self.POSTGRES_PASSWORD) if self.POSTGRES_PASSWORD else ""
 
         credentials = f"{user}:{password}" if password else user
         return (

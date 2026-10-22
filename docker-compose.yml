@@ -227,9 +227,8 @@ services:
           memory: ${MEM_TOOLS:-8g}
 
   # API de consulta. Daemon, no one-shot, asi que no lleva profile: entra con
-  # `docker compose up`. Usa la imagen `tools` porque fastapi es dependencia
-  # del proyecto; la Fase 6 le da su propio Dockerfile sin Selenium ni
-  # rapidfuzz y lo baja al rol de solo lectura `api_ro`.
+  # `docker compose up`. Comparte la imagen `tools`; adelgazarla a una propia
+  # sin Selenium queda para la Fase 6.
   api:
     build:
       context: .
@@ -245,6 +244,18 @@ services:
     env_file: .env
     environment:
       POSTGRES_HOST: postgres
+      # El API entra con `api_ro`, no con el rol dueno: sus GRANT solo cubren
+      # gold y meta (arquitectura.md §2.3.1), asi que un bug en un endpoint
+      # no puede escribir ni leer silver. Se pasa como POSTGRES_USER/PASSWORD
+      # porque `DATABASE_URL` se arma de ahi: la restriccion la impone el
+      # entorno del contenedor, no una rama en el codigo.
+      #
+      # Sin `:?` a proposito: una variable obligatoria aqui abortaria
+      # `docker compose up` ENTERO --incluidos postgres y migrate-- por una
+      # credencial que solo este servicio necesita. Si falta, lo unico que
+      # no arranca es el API, y el log dice por que.
+      POSTGRES_USER: ${POSTGRES_RO_USER:-api_ro}
+      POSTGRES_PASSWORD: ${POSTGRES_RO_PASSWORD:-}
 
     command: ["fastapi", "run", "src/api/main.py", "--host", "0.0.0.0", "--port", "8000"]
 
