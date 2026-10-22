@@ -10,6 +10,10 @@ Complementa, no reemplaza:
 - `AGENTS.md` — guía de desarrollo canónica; se actualiza al cierre de cada fase.
 - `docs/entorno_linux.md` — inventario de la workstation de corridas reales
   y la configuración de Postgres derivada de él.
+- `docs/separacion_ingest_clee.md` — propuesta de sacar el resultado de la
+  propagación CLEE a `silver.clee_resolucion`, para que una falla de la
+  resolución no pueda dañar la tabla de hechos. **Va antes de la Fase 5**:
+  reescribe el contrato Silver→Gold.
 
 ---
 
@@ -960,6 +964,12 @@ completa, sobre la muestra. Descubrir una regresión del matching después de
 horas de rebuild es evitable.
 
 ### Fase 5 — Gold, implementada por primera vez
+
+**Antes de empezar:** `docs/separacion_ingest_clee.md` propone separar el
+ingest de la resolución CLEE y mover `clee_propagado_radio`/`_h3` a
+`silver.clee_resolucion`. Eso cambia de dónde lee Gold la identidad, así que
+conviene resolverlo primero: hacerlo después significa reescribir el
+contrato Silver→Gold dos veces.
 
 **No es un refactor: es diseño nuevo.** Gold no existe hoy (§1.1), así que
 esta fase no migra nada — define qué significa la capa de consumo. Es la
