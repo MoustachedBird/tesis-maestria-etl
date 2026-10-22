@@ -279,9 +279,104 @@ def get_test_postgres_url() -> str:
     )
 
 
+def _primera_linea(exc: Exception) -> str:
+    """Primera linea del error, acotada.
+
+    Solo el tipo y la primera linea: el detalle de psycopg trae el DSN
+    completo y lo ultimo que se quiere es un password en el log de pytest.
+
+    Args:
+        exc: excepcion a resumir.
+
+    Returns:
+        str: mensaje de una linea, maximo 120 caracteres.
+    """
+    texto = str(exc).strip()
+    return texto.splitlines()[0][:120] if texto else ""
+
+
+def _maintenance_url(test_url: str) -> str:
+    """La misma conexion pero contra la base `postgres`.
+
+    `CREATE DATABASE` no se puede ejecutar desde la base que se va a crear,
+    asi que la sonda necesita una base que siempre existe en un servidor
+    vivo.
+
+    Args:
+        test_url: URL de la base de pruebas.
+
+    Returns:
+        str: URL con el nombre de base reemplazado por `postgres`.
+    """
+    base, _, _ = test_url.rpartition("/")
+    return f"{base}/postgres"
+
+
+def _crear_base_de_pruebas(test_url: str) -> str | None:
+    """Crea la base de pruebas si el servidor responde y ella no existe.
+
+    Existe para que una maquina con servidor no salte 157 tests por una
+    base que falta: eso haria que una suite "verde" no probara nada de lo
+    que toca disco, y el motivo del skip se confundiria con "no hay
+    servidor".
+
+    `CREATE DATABASE` no admite transaccion, de ahi el AUTOCOMMIT. El
+    nombre se interpola porque PostgreSQL no acepta bind params en DDL; su
+    valor sale de la config del proyecto con sufijo fijo, no de entrada
+    externa.
+
+    Args:
+        test_url: URL de la base de pruebas.
+
+    Returns:
+        str | None: motivo por el que no se pudo, o None si ya existe o
+        quedo creada.
+    """
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    nombre = test_url.rpartition("/")[2].split("?")[0]
+    engine = create_engine(
+        _maintenance_url(test_url),
+        connect_args={"connect_timeout": TEST_POSTGRES_CONNECT_TIMEOUT},
+        poolclass=NullPool,
+        isolation_level="AUTOCOMMIT",
+    )
+    try:
+        with engine.connect() as conn:
+            # Conectar aqui ya prueba que el servidor esta: lo que falle de
+            # esta linea en adelante es un problema de la base, no del
+            # servidor, y los dos merecen mensajes distintos.
+            existe = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :nombre"), {"nombre": nombre}
+            ).scalar()
+            if existe:
+                return None
+            try:
+                conn.execute(text(f'CREATE DATABASE "{nombre}"'))
+            except SQLAlchemyError as exc:
+                return (
+                    f"falta la base de pruebas '{nombre}' y el rol no pudo crearla "
+                    f"({_primera_linea(exc)}). Crearla a mano con: "
+                    f"docker compose exec -T postgres psql -U postgres "
+                    f"-c 'CREATE DATABASE \"{nombre}\" OWNER etl_rw;'"
+                )
+    except (SQLAlchemyError, OSError) as exc:
+        # No se llego ni a la base `postgres`: el servidor no esta.
+        return f"{type(exc).__name__}: {_primera_linea(exc)}"
+    finally:
+        engine.dispose()
+    return None
+
+
 @functools.lru_cache(maxsize=1)
 def postgres_unavailable_reason() -> str | None:
     """Sondea el Postgres de pruebas una sola vez por sesion.
+
+    Si el servidor responde pero la base de pruebas no existe, la crea: una
+    base ausente es un problema de arranque con arreglo obvio, no una razon
+    para saltarse los tests en silencio. Solo se salta cuando el servidor
+    mismo no esta.
 
     Returns:
         str | None: motivo por el que no se puede usar, o None si responde.
@@ -289,9 +384,15 @@ def postgres_unavailable_reason() -> str | None:
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import SQLAlchemyError
 
+    test_url = get_test_postgres_url()
+
+    faltante = _crear_base_de_pruebas(test_url)
+    if faltante is not None:
+        return faltante
+
     try:
         engine = create_engine(
-            get_test_postgres_url(),
+            test_url,
             connect_args={"connect_timeout": TEST_POSTGRES_CONNECT_TIMEOUT},
             poolclass=NullPool,
         )
@@ -302,10 +403,7 @@ def postgres_unavailable_reason() -> str | None:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except (SQLAlchemyError, OSError) as exc:
-        # Solo el tipo y la primera linea: el detalle de psycopg trae el DSN
-        # completo y lo ultimo que queremos es un password en el log de pytest.
-        first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
-        return f"{type(exc).__name__}: {first_line[:120]}"
+        return f"{type(exc).__name__}: {_primera_linea(exc)}"
     finally:
         engine.dispose()
     return None

@@ -10,25 +10,23 @@ sesión SSH — una corrida pegada a la terminal muere con ella.
 
 ## 1. Base de datos de pruebas
 
-Los tests marcados `postgres` **se saltan solos** si no encuentran servidor,
-así que una suite "verde" sin esta base no prueba nada de lo que toca disco.
+**No hay que crearla a mano.** `conftest.py` la crea en el arranque de la
+sesión de pytest si el servidor responde y la base no existe. Solo se
+saltan los tests cuando no hay servidor, que es cuando saltarlos es lo
+correcto.
 
-`conftest.py` deriva la URL de la config del proyecto cambiando el nombre de
-la base por `<POSTGRES_DB>_test`, y nunca devuelve la de producción. Crearla
-no pone en riesgo `mipymes` ni los ZIP descargados.
+La URL se deriva de la config del proyecto cambiando el nombre de la base
+por `<POSTGRES_DB>_test`, y nunca devuelve la de producción: crearla no pone
+en riesgo `mipymes` ni los ZIP descargados. El esquema tampoco se crea a
+mano — el fixture `pg_engine` lo construye desde el metadata del ORM.
+
+Si el rol no tiene permiso para crear bases, el motivo del skip lo dice y
+trae el comando:
 
 ```bash
-# Crear la base de pruebas (una sola vez)
-docker compose exec -T postgres psql -U etl_rw -d postgres \
-  -c "CREATE DATABASE mipymes_test OWNER etl_rw;"
-
-# Si etl_rw no tiene CREATEDB:
 docker compose exec -T postgres psql -U postgres \
-  -c "CREATE DATABASE mipymes_test OWNER etl_rw;"
+  -c 'CREATE DATABASE "mipymes_test" OWNER etl_rw;'
 ```
-
-El esquema NO se crea a mano: el fixture `pg_engine` lo construye desde el
-metadata del ORM en cada sesión de pytest.
 
 ```bash
 # Verificar que existe
