@@ -1057,18 +1057,54 @@ re-resolución.**
 esquema que su equivalente en `silver`, y una consulta del cruce
 DENUE×SESNSP se responde con un `SELECT` a `gold` sin tocar `silver`.
 
-### Fase 6 — Metadatos y endpoints `/ops`
+### Fase 6 — Metadatos y endpoints `/ops` ⚠️ CASI COMPLETA, VALIDACIÓN PENDIENTE (2026-10-22)
 
-- [ ] `MetadataTracker` sobre ORM contra `meta` (mismo contrato público, para
+- [x] `MetadataTracker` sobre ORM contra `meta` (mismo contrato público, para
       no tocar los call sites de los stages).
-- [ ] Linaje con FK reales hacia `job_runs`.
-- [ ] Router `/api/v1/ops`: `GET /runs`, `GET /runs/{id}`,
+- [x] Linaje con FK reales hacia `job_runs`.
+- [x] Router `/api/v1/ops`: `GET /runs`, `GET /runs/{id}`,
       `GET /runs/{id}/tasks`, `GET /health/pipeline`.
-- [ ] `Dockerfile.api` separado, sin Selenium ni rapidfuzz; servicio `api`
-      con el rol `api_ro`.
+- [x] Servicio `api` con el rol `api_ro`. La restricción la impone el entorno
+      del contenedor: compose le pasa las credenciales de `api_ro` en
+      `POSTGRES_USER`/`POSTGRES_PASSWORD`, de donde sale `DATABASE_URL`. No
+      hay rama por rol en el código ni una `DATABASE_URL_READ_ONLY` aparte —
+      un solo camino de conexión, y el rol lo decide quien lanza el proceso.
+- [ ] `Dockerfile.api` separado, sin Selenium ni rapidfuzz. Pendiente: hoy el
+      servicio comparte la imagen `tools`. Adelgazarlo de verdad exige
+      partir las dependencias de `pyproject.toml` en grupos (el API no
+      necesita polars, scikit-learn, rapidfuzz, selenium ni h3), así que es
+      un cambio de empaquetado, no solo un Dockerfile nuevo.
+
+**Depende de una credencial del despliegue:** el baseline crea `api_ro` con
+`LOGIN` solo si `POSTGRES_RO_PASSWORD` tenía valor al correr la migración; si
+estaba vacía el rol queda `NOLOGIN` y, como el baseline no recrea un rol que
+ya existe, el API no puede conectarse. El arreglo es un
+`ALTER ROLE api_ro LOGIN PASSWORD '...'`, no volver a migrar.
+
+**Etapas que la sonda reporta:** solo las que algún job escribe de verdad en
+`meta.job_runs` — `DOWNLOAD`, `TRANSFORM` y `CLEE_RESOLUTION`. `load` vuelve
+a `GET /ops/health/pipeline` cuando la Fase 5 implemente Gold; `normalize` no
+vuelve, porque el ingest deriva la fecha en vuelo (ver más abajo).
 
 **Criterio de aceptación:** la imagen del API pesa una fracción de la del
-ETL y `GET /ops/runs` devuelve el historial migrado en la Fase 4.
+ETL y `GET /ops/runs` devuelve el historial de la Fase 4.
+
+#### Código eliminado en esta fase
+
+La capa `meta` arrastraba el andamiaje de una etapa que ya no existe:
+
+- **`meta.normalize_tasks`** (tabla, modelo `NormalizeTask`, relación en
+  `JobRun`) y los cinco métodos del tracker que la escribían o leían.
+  `normalize-dates` dejó de ser etapa en la Fase 4 —`transformers/enrich.py`
+  deriva `fecha_alta` antes del `COPY`—, así que la tabla solo podía estar
+  vacía. La tira la revisión `b0001drop_normalize_tasks`.
+- **`DATABASE_URL_ASYNC`** y el parámetro `async_driver`: `asyncpg` no es
+  dependencia del proyecto y ningún endpoint es `async`.
+- **El comando `retry` del CLI**: era un stub que imprimía "coming soon". El
+  reintento no necesita comando propio — `extract` sin `--force` reencola lo
+  que no tiene ninguna descarga `SUCCESS`.
+- **`duckdb` y `duckdb-engine`** de `[project.dependencies]`: sin un solo
+  import en el proyecto, entraban a todas las imágenes.
 
 ### Fase 7 — Scheduler
 
