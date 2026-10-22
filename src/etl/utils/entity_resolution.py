@@ -33,6 +33,7 @@ from src.etl.utils.clee_resolution_config import (
     KB_MAX_ROWS_PER_PARTITION,
     MATCH_PARALLEL_THRESHOLD,
     MATCH_WORKERS,
+    RESOLVED_COLUMN,
 )
 from src.etl.utils.matching import (
     PERFECT_NAME_SCORE,
@@ -358,7 +359,7 @@ def get_region_prefix(state_list: list[str]) -> str:
 
 def build_single_period_kb(
     df_ref: pl.DataFrame,
-    master_column: str = "clee_propagado_radio",
+    master_column: str = RESOLVED_COLUMN,
 ) -> pl.DataFrame:
     """
     Construye una KB escalar desde un periodo ya resuelto.
@@ -787,7 +788,7 @@ def propagate_clees_h3(
 def assign_new_clees(
     df_target: pl.DataFrame,
     region_prefix: str,
-    master_column: str = "clee_propagado_radio",
+    master_column: str = RESOLVED_COLUMN,
 ) -> pl.DataFrame:
     """
     Asigna NEW_prefix-uuid a registros sin resolver tras la propagacion.

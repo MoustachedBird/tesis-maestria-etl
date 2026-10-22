@@ -38,8 +38,9 @@ import typer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.etl.utils.clee_resolution_config import (  # noqa: E402
-    SILVER_READ_QUERY,
+    RESOLVED_COLUMN,
     SPATIAL_RADIUS_M,
+    silver_read_query,
 )
 from src.etl.utils.entity_resolution import (  # noqa: E402
     assign_new_clees,
@@ -78,21 +79,23 @@ CLEE_COVERAGE_MIN = 0.999
 referencia (o como objetivo): filtra periodos pre-2021 donde INEGI no
 asignaba CLEE."""
 
-MASTER_COLUMN = "clee_propagado_radio"
+MASTER_COLUMN = RESOLVED_COLUMN
 """Columna de trabajo que la maquinaria de produccion rellena durante la
 evaluacion. Solo existe en los DataFrames del scratch — el Silver real
 nunca se toca. Radio y H3 asignan identico por construccion (paridad
 verificada), asi que evaluar con el generador radio basta para la cascada."""
 
-EVAL_READ_QUERY = SILVER_READ_QUERY.replace(
+EVAL_READ_QUERY = silver_read_query(None).replace(
     "SELECT\n        e.id,",
     "SELECT\n        e.id,\n        e.cve_ent,\n        e.cve_mun,",
     1,
 )
-"""SILVER_READ_QUERY + cve_ent/cve_mun: produccion no las necesita (el
+"""silver_read_query(None) + cve_ent/cve_mun: produccion no las necesita (el
 matching no usa geografia administrativa), pero la evaluacion si, para
 segmentar metricas por entidad (protocolo de todo.md)."""
-assert "e.cve_ent," in EVAL_READ_QUERY, "SILVER_READ_QUERY cambio de formato; ajustar el replace"
+assert "e.cve_ent," in EVAL_READ_QUERY, (
+    "silver_read_query(None) cambio de formato; ajustar el replace"
+)
 
 
 def _period_coverage(conn) -> pl.DataFrame:
@@ -599,7 +602,9 @@ def chain(
         f"{g['categorias']['correcto_new_heredado']:,}, falso_match_heredado="
         f"{g['categorias']['falso_match_heredado']:,})"
     )
-    logger.info(f"Salidas: {EVAL_DIR / 'results_chain.parquet'} y {EVAL_DIR / 'metrics_chain.json'}")
+    logger.info(
+        f"Salidas: {EVAL_DIR / 'results_chain.parquet'} y {EVAL_DIR / 'metrics_chain.json'}"
+    )
 
 
 if __name__ == "__main__":

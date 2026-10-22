@@ -27,8 +27,10 @@ from sqlalchemy import Engine, func, select, text
 
 from src.etl.db.indexes import suspended_indexes
 from src.etl.utils.clee_resolution_config import (
-    SILVER_READ_QUERY,
+    ORIGEN_COLUMN,
+    RESOLVED_COLUMN,
     SPATIAL_RADIUS_M,
+    silver_read_query,
 )
 from src.etl.utils.entity_resolution import (
     assign_new_clees,
@@ -43,7 +45,9 @@ from src.meta.tracker import MetadataTracker
 from src.shared.config import get_settings
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
-from src.shared.enums import JobStatus, TaskStatus
+from src.shared.db.partitions import drop_partition, existing_partitions, partition_name
+from src.shared.db.staging import staging_partition
+from src.shared.enums import JobStatus, OrigenClee, TaskStatus
 from src.shared.logging import get_stage_logger
 
 _LOG_FILE_TEMPLATE = "./data/etl_clee_resolution_{method}.log"
@@ -76,12 +80,12 @@ class CLEEResolver:
     # nuevos metodos de propagacion sin duplicar el orquestador.
     METHODS = {
         "radio": {
-            "column": "clee_propagado_radio",
+            "table": "clee_radio",
             "propagate": propagate_clees_radio,
             "prefix_suffix": "",
         },
         "h3": {
-            "column": "clee_propagado_h3",
+            "table": "clee_h3",
             "propagate": propagate_clees_h3,
             "prefix_suffix": "H3",
         },
@@ -99,10 +103,10 @@ class CLEEResolver:
 
         Args:
             tracker: MetadataTracker instance for job/task tracking
-            method: "radio" (BallTree, columna clee_propagado_radio) o
-                "h3" (blocking H3, columna clee_propagado_h3). Ambos metodos
-                comparten TODO el motor de ventana deslizante; solo cambian
-                la columna destino y el generador de candidatos.
+            method: "radio" (BallTree, tabla silver.clee_radio) o "h3"
+                (blocking H3, tabla silver.clee_h3). Ambos metodos comparten
+                TODO el motor de ventana deslizante; solo cambian la tabla
+                destino y el generador de candidatos.
             engine: conexion a la base; por default la del proyecto.
             kb_cache_dir: donde cachear las KB de referencia; por default,
                 `data/kb_cache/<metodo>`.
@@ -115,7 +119,7 @@ class CLEEResolver:
         self._engine = engine
 
         cfg = self.METHODS[method]
-        self.master_column: str = cfg["column"]
+        self.clee_table: str = cfg["table"]
         self._propagate = cfg["propagate"]
         self._prefix_suffix: str = cfg["prefix_suffix"]
 
@@ -148,11 +152,19 @@ class CLEEResolver:
         return self._engine
 
     def _count_unresolved(self) -> int:
-        """Observaciones que todavia no tienen identidad asignada."""
-        estab = get_table("establecimientos")
+        """Observaciones sin fila en la tabla de este metodo.
+
+        No se pregunta por una columna NULL en `establecimientos`: la
+        identidad ya no vive ahi. Ausencia de fila ES el pendiente.
+        """
         with self.engine.connect() as conn:
             return conn.execute(
-                select(func.count()).select_from(estab).where(estab.c[self.master_column].is_(None))
+                text(
+                    "SELECT COUNT(*) FROM silver.establecimientos e "
+                    f"LEFT JOIN silver.{self.clee_table} r "
+                    "  ON r.id = e.id AND r.period = e.period "
+                    "WHERE r.id IS NULL"
+                )
             ).scalar_one()
 
     def _get_sorted_periods(self) -> list[date]:
@@ -201,7 +213,7 @@ class CLEEResolver:
         """
         # El filtro por periodo es lo que activa el pruning de la
         # particion: sin el, cada lectura barreria los veinte cortes.
-        query = text(SILVER_READ_QUERY + "\n    WHERE e.period = :period")
+        query = text(silver_read_query(self.clee_table) + "\n    WHERE e.period = :period")
 
         with self.engine.connect() as conn:
             filas = conn.execute(query, {"period": period})
@@ -237,7 +249,7 @@ class CLEEResolver:
             return pl.read_parquet(cache_path)
 
         df_ref = self._load_period(period)
-        ref_kb = build_single_period_kb(df_ref, self.master_column)
+        ref_kb = build_single_period_kb(df_ref, RESOLVED_COLUMN)
         del df_ref
         gc.collect()
 
@@ -275,46 +287,51 @@ class CLEEResolver:
                 select(func.count()).select_from(get_table("establecimientos"))
             ).scalar_one()
 
-    def _write_period_results(self, mapping: pl.DataFrame, period: date) -> int:
+    def _write_period_results(self, resueltas: pl.DataFrame, period: date) -> int:
         """
-        Escribe las identidades resueltas de un corte.
+        Escribe las identidades de un corte, reemplazando la particion.
+
+        La particion se construye entera en una tabla aparte y se engancha
+        al final: hasta ese momento la anterior sigue siendo la vigente, asi
+        que una corrida que muere a medias deja el resultado previo intacto.
+        Es lo contrario de nulificar la columna antes de recalcular, que
+        destruia el resultado bueno al arrancar.
+
+        El DROP de la particion vieja y el ATTACH de la nueva ocurren en la
+        MISMA transaccion, asi que desde afuera el corte nunca se ve sin
+        identidades.
 
         Args:
-            mapping: columnas [id, <master_column>].
-            period: corte al que pertenecen, para acotar el UPDATE a su
-                particion.
+            resueltas: columnas [id, period, clee_resuelto, origen].
+            period: corte al que pertenecen.
 
         Returns:
-            int: filas actualizadas.
+            int: filas escritas.
         """
-        if mapping.is_empty():
+        if resueltas.is_empty():
             return 0
 
-        col = self.master_column
-        updated = 0
+        columnas = ["id", "period", RESOLVED_COLUMN, ORIGEN_COLUMN]
+        faltantes = [c for c in columnas if c not in resueltas.columns]
+        if faltantes:
+            raise ValueError(f"faltan columnas para escribir {self.clee_table}: {faltantes}")
 
         with self.engine.begin() as conn:
-            # Tabla temporal + UPDATE ... FROM, que es como PostgreSQL hace
-            # una actualizacion masiva por llave. El COPY la llena de golpe;
-            # un UPDATE por fila sobre millones de identidades no termina.
-            conn.execute(
-                text(f'CREATE TEMP TABLE _clee_updates (id text, "{col}" text) ON COMMIT DROP')
-            )
-            copy_dataframe(conn, mapping, "_clee_updates", schema=None)
+            if partition_name(period, self.clee_table) in existing_partitions(
+                conn, table=self.clee_table
+            ):
+                drop_partition(conn, period, table=self.clee_table)
 
-            # El filtro por periodo activa el pruning: sin el, el UPDATE
-            # recorre las veinte particiones para tocar una.
-            resultado = conn.execute(
-                text(
-                    f'UPDATE silver.establecimientos e SET "{col}" = u."{col}" '
-                    "FROM _clee_updates u "
-                    "WHERE e.id = u.id AND e.period = :period"
-                ),
-                {"period": period},
-            )
-            updated = resultado.rowcount
+            with staging_partition(conn, period, parent=self.clee_table) as destino:
+                copy_dataframe(
+                    conn,
+                    resueltas.select(columnas),
+                    destino.table,
+                    destino.schema,
+                    columns=columnas,
+                )
 
-        return updated
+        return resueltas.height
 
     # ------------------------------------------------------------------
     # Phase 1: Deterministic resolution (periods with CLEE from INEGI)
@@ -327,18 +344,23 @@ class CLEEResolver:
         force: bool,
     ) -> list[date]:
         """
-        Resolve periods that have 100% CLEE coverage deterministically.
+        Resuelve por copia directa los cortes en que INEGI publico el CLEE.
 
-        For these periods, clee_propagado_radio = clee (direct copy via SQL UPDATE).
-        No BallTree, no fuzzy matching needed.
+        No hay BallTree ni matching difuso: la identidad viene del dato, asi
+        que estas filas quedan con `origen = DIRECTO` y son la referencia de
+        mayor confianza para la ventana deslizante de la fase 2.
+
+        Se escribe corte por corte con reemplazo de particion, asi que el
+        resultado de la corrida anterior sigue vigente hasta que el nuevo
+        esta completo.
 
         Args:
-            periods: All periods sorted newest-first.
-            clee_coverage: Dict mapping period -> has_full_clee.
-            force: If True, overwrite existing clee_propagado_radio values.
+            periods: todos los cortes, del mas nuevo al mas viejo.
+            clee_coverage: corte -> si trae CLEE de INEGI.
+            force: reconstruir la particion aunque ya este resuelta.
 
         Returns:
-            List of periods that were resolved (available as references).
+            list[date]: cortes resueltos, disponibles como referencia.
         """
         deterministic_periods = [p for p in periods if clee_coverage.get(p, False)]
 
@@ -349,36 +371,53 @@ class CLEEResolver:
             f"[FASE 1] Resolucion deterministica: {len(deterministic_periods)} periodos con CLEE"
         )
 
-        col = self.master_column
-        estab = get_table("establecimientos")
-        with self.engine.begin() as conn:
-            if force:
-                # Reset SOLO la columna de este metodo: la del otro track
-                # de comparacion no se toca.
-                conn.execute(estab.update().values(**{col: None}))
+        total = 0
+        for period in deterministic_periods:
+            if not force and self._ya_resuelto(period):
+                self.logger.info(f"   {period}: ya resuelto, se conserva")
+                continue
 
-            # clee -> columna maestra, para toda fila que traiga CLEE.
-            # `IS DISTINCT FROM` es una guarda de no-op: sin ella, cada
-            # corrida reescribiria ~45M filas identicas.
-            conn.execute(
-                estab.update()
-                .where(
-                    estab.c.clee.is_not(None),
-                    estab.c.clee != "",
-                    estab.c[col].is_distinct_from(estab.c.clee),
-                )
-                .values(**{col: estab.c.clee})
-            )
-
-            count = conn.execute(
-                select(func.count()).select_from(estab).where(estab.c[col].is_not(None))
-            ).scalar_one()
+            escritas = self._write_period_results(self._filas_directas(period), period)
+            self._invalidate_kb_cache(period)
+            total += escritas
+            self.logger.info(f"   {period}: {escritas:,} filas DIRECTO")
 
         self.logger.info(
-            f"   {col} = clee para {count:,} filas ({len(deterministic_periods)} periodos)"
+            f"   {total:,} filas con identidad de INEGI ({len(deterministic_periods)} periodos)"
         )
 
         return deterministic_periods
+
+    def _ya_resuelto(self, period: date) -> bool:
+        """Si el corte ya tiene su particion en la tabla del metodo."""
+        with self.engine.connect() as conn:
+            return partition_name(period, self.clee_table) in existing_partitions(
+                conn, table=self.clee_table
+            )
+
+    def _filas_directas(self, period: date) -> pl.DataFrame:
+        """Filas de un corte cuya identidad es el `clee` que publico INEGI.
+
+        Las filas sin `clee` quedan fuera: no tienen identidad que copiar y
+        es la fase 2 la que decide si se propagan o se sintetizan. Su
+        pendiente se expresa como ausencia de fila.
+
+        Args:
+            period: corte a leer.
+
+        Returns:
+            pl.DataFrame: columnas [id, period, clee_resuelto, origen].
+        """
+        with self.engine.connect() as conn:
+            filas = conn.execute(
+                text(
+                    "SELECT e.id, e.period, e.clee AS clee_resuelto, :origen AS origen "
+                    "FROM silver.establecimientos e "
+                    "WHERE e.period = :period AND e.clee IS NOT NULL AND e.clee <> ''"
+                ),
+                {"period": period, "origen": OrigenClee.DIRECTO.value},
+            )
+            return pl.DataFrame(filas.all(), schema=list(filas.keys()), orient="row")
 
     # ------------------------------------------------------------------
     # Phase 2: Probabilistic resolution (sliding window)
@@ -390,6 +429,7 @@ class CLEEResolver:
         clee_coverage: dict[date, bool],
         resolved_periods: list[date],
         region_prefix: str,
+        force: bool,
     ) -> int:
         """
         Resolve periods without CLEE using sliding-window approach.
@@ -410,6 +450,8 @@ class CLEEResolver:
             clee_coverage: Dict mapping period -> has_full_clee.
             resolved_periods: Periods already resolved (from Phase 1).
             region_prefix: Prefix for generating temporal CLEEs.
+            force: descartar la identidad previa del corte y resolverlo de
+                cero, en vez de conservar lo ya resuelto.
 
         Returns:
             Total number of rows resolved in this phase.
@@ -434,7 +476,9 @@ class CLEEResolver:
                 f"Resolviendo periodo {target_period}..."
             )
 
-            # Load target period (all rows, clee_propagado_radio will be NULL)
+            # El corte llega con la identidad que ya tuviera (LEFT JOIN
+            # contra la tabla del metodo): en modo incremental eso conserva
+            # lo ya resuelto, y con force la tabla se reconstruye entera.
             df_target = self._load_period(target_period)
             if df_target.is_empty():
                 self.logger.info(f"   {target_period}: vacio, saltando.")
@@ -442,18 +486,22 @@ class CLEEResolver:
                 continue
 
             target_total = df_target.height
-            col = self.master_column
+            col = RESOLVED_COLUMN
 
-            # Ensure master_column exists and is NULL for this period
-            if col not in df_target.columns:
-                df_target = df_target.with_columns(pl.lit(None).cast(pl.Utf8).alias(col))
-            else:
+            # Cadena vacia y NULL son el mismo pendiente; unificarlos evita
+            # que una fila con "" se cuente como resuelta.
+            df_target = df_target.with_columns(
+                pl.when(pl.col(col) == "")
+                .then(pl.lit(None).cast(pl.Utf8))
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
+            if force:
                 df_target = df_target.with_columns(
-                    pl.when(pl.col(col) == "")
-                    .then(pl.lit(None).cast(pl.Utf8))
-                    .otherwise(pl.col(col))
-                    .alias(col)
+                    pl.lit(None).cast(pl.Utf8).alias(col),
+                    pl.lit(None).cast(pl.Utf8).alias(ORIGEN_COLUMN),
                 )
+            ya_resueltas = df_target.filter(pl.col(col).is_not_null()).height
 
             # Ventana deslizante NEAREST-FIRST: solo referencias futuras al
             # target (la propagacion va futuro -> pasado), de la mas CERCANA
@@ -483,14 +531,29 @@ class CLEEResolver:
                 del ref_kb
                 gc.collect()
 
+            # Lo que la ventana deslizante resolvio en esta pasada: las que
+            # llegaron sin identidad y ahora la tienen. Se marca ANTES de
+            # sintetizar, para no confundir propagado con nuevo.
+            df_target = df_target.with_columns(
+                pl.when(pl.col(ORIGEN_COLUMN).is_not_null())
+                .then(pl.col(ORIGEN_COLUMN))
+                .when(pl.col(col).is_not_null())
+                .then(pl.lit(OrigenClee.PROPAGADO.value))
+                .otherwise(None)
+                .alias(ORIGEN_COLUMN)
+            )
+
             # Assign NEW CLEEs to remaining unresolved rows
             still_missing = df_target.filter(pl.col(col).is_null()).height
             if still_missing > 0:
                 self.logger.info(f"   Asignando {still_missing:,} NEW_{region_prefix}-* CLEEs")
                 df_target = assign_new_clees(df_target, region_prefix, col)
+                df_target = df_target.with_columns(
+                    pl.col(ORIGEN_COLUMN).fill_null(OrigenClee.NUEVO.value)
+                )
 
             # Se escribe de inmediato: no se acumula nada en RAM
-            mapping = df_target.select(["id", col])
+            mapping = df_target.select(["id", "period", col, ORIGEN_COLUMN])
             rows_written = self._write_period_results(mapping, target_period)
             total_resolved += rows_written
 
@@ -499,8 +562,9 @@ class CLEEResolver:
 
             self.logger.info(
                 f"   ✅ {target_period} resuelto: {rows_written:,} filas escritas "
-                f"({target_total - still_missing:,} propagados, "
-                f"{still_missing:,} nuevos)"
+                f"({ya_resueltas:,} ya resueltas, "
+                f"{target_total - still_missing - ya_resueltas:,} propagadas, "
+                f"{still_missing:,} nuevas)"
             )
 
             # Mark this period as resolved (available as reference)
@@ -565,7 +629,7 @@ class CLEEResolver:
 
         # --- Phase 2: Probabilistic resolution (sliding window) ---
         total_prob = self._resolve_probabilistic_periods(
-            periods, clee_coverage, resolved_periods, prefix
+            periods, clee_coverage, resolved_periods, prefix, force
         )
 
         return {
@@ -592,7 +656,7 @@ class CLEEResolver:
         """
         if force:
             self.logger.warning(
-                f"MODO FORCE ACTIVADO: Se resetearan y re-resolveran todos los {self.master_column}."
+                f"MODO FORCE ACTIVADO: se reconstruye silver.{self.clee_table} entera."
             )
             self._clear_kb_cache()
 
@@ -619,7 +683,7 @@ class CLEEResolver:
             unresolved_before = self._count_unresolved() if not force else total_rows
 
             self.logger.info(
-                f"Iniciando resolucion CLEE [metodo={self.method} -> {self.master_column}]: "
+                f"Iniciando resolucion CLEE [metodo={self.method} -> silver.{self.clee_table}]: "
                 f"{total_rows:,} filas totales, "
                 f"{unresolved_before:,} sin resolver, radio={self.spatial_tol}m"
             )

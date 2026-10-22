@@ -35,8 +35,8 @@ subir H3_GRID_DISK_K a la par y re-verificar paridad).
 # CELDAS H3 (constantes estructurales -- NO .env)
 #
 # El metodo H3 NO sustituye al de radio: es un metodo COMPLEMENTARIO que
-# llena su propia columna (clee_propagado_h3) para compararse lado a lado
-# con el baseline BallTree (clee_propagado_radio). Ver todo.md Fase 4.
+# escribe su propia tabla (silver.clee_h3) para compararse lado a lado con
+# el baseline BallTree (silver.clee_radio).
 # =============================================================================
 
 H3_BLOCKING_RES = 9
@@ -182,8 +182,8 @@ if SPATIAL_RADIUS_M > H3_GRID_DISK_K * _H3_RING_COVERAGE_M:
 COLS_NEEDED_FOR_MATCHING = [
     "id",
     "clee",
-    "clee_propagado_radio",
-    "clee_propagado_h3",
+    "clee_resuelto",
+    "origen",
     "h3_cell_9",
     "h3_cell_5",
     "nom_estab",
@@ -206,12 +206,59 @@ COLS_NEEDED_FOR_MATCHING = [
 """Columnas que se leen de Silver para la resolucion.
 `nombre_act` se obtiene via JOIN con denue_actividades_economicas."""
 
-SILVER_READ_QUERY = """
+RESOLVED_COLUMN = "clee_resuelto"
+"""Nombre de la columna de identidad resuelta, en la base y en los DataFrames.
+
+Igual para todo metodo: lo que distingue a radio de h3 es la TABLA donde
+viven sus filas (`silver.clee_radio` / `silver.clee_h3`), no el nombre de la
+columna. Asi el motor de matching no necesita saber que metodo lo invoco.
+"""
+
+ORIGEN_COLUMN = "origen"
+"""Columna que dice como se asigno la identidad (valores de `OrigenClee`)."""
+
+
+def silver_read_query(clee_table: str | None) -> str:
+    """SQL para leer un corte de Silver con su identidad ya resuelta.
+
+    Resuelve los dominios (FKs enteros) a sus labels con el MISMO nombre de
+    columna de siempre, asi que el pipeline de matching
+    (COLS_NEEDED_FOR_MATCHING, sanitizacion, KB) no cambia. Catalogos de
+    decenas de filas: el costo del JOIN es ~0.
+
+    La identidad llega por LEFT JOIN contra la tabla del metodo y no como
+    columna de `establecimientos`: la tabla de hechos ya no la guarda (ver
+    `docs/separacion_ingest_clee.md`). El JOIN incluye `period` para que sea
+    partition-wise, y es LEFT porque un corte sin resolver todavia no tiene
+    filas ahi.
+
+    `clee_table=None` lee sin identidad: las dos columnas salen en NULL y no
+    se paga el JOIN. Lo usa la evaluacion con CLEEs enmascarados, que
+    resuelve en memoria contra su propia verdad y nunca lee la resolucion
+    materializada.
+
+    Args:
+        clee_table: tabla de resolucion del metodo activo, sin calificar
+            (`clee_radio` o `clee_h3`), o None para no unir.
+
+    Returns:
+        str: SELECT sin filtro; el llamador agrega su `WHERE e.period = ...`.
+    """
+    if clee_table is None:
+        identidad = (
+            f"CAST(NULL AS VARCHAR) AS {RESOLVED_COLUMN}, "
+            f"CAST(NULL AS VARCHAR) AS {ORIGEN_COLUMN}"
+        )
+        join = ""
+    else:
+        identidad = f"r.{RESOLVED_COLUMN} AS {RESOLVED_COLUMN}, r.{ORIGEN_COLUMN} AS {ORIGEN_COLUMN}"
+        join = f"\n    LEFT JOIN {clee_table} r ON r.id = e.id AND r.period = e.period"
+
+    return f"""
     SELECT
         e.id,
         e.clee,
-        e.clee_propagado_radio,
-        e.clee_propagado_h3,
+        {identidad},
         e.h3_cell_9,
         e.h3_cell_5,
         e.nom_estab,
@@ -230,17 +277,12 @@ SILVER_READ_QUERY = """
         e.nomb_asent,
         e.nom_cencom,
         e.cod_postal
-    FROM establecimientos e
+    FROM establecimientos e{join}
     LEFT JOIN denue_actividades_economicas a ON e.codigo_act = a.codigo_act
     LEFT JOIN denue_estratos_personal ep ON e.per_ocu_id = ep.id
     LEFT JOIN denue_tipos_asentamiento ta ON e.tipo_asent_id = ta.id
 """
-"""SQL para leer de Silver con JOINs a los catalogos.
 
-Los dominios viven como FKs enteros (per_ocu_id/tipo_asent_id); aqui se
-resuelven a sus labels con el MISMO nombre de columna de siempre, asi que
-el pipeline de matching (COLS_NEEDED_FOR_MATCHING, sanitizacion, KB) no
-cambia. Catalogos de decenas de filas: el costo del JOIN es ~0."""
 
 TEXT_COLS_TO_SANITIZE = [
     "nom_estab",

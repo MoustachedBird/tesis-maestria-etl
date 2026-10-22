@@ -1,6 +1,8 @@
 # Separar el ingest de la resolución CLEE
 
-**Estado:** en curso. Paso 1 hecho; los pasos 2–4 pendientes. El ingest y la
+**Estado:** en curso. Pasos 1 y 2 hechos; 3 y 4 pendientes. **La
+verificación contra base real no ha ocurrido**: la Mac no tiene Docker, así
+que los 154 tests marcados `postgres` solo corren en indominus. El ingest y la
 resolución **no se corren hasta terminarlos**: no tiene sentido gastar horas
 de CLEE sobre un esquema que va a cambiar.
 
@@ -206,7 +208,7 @@ Cada paso es un commit verificable por su cuenta.
       infirió por similitud y de lo sintético — hoy solo se podía adivinar
       con un `starts_with(id, 'NEW_')`. Para una tesis que compara métodos
       de resolución, esa distinción es el dato.
-- [ ] **2. Cada resolución escribe su tabla.** Staging + `ATTACH PARTITION`,
+- [x] **2. Cada resolución escribe su tabla** (2026-10-22). Staging + `ATTACH PARTITION`,
       sin `UPDATE` y **sin reset previo**. Aquí muere el borrón de la fase
       determinista.
 - [ ] **3. Vistas puente y migración de lectores.** Una vista por método

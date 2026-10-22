@@ -47,9 +47,9 @@ from sqlalchemy.engine import Connection
 # evaluate_masked_clee.py para resolver los paquetes del proyecto.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.etl.transformers.clee_resolver import CLEEResolver  # noqa: E402
+from src.etl.transformers.clee_resolver import CLEEResolver
+from src.etl.utils.clee_resolution_config import RESOLVED_COLUMN  # noqa: E402
 from src.shared.config import settings  # noqa: E402
-from src.shared.db.base import get_table  # noqa: E402
 from src.shared.db.query import fetch_df  # noqa: E402
 from src.shared.db.session import get_engine  # noqa: E402
 from src.shared.logging import get_stage_logger  # noqa: E402
@@ -69,11 +69,59 @@ SYNTHETIC_PREFIX = "NEW_"
 acoplado al formato materializado en las columnas clee_propagado_* y a
 `entidades_economicas.es_sintetica`, que lo usa con el mismo literal."""
 
-DEFAULT_COLUMNS = [cfg["column"] for cfg in CLEEResolver.METHODS.values()]
-"""Columnas a analizar por defecto: las del registro de metodos del
-resolver (radio, h3, y cualquier metodo que se registre despues). Se
-derivan del registro para que agregar un metodo no requiera tocar este
-script."""
+DEFAULT_METHODS = list(CLEEResolver.METHODS)
+"""Metodos a analizar por defecto, del registro del resolver (radio, h3, y
+cualquiera que se registre despues). Se derivan del registro para que
+agregar un metodo no requiera tocar este script."""
+
+
+def metodo_source(method: str) -> str:
+    """Fuente de lectura de un metodo: el hecho unido a su identidad.
+
+    La identidad vive en `silver.clee_<metodo>` y el `clee` de INEGI en
+    `silver.establecimientos`, asi que toda metrica que cruce los dos
+    necesita el JOIN. Se entrega como subconsulta para que las funciones de
+    metricas sigan recibiendo "una tabla" y su SQL no cambie.
+
+    El JOIN lleva `period` ademas de `id`: es lo que lo hace partition-wise.
+
+    Args:
+        method: metodo registrado en `CLEEResolver.METHODS`.
+
+    Returns:
+        str: subconsulta aliaseada, usable como `FROM {...}`.
+    """
+    tabla = CLEEResolver.METHODS[method]["table"]
+    return f"""(
+        SELECT e.id, e.period, e.clee, r.{RESOLVED_COLUMN}
+        FROM silver.establecimientos e
+        LEFT JOIN silver.{tabla} r ON r.id = e.id AND r.period = e.period
+    ) AS src"""
+
+
+def comparacion_source(metodo_a: str, metodo_b: str) -> str:
+    """Fuente para comparar dos metodos fila a fila.
+
+    Trae la identidad de ambos para el mismo `(id, period)`, aliaseadas
+    `identidad_a` / `identidad_b`.
+
+    Args:
+        metodo_a: primer metodo a comparar.
+        metodo_b: segundo metodo.
+
+    Returns:
+        str: subconsulta aliaseada.
+    """
+    tabla_a = CLEEResolver.METHODS[metodo_a]["table"]
+    tabla_b = CLEEResolver.METHODS[metodo_b]["table"]
+    return f"""(
+        SELECT e.id, e.period,
+               a.{RESOLVED_COLUMN} AS identidad_a,
+               b.{RESOLVED_COLUMN} AS identidad_b
+        FROM silver.establecimientos e
+        LEFT JOIN silver.{tabla_a} a ON a.id = e.id AND a.period = e.period
+        LEFT JOIN silver.{tabla_b} b ON b.id = e.id AND b.period = e.period
+    ) AS src"""
 
 
 def _real_identity_predicate(column: str) -> str:
@@ -98,15 +146,15 @@ def open_source() -> Connection:
 def compute_period_metrics(
     conn: Connection,
     column: str,
-    table: str = "silver.establecimientos",
+    table: str,
 ) -> pl.DataFrame:
     """
     Cobertura de la columna de identidad periodo por periodo.
 
     Args:
         conn: conexion de lectura.
-        column: Columna de identidad (p. ej. clee_propagado_radio).
-        table: Tabla de hechos (parametrizable para tests con scratch).
+        column: columna de identidad en `table`.
+        table: fuente de lectura; normalmente `metodo_source(metodo)`.
 
     Returns:
         DataFrame con una fila por periodo:
@@ -120,7 +168,9 @@ def compute_period_metrics(
         - `tasa_vinculacion`: vinculadas / total.
         - `tasa_cobertura`: asignadas / total.
     """
-    df = fetch_df(conn, f"""
+    df = fetch_df(
+        conn,
+        f"""
         SELECT
             CAST(period AS VARCHAR) AS period,
             COUNT(*) AS total,
@@ -132,7 +182,8 @@ def compute_period_metrics(
         WHERE period IS NOT NULL
         GROUP BY 1
         ORDER BY 1
-    """)
+    """,
+    )
 
     return df.with_columns(
         (pl.col("vinculadas") / pl.col("total")).alias("tasa_vinculacion"),
@@ -143,7 +194,7 @@ def compute_period_metrics(
 def compute_identity_metrics(
     conn: Connection,
     column: str,
-    table: str = "silver.establecimientos",
+    table: str,
 ) -> dict:
     """
     Metricas por IDENTIDAD: nacimientos, cadenas y colisiones.
@@ -185,7 +236,8 @@ def compute_identity_metrics(
     # veces no tiene sentido. `DROP ... IF EXISTS` antes porque PostgreSQL
     # no tiene `CREATE OR REPLACE` para tablas.
     conn.execute(text(f"DROP TABLE IF EXISTS {tmp}"))
-    conn.execute(text(f"""
+    conn.execute(
+        text(f"""
         CREATE TEMP TABLE {tmp} AS
         SELECT
             {column} AS identidad,
@@ -197,10 +249,12 @@ def compute_identity_metrics(
         FROM {table}
         WHERE {column} IS NOT NULL
         GROUP BY 1, 2
-    """))
+    """)
+    )
 
-    totales = (
-        fetch_df(conn, f"""
+    totales = fetch_df(
+        conn,
+        f"""
         SELECT
             COUNT(*) AS identidades,
             COUNT(*) FILTER (WHERE sintetica) AS sinteticas,
@@ -209,33 +263,42 @@ def compute_identity_metrics(
             SUM(filas) AS filas,
             AVG(periodos) AS periodos_promedio
         FROM {tmp}
-    """).to_dicts()[0]
-    )
+    """,
+    ).to_dicts()[0]
 
-    cadenas = fetch_df(conn, f"""
+    cadenas = fetch_df(
+        conn,
+        f"""
         SELECT periodos, sintetica, COUNT(*) AS identidades, SUM(filas) AS filas
         FROM {tmp} GROUP BY 1, 2 ORDER BY 1, 2
-    """)
+    """,
+    )
 
-    colisiones = (
-        fetch_df(conn, f"""
+    colisiones = fetch_df(
+        conn,
+        f"""
         SELECT
             COUNT(*) FILTER (WHERE filas > periodos) AS identidades_con_colision,
             COALESCE(SUM(filas - periodos), 0) AS filas_excedentes
         FROM {tmp}
-    """).to_dicts()[0]
-    )
+    """,
+    ).to_dicts()[0]
 
-    nacimientos = fetch_df(conn, f"""
+    nacimientos = fetch_df(
+        conn,
+        f"""
         SELECT nacimiento AS period, COUNT(*) AS identidades_nacidas
         FROM {tmp} WHERE sintetica GROUP BY 1 ORDER BY 1
-    """)
+    """,
+    )
 
     conn.execute(text(f"DROP TABLE IF EXISTS {tmp}"))
 
     # Desglose por corte: en que periodos se concentran las colisiones
     # (los agregados de arriba dicen cuantas hay, no donde).
-    colisiones_periodo = fetch_df(conn, f"""
+    colisiones_periodo = fetch_df(
+        conn,
+        f"""
         WITH dup AS (
             SELECT period, {column} AS identidad, COUNT(*) AS filas
             FROM {table}
@@ -249,7 +312,8 @@ def compute_identity_metrics(
             SUM(filas) AS filas_involucradas,
             SUM(filas - 1) AS filas_excedentes
         FROM dup GROUP BY 1 ORDER BY 1
-    """)
+    """,
+    )
 
     identidades = int(totales["identidades"])
     return {
@@ -280,7 +344,7 @@ def compute_agreement(
     conn: Connection,
     col_a: str,
     col_b: str,
-    table: str = "silver.establecimientos",
+    table: str,
 ) -> dict:
     """
     Acuerdo fila a fila entre dos columnas de identidad (radio vs h3).
@@ -297,8 +361,9 @@ def compute_agreement(
         justa entre metodos.
     """
     pred_a, pred_b = _real_identity_predicate(col_a), _real_identity_predicate(col_b)
-    row = (
-        fetch_df(conn, f"""
+    row = fetch_df(
+        conn,
+        f"""
         SELECT
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE {col_a} IS NOT DISTINCT FROM {col_b}) AS identicas,
@@ -314,8 +379,8 @@ def compute_agreement(
                    OR (({pred_b}) AND starts_with({col_a}, '{SYNTHETIC_PREFIX}'))
             ) AS real_vs_sintetica
         FROM {table}
-    """).to_dicts()[0]
-    )
+    """,
+    ).to_dicts()[0]
 
     total = int(row["total"])
     acuerdo = int(row["identicas"]) + int(row["ambas_sinteticas"])
@@ -398,10 +463,10 @@ def _log_period_table(
 
 @app.command()
 def run(
-    columns: list[str] = typer.Option(
-        DEFAULT_COLUMNS,
-        "--column",
-        help="Columna(s) de identidad a analizar. Repetible.",
+    methods: list[str] = typer.Option(
+        DEFAULT_METHODS,
+        "--method",
+        help="Metodo(s) de resolucion a analizar (radio, h3). Repetible.",
     ),
     identity_metrics: bool = typer.Option(
         True,
@@ -412,7 +477,7 @@ def run(
     agreement: bool = typer.Option(
         True,
         "--agreement/--no-agreement",
-        help="Comparar las dos primeras columnas fila a fila (radio vs h3).",
+        help="Comparar los dos primeros metodos fila a fila (radio vs h3).",
     ),
     out: Path = typer.Option(None, "--out", help="JSON de salida. Default: data/eval/..."),
 ):
@@ -425,20 +490,22 @@ def run(
     """
     conn = open_source()
     try:
-        disponibles = {c.name for c in get_table("establecimientos").columns}
-        faltantes = [c for c in columns if c not in disponibles]
-        if faltantes:
-            raise typer.BadParameter(f"Columnas que no existen en la tabla: {faltantes}")
+        desconocidos = [m for m in methods if m not in CLEEResolver.METHODS]
+        if desconocidos:
+            raise typer.BadParameter(
+                f"Metodos desconocidos: {desconocidos}. Opciones: {list(CLEEResolver.METHODS)}"
+            )
 
         reporte: dict = {
             "db": settings.POSTGRES_DB,
             "computed_at": datetime.now().isoformat(),
-            "columnas": {},
+            "metodos": {},
         }
 
-        for column in columns:
-            logger.info(f"Analizando {column}...")
-            periods = compute_period_metrics(conn, column)
+        for method in methods:
+            column, source = RESOLVED_COLUMN, metodo_source(method)
+            logger.info(f"Analizando {method}...")
+            periods = compute_period_metrics(conn, column, source)
             resumen = summarize_periods(periods)
 
             bloque: dict = {
@@ -448,7 +515,7 @@ def run(
             nacimientos: dict[str, int] = {}
             colisiones_periodo: dict[str, int] = {}
             if identity_metrics:
-                ident = compute_identity_metrics(conn, column)
+                ident = compute_identity_metrics(conn, column, source)
                 bloque.update(ident)
                 nacimientos = {
                     n["period"]: n["identidades_nacidas"] for n in ident["nacimientos_sinteticos"]
@@ -456,12 +523,12 @@ def run(
                 colisiones_periodo = {
                     c["period"]: c["filas_excedentes"] for c in ident["colisiones"]["por_periodo"]
                 }
-            reporte["columnas"][column] = bloque
+            reporte["metodos"][method] = bloque
 
-            _log_period_table(column, periods, nacimientos, colisiones_periodo)
+            _log_period_table(method, periods, nacimientos, colisiones_periodo)
             p = resumen["propagados"]
             logger.info(
-                f"   EXITO DE PROPAGACION ({column}): "
+                f"   EXITO DE PROPAGACION ({method}): "
                 f"{resumen['tasa_vinculacion_propagados'] * 100:.2f}% "
                 f"({p['vinculadas']:,} de {p['total']:,} filas sin CLEE oficial "
                 f"quedaron con identidad real de INEGI; {p['sinteticas']:,} sinteticas)"
@@ -480,11 +547,13 @@ def run(
                     f"{c['filas_excedentes']:,} filas excedentes"
                 )
 
-        if agreement and len(columns) >= 2:
-            ac = compute_agreement(conn, columns[0], columns[1])
+        if agreement and len(methods) >= 2:
+            ac = compute_agreement(
+                conn, "identidad_a", "identidad_b", comparacion_source(methods[0], methods[1])
+            )
             reporte["acuerdo"] = ac
             logger.info(
-                f"Acuerdo {columns[0]} vs {columns[1]}: "
+                f"Acuerdo {methods[0]} vs {methods[1]}: "
                 f"{ac['tasa_acuerdo_semantico'] * 100:.4f}% semantico "
                 f"({ac['identicas']:,} identicas + {ac['ambas_sinteticas']:,} ambas "
                 f"sinteticas de {ac['total']:,}); {ac['real_distinta']:,} con CLEE real "
