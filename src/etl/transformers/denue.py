@@ -67,9 +67,7 @@ class DenuePipelineOrchestrator:
 
         logger.info("DenuePipelineOrchestrator initialized")
 
-    def run_transform_stage(
-        self, force: bool = False, periods: list[str] | None = None
-    ) -> bool:
+    def run_transform_stage(self, force: bool = False, periods: list[str] | None = None) -> bool:
         """
         Run transform stage: ZIP -> Silver.
 
@@ -84,7 +82,9 @@ class DenuePipelineOrchestrator:
             True if successful, False otherwise
         """
         logger.info("Starting TRANSFORM stage (Bronze -> Silver)")
-        logger.info(f"   Mode: {'FORCE (reconstruye todos los cortes)' if force else 'INCREMENTAL'}")
+        logger.info(
+            f"   Mode: {'FORCE (reconstruye todos los cortes)' if force else 'INCREMENTAL'}"
+        )
 
         try:
             success = self.transformer.run(force=force, periods=periods)
@@ -206,6 +206,7 @@ class DenuePipelineOrchestrator:
         Returns:
             Dict with pipeline statistics
         """
+
         def _run_dict(run: dict | None) -> dict:
             """Resumen compacto de una corrida, o huecos si no hubo ninguna."""
             if run is None:
@@ -219,15 +220,11 @@ class DenuePipelineOrchestrator:
             }
 
         return {
-            "latest_transform_run": _run_dict(
-                self.tracker.get_latest_run_by_type("TRANSFORM", "PROCESS")
-            ),
-            "latest_normalize_run": _run_dict(self.tracker.get_latest_run_by_type("NORMALIZE")),
+            "latest_transform_run": _run_dict(self.tracker.get_latest_run_by_type("TRANSFORM")),
             "latest_clee_resolution_run": _run_dict(
                 self.tracker.get_latest_run_by_type("CLEE_RESOLUTION")
             ),
             "process_metrics": self.tracker.get_process_metrics(),
-            "normalize_metrics": self.tracker.get_normalize_metrics(),
             "clee_resolution_metrics": self.tracker.get_clee_resolution_metrics(),
         }
 

@@ -32,7 +32,6 @@ from src.shared.db.models.meta import (
     DataLineage,
     DownloadTask,
     JobRun,
-    NormalizeTask,
     ProcessTask,
 )
 from src.shared.enums import ErrorType, JobStatus, TaskStatus
@@ -179,15 +178,21 @@ class MetadataTracker:
                 select(
                     func.count(DownloadTask.task_id),
                     func.coalesce(
-                        func.sum(case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)),
+                        func.sum(
+                            case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)
+                        ),
                         0,
                     ),
                     func.coalesce(
-                        func.sum(case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)),
+                        func.sum(
+                            case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)
+                        ),
                         0,
                     ),
                     func.coalesce(
-                        func.sum(case((DownloadTask.status == TaskStatus.SKIPPED.value, 1), else_=0)),
+                        func.sum(
+                            case((DownloadTask.status == TaskStatus.SKIPPED.value, 1), else_=0)
+                        ),
                         0,
                     ),
                     func.coalesce(func.sum(DownloadTask.file_size_bytes), 0),
@@ -272,11 +277,15 @@ class MetadataTracker:
                 select(
                     func.count(DownloadTask.task_id),
                     func.coalesce(
-                        func.sum(case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)),
+                        func.sum(
+                            case((DownloadTask.status == TaskStatus.SUCCESS.value, 1), else_=0)
+                        ),
                         0,
                     ),
                     func.coalesce(
-                        func.sum(case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)),
+                        func.sum(
+                            case((DownloadTask.status == TaskStatus.FAILED.value, 1), else_=0)
+                        ),
                         0,
                     ),
                 ).where(DownloadTask.run_id == run_id)
@@ -596,19 +605,16 @@ class MetadataTracker:
         """
         with self._session() as session:
             # Ultimo intento de proceso por ruta.
-            ultimo_proceso = (
-                select(
-                    ProcessTask.source_path,
-                    ProcessTask.status,
-                    func.row_number()
-                    .over(
-                        partition_by=ProcessTask.source_path,
-                        order_by=ProcessTask.created_at.desc(),
-                    )
-                    .label("rn"),
+            ultimo_proceso = select(
+                ProcessTask.source_path,
+                ProcessTask.status,
+                func.row_number()
+                .over(
+                    partition_by=ProcessTask.source_path,
+                    order_by=ProcessTask.created_at.desc(),
                 )
-                .subquery()
-            )
+                .label("rn"),
+            ).subquery()
             proceso = select(ultimo_proceso).where(ultimo_proceso.c.rn == 1).subquery()
 
             # Ultima descarga exitosa por ruta.
@@ -648,9 +654,7 @@ class MetadataTracker:
                     )
                 )
                 .where(ultima_descarga.c.rn == 1, condicion)
-                .order_by(
-                    ultima_descarga.c.period.desc(), ultima_descarga.c.created_at.desc()
-                )
+                .order_by(ultima_descarga.c.period.desc(), ultima_descarga.c.created_at.desc())
             ).all()
 
             return [
@@ -721,22 +725,6 @@ class MetadataTracker:
                     .limit(1)
                 )
                 is not None
-            )
-
-    def get_normalized_periods(self) -> set[str]:
-        """
-        Cortes cuya normalizacion de fechas ya termino bien.
-
-        Returns:
-            set[str]: periodos con al menos una tarea SUCCESS.
-        """
-        with self._session() as session:
-            return set(
-                session.scalars(
-                    select(NormalizeTask.period)
-                    .where(NormalizeTask.status == TaskStatus.SUCCESS.value)
-                    .distinct()
-                ).all()
             )
 
     def get_latest_run_by_type(self, *job_types: str) -> dict[str, Any] | None:
@@ -856,64 +844,6 @@ class MetadataTracker:
     # TAREAS DE NORMALIZACION
     # ========================================================================
 
-    def create_normalize_task(self, run_id: str, task_name: str, period: str) -> str:
-        """
-        Registra la normalizacion pendiente de un corte.
-
-        Args:
-            run_id: corrida padre.
-            task_name: nombre legible.
-            period: corte a normalizar.
-
-        Returns:
-            str: task_id (UUID).
-        """
-        return self._create_task(
-            NormalizeTask, run_id=run_id, task_name=task_name, period=period
-        )
-
-    def start_normalize_task(self, task_id: str) -> None:
-        """
-        Marca una normalizacion como en curso.
-
-        Args:
-            task_id: tarea a marcar.
-        """
-        self._start_task(NormalizeTask, task_id)
-
-    def complete_normalize_task(
-        self,
-        task_id: str,
-        status: TaskStatus,
-        rows_total: int | None = None,
-        rows_normalized: int | None = None,
-        rows_unrecognized: int | None = None,
-        error_type: str | None = None,
-        error_message: str | None = None,
-    ) -> None:
-        """
-        Cierra una normalizacion con sus metricas de filas.
-
-        Args:
-            task_id: tarea a cerrar.
-            status: estado final.
-            rows_total: filas del corte.
-            rows_normalized: filas con fecha reconocida.
-            rows_unrecognized: filas con formato no reconocido.
-            error_type: clasificacion del error.
-            error_message: detalle del error.
-        """
-        self._complete_task(
-            NormalizeTask,
-            task_id,
-            status,
-            rows_total=rows_total,
-            rows_normalized=rows_normalized,
-            rows_unrecognized=rows_unrecognized,
-            error_type=error_type,
-            error_message=error_message,
-        )
-
     # ========================================================================
     # LINAJE
     # ========================================================================
@@ -1018,37 +948,5 @@ class MetadataTracker:
                 "total_matched",
                 "total_new",
                 "avg_confidence",
-            )
-            return [dict(zip(columnas, fila)) for fila in filas]
-
-    def get_normalize_metrics(self) -> list[dict[str, Any]]:
-        """
-        Rendimiento de la normalizacion de fechas, por corte.
-
-        Returns:
-            list[dict]: `period`, `total_normalizations`, `total_rows`,
-            `total_normalized`, `total_unrecognized`, `avg_duration_sec`.
-        """
-        with self._session() as session:
-            filas = session.execute(
-                select(
-                    NormalizeTask.period,
-                    func.count(NormalizeTask.task_id),
-                    func.coalesce(func.sum(NormalizeTask.rows_total), 0),
-                    func.coalesce(func.sum(NormalizeTask.rows_normalized), 0),
-                    func.coalesce(func.sum(NormalizeTask.rows_unrecognized), 0),
-                    func.avg(NormalizeTask.duration_seconds),
-                )
-                .where(NormalizeTask.status == TaskStatus.SUCCESS.value)
-                .group_by(NormalizeTask.period)
-                .order_by(NormalizeTask.period.desc())
-            ).all()
-            columnas = (
-                "period",
-                "total_normalizations",
-                "total_rows",
-                "total_normalized",
-                "total_unrecognized",
-                "avg_duration_sec",
             )
             return [dict(zip(columnas, fila)) for fila in filas]

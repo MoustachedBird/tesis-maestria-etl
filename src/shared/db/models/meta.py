@@ -1,10 +1,8 @@
 """Modelos ORM de la capa `meta` — observabilidad y control del pipeline.
 
-El esquema se declara aquí y en ningún otro lado: antes vivía como 451
-líneas de DDL en strings, sin ORM ni migraciones (diagnóstico 1.3 de
-`arquitectura.md`). Al vivir
-en el schema `meta` de la MISMA base, el historial de corridas puede hacer
-JOIN con los datos que describe (`meta.process_tasks` →
+El esquema se declara aquí y en ningún otro lado, con ORM y migraciones. Al
+vivir en el schema `meta` de la MISMA base, el historial de corridas puede
+hacer JOIN con los datos que describe (`meta.process_tasks` →
 `silver.establecimientos` por periodo), que es la razón de fondo para no
 tener una base de metadatos aparte.
 
@@ -20,12 +18,11 @@ texto (los valores de `JobStatus`/`TaskStatus`) pero el tipo los valida al
 escribir, así que un `status='FINISHED'` es imposible.
 """
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
-    Date,
     DateTime,
     Double,
     ForeignKey,
@@ -80,7 +77,7 @@ class JobRun(Base):
         String(100), nullable=False, comment="Nombre del job (p. ej. denue_downloader)"
     )
     job_type: Mapped[str] = mapped_column(
-        String(50), nullable=False, comment="DOWNLOAD, PROCESS, CLEE_RESOLUTION, LOAD"
+        String(50), nullable=False, comment="DOWNLOAD, TRANSFORM, CLEE_RESOLUTION"
     )
     run_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, comment="Momento en que se programó"
@@ -117,9 +114,6 @@ class JobRun(Base):
         back_populates="run", cascade="all, delete-orphan"
     )
     process_tasks: Mapped[list["ProcessTask"]] = relationship(
-        back_populates="run", cascade="all, delete-orphan"
-    )
-    normalize_tasks: Mapped[list["NormalizeTask"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
     clee_resolution_tasks: Mapped[list["CleeResolutionTask"]] = relationship(
@@ -254,58 +248,6 @@ class ProcessTask(Base):
 
     def __repr__(self) -> str:
         return f"<ProcessTask({self.task_name}, {self.status}, rows={self.rows_loaded})>"
-
-
-class NormalizeTask(Base):
-    """La normalización de fechas de un periodo.
-
-    Tracking por periodo y no por archivo porque el UPDATE operaba sobre
-    todo el corte a la vez.
-
-    Nota: este stage **desaparece** al migrar a PostgreSQL — el `COPY`
-    normaliza la fecha antes de insertar (§4.2). La tabla se conserva para
-    el historial de las corridas que sí lo ejecutaron.
-    """
-
-    __tablename__ = "normalize_tasks"
-    __table_args__ = (
-        Index("ix_normalize_tasks_run_id", "run_id"),
-        Index("ix_normalize_tasks_status", "status"),
-        Index("ix_normalize_tasks_period", "period"),
-        {"schema": SCHEMA},
-    )
-
-    task_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey(_RUN_FK, ondelete="CASCADE"), nullable=False
-    )
-
-    task_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    period: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="Periodo normalizado (DATE, no string)"
-    )
-
-    start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    duration_seconds: Mapped[float | None] = mapped_column(Double)
-    status: Mapped[str] = mapped_column(String(20), nullable=False)
-
-    rows_total: Mapped[int | None] = mapped_column(BigInteger)
-    rows_normalized: Mapped[int | None] = mapped_column(BigInteger)
-    rows_unrecognized: Mapped[int | None] = mapped_column(BigInteger)
-
-    error_type: Mapped[str | None] = mapped_column(String(50))
-    error_message: Mapped[str | None] = mapped_column(Text)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    run: Mapped["JobRun"] = relationship(back_populates="normalize_tasks")
-
-    def __repr__(self) -> str:
-        return f"<NormalizeTask({self.period}, {self.status})>"
 
 
 class CleeResolutionTask(Base):

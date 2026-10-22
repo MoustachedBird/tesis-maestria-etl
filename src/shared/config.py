@@ -146,30 +146,14 @@ class Settings(BaseSettings):
         """
         return self._get_postgresql_url(read_only=True)
 
-    @computed_field
-    @property
-    def DATABASE_URL_ASYNC(self) -> str:
-        """
-        URL asincrona (driver asyncpg), para endpoints async del API.
-
-        Returns:
-            str: Async SQLAlchemy-compatible database URL
-        """
-        return self._get_postgresql_url(async_driver=True)
-
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
-    def _get_postgresql_url(
-        self,
-        async_driver: bool = False,
-        read_only: bool = False,
-    ) -> str:
+    def _get_postgresql_url(self, read_only: bool = False) -> str:
         """
         Construct PostgreSQL URL with proper driver.
 
         Args:
-            async_driver: If True, use asyncpg driver instead of psycopg3
             read_only: If True, use the api_ro role instead of the owner
 
         Returns:
@@ -177,7 +161,7 @@ class Settings(BaseSettings):
         """
         # `postgresql+psycopg` es psycopg3 (psycopg2 seria `+psycopg2`):
         # lo pide `shared/db/copy.py` para el COPY por bloques.
-        driver = "postgresql+asyncpg" if async_driver else "postgresql+psycopg"
+        driver = "postgresql+psycopg"
 
         user = self.POSTGRES_RO_USER if read_only else self.POSTGRES_USER
         raw_password = self.POSTGRES_RO_PASSWORD if read_only else self.POSTGRES_PASSWORD

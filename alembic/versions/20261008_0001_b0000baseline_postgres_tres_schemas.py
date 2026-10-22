@@ -67,11 +67,10 @@ META_TABLES = [
     "job_runs",
     "download_tasks",
     "process_tasks",
-    "normalize_tasks",
     "clee_resolution_tasks",
     "data_lineage",
 ]
-"""Tablas de `meta`. `job_runs` primero: las otras cinco la referencian."""
+"""Tablas de `meta`. `job_runs` primero: las otras cuatro la referencian."""
 
 
 def _is_postgres(conn) -> bool:

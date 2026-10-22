@@ -120,11 +120,13 @@ def pipeline_health(tracker: Tracker) -> dict[str, Any]:
     Returns:
         dict: `healthy` global y el detalle por etapa.
     """
+    # Solo las etapas que algun job escribe de verdad. Una etapa que no
+    # puede existir en `meta.job_runs` reportaria null para siempre y haria
+    # ruido en la sonda.
     etapas = {
-        "transform": ("TRANSFORM", "PROCESS"),
-        "normalize": ("NORMALIZE",),
+        "extract": ("DOWNLOAD",),
+        "transform": ("TRANSFORM",),
         "clee_resolution": ("CLEE_RESOLUTION",),
-        "load": ("LOAD",),
     }
 
     detalle: dict[str, Any] = {}

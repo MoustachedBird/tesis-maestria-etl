@@ -466,14 +466,5 @@ def build_entidades():
 # ---------------------------------------------------------------------------
 # RETRY (placeholder)
 # ---------------------------------------------------------------------------
-@app.command()
-def retry():
-    """
-    Retry failed extractions based on metadata history.
-    """
-    console.print("[bold yellow]Retrying failed downloads[/bold yellow]")
-    console.print("[yellow]Retry functionality coming soon - use extract to re-run[/yellow]")
-
-
 if __name__ == "__main__":
     app()
