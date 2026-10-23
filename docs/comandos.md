@@ -167,20 +167,48 @@ tmux new -d -s etl 'docker compose run --rm etl extract ; docker compose run --r
 
 ## 5. Seguimiento
 
-```bash
-tmux ls                      # ¿sigue viva la corrida?
-tmux attach -t etl           # ver la consola (Ctrl-b d para salir sin matarla)
-```
+### Qué archivo leer
 
-La señal de vida más fiable son **los segundos desde la última escritura al
-log**, no que `tail -f` se vea normal:
+**El `.out` del `tee`**, siempre. Es el único con la vista completa y el
+único que es por corrida:
 
 ```bash
-echo "log hace $(( $(date +%s) - $(stat -c %Y logs/downloads/latest/app.log) ))s"
+tail -f "$(ls -t logs/ingest-*.out | head -1)"
 ```
 
-Durante el transform ese log deja de crecer por diseño (no hay descargas);
-ahí la señal es la CPU:
+| Archivo | Qué trae | Se acumula |
+|---|---|---|
+| `logs/<etapa>-<fecha>.out` | **todo**: el stage, el `COPY` y el `staging` | no, uno por corrida |
+| `data/etl_process.log` | solo las líneas del stage | **sí**, entre corridas |
+| `logs/downloads/<fecha>/run_*/app.log` | solo descargas (JSON) | no |
+
+`copy.py` y `staging.py` escriben por structlog, que va a stdout; el stage
+logger va a su archivo **y** a stdout. Por eso `data/etl_process.log` no
+tiene las líneas de `COPY`, y por eso un `grep` sobre él se queda corto.
+
+Que se acumule es lo que hace que `grep ERROR | tail -5` devuelva errores de
+anteayer. Con el `.out` ese problema no existe.
+
+### ¿Sigue vivo?
+
+Un solo comando responde las dos cosas — si la sesión existe y hace cuánto
+escribió:
+
+```bash
+L=$(ls -t logs/*.out | head -1); tmux ls; echo "$L | hace $(( $(date +%s) - $(stat -c %Y "$L") ))s"; tail -2 "$L"
+```
+
+El `COPY` emite un latido por bloque de 500k filas con el acumulado y la
+velocidad, así que durante una carga de millones de filas el log avanza cada
+pocos segundos. Si la última línea tiene **más de un par de minutos**, ahí sí
+hay algo raro.
+
+```
+COPY en curso  table=silver.establecimientos_2015_01_staging bloque=3/6
+               filas=1500000 de=2683667 segundos=12.4 filas_s=120967
+```
+
+Cuando nada escribe y quieres saber qué hace el servidor:
 
 ```bash
 docker stats --no-stream --format '{{.Name}}  CPU {{.CPUPerc}}  MEM {{.MemUsage}}' | grep -iE 'etl|postgres'

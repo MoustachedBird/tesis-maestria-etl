@@ -38,6 +38,7 @@ comillas es NULL, que es exactamente como lo lee `COPY ... (FORMAT CSV)`.
 from __future__ import annotations
 
 import io
+import time
 from collections.abc import Iterator
 
 import polars as pl
@@ -131,19 +132,41 @@ def copy_dataframe(
     statement = f"COPY {destino} ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE '\"')"
 
     projected = df.select(cols)
+    destino_log = f"{schema}.{table}" if schema else table
+    total_chunks = -(-projected.height // chunk_rows)
     written = 0
+    inicio = time.monotonic()
+
     # `conn.connection` es el DBAPI wrapper de SQLAlchemy; `.driver_connection`
     # baja al objeto psycopg real, que es el que expone `.cursor().copy()`.
     raw = conn.connection.driver_connection
     with raw.cursor() as cur, cur.copy(statement) as copy:
-        for chunk in _chunks(projected, chunk_rows):
+        for n, chunk in enumerate(_chunks(projected, chunk_rows), start=1):
             copy.write(_csv_buffer(chunk))
             written += chunk.height
 
+            # Latido por bloque. Un COPY de varios millones de filas tarda
+            # minutos sin emitir nada, y desde afuera eso no se distingue de
+            # un cuelgue: la unica forma de saberlo era abrir psql y mirar
+            # `pg_stat_activity`. Con esto la antiguedad de la ultima linea
+            # del log responde "sigue vivo" sola. No toca la base: es una
+            # linea de log, no un registro de progreso en metadata.
+            transcurrido = time.monotonic() - inicio
+            logger.info(
+                "COPY en curso",
+                table=destino_log,
+                bloque=f"{n}/{total_chunks}",
+                filas=written,
+                de=projected.height,
+                segundos=round(transcurrido, 1),
+                filas_s=int(written / transcurrido) if transcurrido > 0 else None,
+            )
+
     logger.info(
         "COPY completado",
-        table=f"{schema}.{table}" if schema else table,
+        table=destino_log,
         rows=written,
-        chunks=-(-projected.height // chunk_rows),
+        chunks=total_chunks,
+        segundos=round(time.monotonic() - inicio, 1),
     )
     return written

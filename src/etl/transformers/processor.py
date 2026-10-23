@@ -383,7 +383,13 @@ class BronzeToSilverProcessor:
         """
         df, logs = self._clean_raw_data(zip_path, period)
         if renombrados := logs["schema_changes"].get("duplicates_renamed"):
-            logger.info(f"      columnas renombradas: {', '.join(renombrados)}")
+            # Solo el conteo y el nombre del archivo: los cortes viejos de
+            # INEGI traen encabezados en prosa y listar los 35 nombres por
+            # archivo llenaba el log de lineas de 900 caracteres, que es lo
+            # que hace imposible ver el progreso real. Los nombres siguen
+            # disponibles en DEBUG.
+            logger.info(f"      {zip_path.name}: {len(renombrados)} columnas renombradas")
+            logger.debug(f"      renombradas: {', '.join(renombrados)}")
         if descartadas := logs["stats"].get("rows_dropped_invalid_req"):
             logger.warning(f"      {descartadas} filas sin columnas requeridas, descartadas")
         return df
