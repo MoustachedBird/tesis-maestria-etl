@@ -23,9 +23,8 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import Engine, exists, func, select, text
 
-from src.etl.db.indexes import suspended_indexes
 from src.etl.utils.clee_resolution_config import (
     ORIGEN_COLUMN,
     RESOLVED_COLUMN,
@@ -45,7 +44,12 @@ from src.meta.tracker import MetadataTracker
 from src.shared.config import get_settings
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
-from src.shared.db.partitions import drop_partition, existing_partitions, partition_name
+from src.shared.db.partitions import (
+    PARTITIONED_TABLE,
+    drop_partition,
+    existing_partitions,
+    partition_name,
+)
 from src.shared.db.staging import staging_partition
 from src.shared.enums import JobStatus, OrigenClee, TaskStatus
 from src.shared.logging import get_stage_logger
@@ -170,14 +174,23 @@ class CLEEResolver:
     def _get_sorted_periods(self) -> list[date]:
         """Cortes presentes en Silver, del mas antiguo al mas nuevo.
 
+        Salen del catalogo de PostgreSQL y no de la tabla: `period` es la
+        clave de particion, asi que cada corte ES una particion y su nombre
+        lleva el `YYYY_MM`. Preguntarselo a los datos obligaria a recorrer
+        82.9M filas para enterarse de 20 fechas que el catalogo ya tiene.
+
         Returns:
             list[date]: periodos ordenados.
         """
-        estab = get_table("establecimientos")
         with self.engine.connect() as conn:
-            return list(
-                conn.execute(select(estab.c.period).distinct().order_by(estab.c.period)).scalars()
-            )
+            nombres = existing_partitions(conn)
+
+        prefijo = len(f"{PARTITIONED_TABLE}_")
+        cortes = []
+        for nombre in nombres:
+            ano, mes = nombre[prefijo:].split("_")
+            cortes.append(date(int(ano), int(mes), 1))
+        return sorted(cortes)
 
     def _get_periods_with_clee_coverage(self) -> dict[date, bool]:
         """Que cortes traen CLEE de INEGI y cuales no.
@@ -188,15 +201,26 @@ class CLEEResolver:
         Returns:
             dict: periodo -> True si tiene al menos un CLEE no vacio.
         """
+        # EXISTS y no COUNT: la pregunta es si el corte trae AL MENOS un
+        # CLEE, asi que el plan corta en la primera fila que lo cumple en
+        # vez de contar los millones que tiene. El filtro por periodo deja
+        # el escaneo dentro de una particion.
         estab = get_table("establecimientos")
+        cobertura = {}
         with self.engine.connect() as conn:
-            filas = conn.execute(
-                select(
-                    estab.c.period,
-                    func.count(estab.c.clee).filter(estab.c.clee != "") > 0,
-                ).group_by(estab.c.period)
-            ).all()
-        return {period: bool(tiene) for period, tiene in filas}
+            for period in self._get_sorted_periods():
+                cobertura[period] = bool(
+                    conn.execute(
+                        select(
+                            exists().where(
+                                estab.c.period == period,
+                                estab.c.clee.is_not(None),
+                                estab.c.clee != "",
+                            )
+                        )
+                    ).scalar()
+                )
+        return cobertura
 
     def _load_period(self, period: date) -> pl.DataFrame:
         """
@@ -377,6 +401,7 @@ class CLEEResolver:
                 self.logger.info(f"   {period}: ya resuelto, se conserva")
                 continue
 
+            self.logger.info(f"   {period}: leyendo identidades de INEGI...")
             escritas = self._write_period_results(self._filas_directas(period), period)
             self._invalidate_kb_cache(period)
             total += escritas
@@ -614,11 +639,17 @@ class CLEEResolver:
         # Classify periods by CLEE coverage
         clee_coverage = self._get_periods_with_clee_coverage()
 
-        # Prefijo de region, derivado de las entidades presentes
-        estab = get_table("establecimientos")
+        # Prefijo de region, derivado de las entidades presentes. Se lee del
+        # catalogo de geografia (32 filas) y no con un DISTINCT sobre la
+        # tabla de hechos: `cve_ent` es FK a este catalogo, asi que lo que
+        # hay en Silver es por construccion un subconjunto de lo que hay
+        # aqui, y el DENUE cubre el pais entero.
+        entidades_tbl = get_table("denue_entidades")
         with self.engine.connect() as conn:
             entidades = list(
-                conn.execute(select(estab.c.cve_ent).distinct().order_by(estab.c.cve_ent)).scalars()
+                conn.execute(
+                    select(entidades_tbl.c.cve_ent).order_by(entidades_tbl.c.cve_ent)
+                ).scalars()
             )
         state_list = entidades or ["NATIONAL"]
         prefix = get_region_prefix(state_list) + self._prefix_suffix
@@ -698,12 +729,10 @@ class CLEEResolver:
                 self.tracker.complete_run(run_id, JobStatus.SUCCESS)
                 return True
 
-            # La resolucion reescribe la columna maestra sobre decenas de
-            # millones de filas, y mantener sus indices durante un UPDATE
-            # masivo es ordenes de magnitud mas lento. Se suspenden aqui y
-            # se restituyen al terminar, tambien si falla.
-            with self.engine.begin() as index_conn, suspended_indexes(index_conn):
-                stats = self.process_national(force=force)
+            # Los indices de `establecimientos` se quedan: la resolucion
+            # solo LEE esa tabla --escribe en la del metodo, por staging--
+            # asi que los necesita para el pruning y los filtros por corte.
+            stats = self.process_national(force=force)
 
             # Count remaining unresolved
             remaining = self._count_unresolved()

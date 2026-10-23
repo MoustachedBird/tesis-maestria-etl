@@ -132,15 +132,11 @@ class Establecimiento(Base):
     # validacion real -- los codigos que cruzan con los catalogos de
     # geografia (cve_ent, cve_mun, cve_loc).
     numero_ext: Mapped[str | None] = mapped_column(String, comment="External number")
-    letra_ext: Mapped[str | None] = mapped_column(
-        String, comment="External number letter/suffix"
-    )
+    letra_ext: Mapped[str | None] = mapped_column(String, comment="External number letter/suffix")
     edificio: Mapped[str | None] = mapped_column(String(100), comment="Building name")
     edificio_e: Mapped[str | None] = mapped_column(String(100), comment="Building name (extended)")
     numero_int: Mapped[str | None] = mapped_column(String, comment="Internal/apartment number")
-    letra_int: Mapped[str | None] = mapped_column(
-        String, comment="Internal number letter/suffix"
-    )
+    letra_int: Mapped[str | None] = mapped_column(String, comment="Internal number letter/suffix")
 
     # Settlement/neighborhood
     tipo_asent_id: Mapped[int | None] = mapped_column(
