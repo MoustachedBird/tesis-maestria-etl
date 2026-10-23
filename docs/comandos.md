@@ -167,14 +167,27 @@ tmux new -d -s etl 'docker compose run --rm etl extract ; docker compose run --r
 
 ## 5. Seguimiento
 
+### Seguir una corrida en vivo
+
+Lo más simple es no tocar archivos:
+
+```bash
+tmux attach -t clee        # Ctrl-b d para salir sin matarla
+```
+
+Si prefieres `tail -f`, lanza con el symlink `logs/latest.out` y la ruta deja
+de cambiar entre corridas:
+
+```bash
+tmux new -d -s clee 'F=logs/clee-radio-$(date +%Y%m%d-%H%M).out; ln -sfn "$(basename $F)" logs/latest.out; docker compose run --rm etl transform --only clee-radio --force 2>&1 | tee -a "$F"'
+
+tail -f logs/latest.out    # siempre la corrida más reciente
+```
+
 ### Qué archivo leer
 
 **El `.out` del `tee`**, siempre. Es el único con la vista completa y el
-único que es por corrida:
-
-```bash
-tail -f "$(ls -t logs/ingest-*.out | head -1)"
-```
+único que es por corrida.
 
 | Archivo | Qué trae | Se acumula |
 |---|---|---|
