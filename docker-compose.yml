@@ -89,10 +89,12 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
 
-    # El default de Docker son 64 MB y Postgres usa memoria compartida
-    # dinámica para las consultas paralelas: con 64 MB un plan paralelo
-    # grande falla con "could not resize shared memory segment".
-    shm_size: ${PG_SHM_SIZE:-1gb}
+    # Postgres usa memoria compartida dinámica para las consultas paralelas
+    # y pide ~256 MB POR WORKER en un hash join grande: con los 64 MB que da
+    # Docker por default, o con 1 GB y 8 workers, el plan muere con "could
+    # not resize shared memory segment". Es tmpfs, así que sobredimensionarlo
+    # no cuesta RAM que no se use.
+    shm_size: ${PG_SHM_SIZE:-4gb}
 
     deploy:
       resources:

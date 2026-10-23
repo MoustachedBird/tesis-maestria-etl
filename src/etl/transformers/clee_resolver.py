@@ -159,15 +159,26 @@ class CLEEResolver:
         """Observaciones sin fila en la tabla de este metodo.
 
         No se pregunta por una columna NULL en `establecimientos`: la
-        identidad ya no vive ahi. Ausencia de fila ES el pendiente.
+        identidad ya no vive ahi, asi que la ausencia de fila ES el
+        pendiente.
+
+        Se calcula como resta de dos conteos y no con un anti-join: unir
+        82.9M filas contra 82.9M obliga al planeador a un hash join
+        paralelo, y cada worker pide 256 MB de memoria compartida dinamica
+        --ocho de ellos desbordan el `/dev/shm` de 1 GB del contenedor y la
+        consulta muere con `could not resize shared memory segment`. Dos
+        agregados sueltos no construyen tabla hash y dan el mismo numero,
+        porque toda fila de la tabla del metodo referencia una de
+        `establecimientos`: su `(id, period)` sale de ahi.
+
+        Returns:
+            int: observaciones sin identidad asignada por este metodo.
         """
         with self.engine.connect() as conn:
             return conn.execute(
                 text(
-                    "SELECT COUNT(*) FROM silver.establecimientos e "
-                    f"LEFT JOIN silver.{self.clee_table} r "
-                    "  ON r.id = e.id AND r.period = e.period "
-                    "WHERE r.id IS NULL"
+                    "SELECT (SELECT COUNT(*) FROM silver.establecimientos) "
+                    f"     - (SELECT COUNT(*) FROM silver.{self.clee_table})"
                 )
             ).scalar_one()
 
