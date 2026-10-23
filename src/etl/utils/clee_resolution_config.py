@@ -15,6 +15,8 @@ falsos positivos); mas altos = menos matches (mas falsos negativos).
 
 import os
 
+from src.shared.enums import Layer
+
 # =============================================================================
 # RADIO ESPACIAL (calibracion, .env)
 # =============================================================================
@@ -226,6 +228,9 @@ def silver_read_query(clee_table: str | None) -> str:
     (COLS_NEEDED_FOR_MATCHING, sanitizacion, KB) no cambia. Catalogos de
     decenas de filas: el costo del JOIN es ~0.
 
+    Todas las tablas van calificadas con su schema: la conexion no fija
+    `search_path`, asi que un nombre desnudo no resuelve.
+
     La identidad llega por LEFT JOIN contra la tabla del metodo y no como
     columna de `establecimientos`: la tabla de hechos ya no la guarda (ver
     `docs/separacion_ingest_clee.md`). El JOIN incluye `period` para que sea
@@ -244,6 +249,8 @@ def silver_read_query(clee_table: str | None) -> str:
     Returns:
         str: SELECT sin filtro; el llamador agrega su `WHERE e.period = ...`.
     """
+    schema = Layer.SILVER.value
+
     if clee_table is None:
         identidad = (
             f"CAST(NULL AS VARCHAR) AS {RESOLVED_COLUMN}, CAST(NULL AS VARCHAR) AS {ORIGEN_COLUMN}"
@@ -253,7 +260,7 @@ def silver_read_query(clee_table: str | None) -> str:
         identidad = (
             f"r.{RESOLVED_COLUMN} AS {RESOLVED_COLUMN}, r.{ORIGEN_COLUMN} AS {ORIGEN_COLUMN}"
         )
-        join = f"\n    LEFT JOIN {clee_table} r ON r.id = e.id AND r.period = e.period"
+        join = f"\n    LEFT JOIN {schema}.{clee_table} r ON r.id = e.id AND r.period = e.period"
 
     return f"""
     SELECT
@@ -278,10 +285,10 @@ def silver_read_query(clee_table: str | None) -> str:
         e.nomb_asent,
         e.nom_cencom,
         e.cod_postal
-    FROM establecimientos e{join}
-    LEFT JOIN denue_actividades_economicas a ON e.codigo_act = a.codigo_act
-    LEFT JOIN denue_estratos_personal ep ON e.per_ocu_id = ep.id
-    LEFT JOIN denue_tipos_asentamiento ta ON e.tipo_asent_id = ta.id
+    FROM {schema}.establecimientos e{join}
+    LEFT JOIN {schema}.denue_actividades_economicas a ON e.codigo_act = a.codigo_act
+    LEFT JOIN {schema}.denue_estratos_personal ep ON e.per_ocu_id = ep.id
+    LEFT JOIN {schema}.denue_tipos_asentamiento ta ON e.tipo_asent_id = ta.id
 """
 
 
