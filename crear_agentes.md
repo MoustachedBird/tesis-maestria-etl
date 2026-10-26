@@ -482,9 +482,10 @@ hipótesis documentada es que las desapariciones masivas son reasignación de
 claves, no cierres.
 
 **922,285 negocios no se verifican con búsquedas web.** Ni por costo ni por
-tiempo ni por términos de servicio. El agente 2 existe para **estimar**: una
-muestra estratificada de cientos de negocios por par de cortes, con la que
-se calibra qué fracción de las "desapariciones" son cierres reales.
+tiempo ni por términos de servicio — la aritmética está en §10.2. El agente
+2 existe para **estimar**: muestra nacional estratificada más censo de un
+municipio (§10.4), con lo que se calibra qué fracción de las
+"desapariciones" son cierres reales.
 
 Eso cambia su tabla destino: no es "el estado de cada negocio" sino
 `gold.supervivencia_verificada`, con los cientos verificados y su evidencia,
@@ -519,3 +520,227 @@ No es el orden en que los enumeraste, y el motivo es dónde está el riesgo:
 4. **Agente 2**, al final. Es el de más incógnitas abiertas: fuente de
    datos, costo, diseño del muestreo y el límite ético. Y **depende de
    Gold**, que todavía no existe (Fase 5).
+
+---
+
+## 10. Alcance: censo contra muestreo, con la aritmética
+
+Esta sección documenta la discusión del 2026-10-26 sobre si los agentes
+deben recorrer **todos** los negocios. La conclusión es distinta para cada
+uno, y en los dos casos la decide un número, no una preferencia.
+
+### 10.1 Agente 1 (CLEE): posible, y la medición decide
+
+Recorrer las 31,392,164 filas que necesitan propagación **sí es posible**.
+Un 7B en la 5090, prompt de ~600 tokens y salida de ~20:
+
+| Throughput | 31.4M decisiones |
+|---|---|
+| 10 dec/s | **36 días** |
+| 30 dec/s | **12 días** |
+| 50 dec/s (optimista) | **7.3 días** |
+
+Radio tardó 8.5 h, así que son 20–100×. La workstation está dedicada, así
+que 12 días no es descalificante por sí mismo. **El problema es iterar**: un
+cambio de prompt son otros 12 días, y es la primera vez que esto corre.
+
+**Concesión al recorrido completo.** Targetear solo la banda ambigua tiene
+un hueco real: atrapa los casos donde rapidfuzz *dudó*, no donde se equivocó
+con **confianza alta**. `plan.md` §2 dice que el 43.7% de los `falso_match`
+"tiene alguna feature que difiere", pero **no dice en qué parte del rango de
+score cayeron**. Si están arriba, la banda no los ve y el recorrido completo
+es la respuesta correcta.
+
+Eso no se decide opinando. Se mide sobre la muestra enmascarada, que ya
+tiene verdad conocida:
+
+```
+¿Cómo se distribuyen los 9,002 errores a lo largo del score?
+  concentrados en la banda media  →  targetear: de 12 días a horas
+  repartidos por todo el rango    →  recorrido completo justificado
+```
+
+**Decisión:** la corrida completa se hace **una vez, con el prompt ya
+congelado**, después de validar en la muestra. No primero.
+
+### 10.2 Agente 2 (supervivencia): el censo no es factible
+
+Precios de lista, orden de magnitud, a verificar antes de comprometerse:
+
+| Fuente | Costo/1000 | ~10.45M negocios | Límite diario |
+|---|---|---|---|
+| Google Custom Search | ~$5 | **$52,250** | 10k/día → **2.9 años** |
+| Google Places (Details) | ~$17 | **$177,650** | — |
+| SerpAPI | ~$10 | **$104,500** | — |
+| Serper.dev | ~$1 | **$10,450** | — |
+
+Raspar en lugar de pagar viola los ToS y termina en CAPTCHA a los pocos
+miles.
+
+**El problema de fondo no es el dinero, es el sesgo.** Una taquería de barrio
+no tiene sitio, ni ficha de Maps con horarios, ni redes. Para ella el
+resultado modal es `SIN_EVIDENCIA` — y eso **correlaciona con el tamaño del
+negocio**, que es la variable de estudio. Un censo por búsqueda web mediría
+bien a los grandes y mal a los micro, y produciría la conclusión de que los
+micronegocios "no se pueden verificar": un artefacto del instrumento
+disfrazado de hallazgo.
+
+### 10.3 Por qué el muestreo es mejor instrumento, no un recorte
+
+La pregunta de investigación no es *"¿cerró el negocio X?"* diez millones de
+veces. Es:
+
+> De las **922,285** identidades que desaparecen entre 2019-04 y 2019-11
+> (41.1%, contra 1.0% en otros pares — `docs/findings.md` §2), ¿qué fracción
+> son cierres reales y qué fracción es reasignación de claves?
+
+Eso es una **proporción**, y las proporciones se estiman con muestras:
+
+| n | Margen de error (95%) | Costo API | Tiempo |
+|---|---|---|---|
+| 1,000 | ±3.1% | ~$10 | horas |
+| **2,400** | **±2.0%** | ~$24 | horas |
+| 9,600 | ±1.0% | ~$96 | 1 día |
+
+Con ±2% se distingue sin ambigüedad "el 41% son cierres reales" de "el 41%
+es un artefacto de reasignación". Esa es toda la pregunta.
+
+Y el muestreo compra algo que el censo **no puede**: con 2,400 casos se
+puede **verificar bien cada uno** —varias fuentes, revisión manual de los
+ambiguos, medir la tasa de `SIN_EVIDENCIA` por estrato—. Con 10M se tiene un
+veredicto de una sola fuente, sin revisar, sobre datos donde la mayoría no
+tiene presencia web. **Un muestreo bien hecho es evidencia más fuerte que un
+censo mal hecho**, y aquí el censo no puede hacerse bien.
+
+### 10.4 Diseño híbrido
+
+Da las dos cosas sin pagar $50k:
+
+- **Muestra nacional** de ~2,400, estratificada por par de cortes y por
+  tamaño (`per_ocu_id`) → la estimación con intervalo de confianza.
+- **Censo completo de un municipio** → caso de estudio con cobertura total,
+  donde sí se puede afirmar "verificamos todos". Son decenas de miles, no
+  millones: factible y defendible.
+
+Estimación nacional más caso de estudio exhaustivo es un diseño estándar.
+
+---
+
+## 11. Inventario de fuentes para el agente 2
+
+El canal que importa está bien identificado: **los cierres de negocios
+establecidos se anuncian en redes sociales**. El problema es el acceso, que
+cambió mucho desde 2018.
+
+### 11.1 El hallazgo: `business_status` de Google Places
+
+Antes de cualquier LLM o búsqueda de texto, Places devuelve un campo
+estructurado:
+
+```
+business_status:  OPERATIONAL | CLOSED_TEMPORARILY | CLOSED_PERMANENTLY
+```
+
+**Es el dato más valioso de toda esta sección** y no necesita interpretación:
+es una bandera, no un texto que un modelo tenga que leer. Para los negocios
+que tienen ficha, responde la pregunta directamente.
+
+Limitaciones a medir, no a suponer: qué fracción de los negocios del DENUE
+tiene ficha en Maps (sospecho que baja en micronegocios), y cuánto tarda
+Google en marcar un cierre — el campo refleja *cuándo se enteró Google*, no
+cuándo cerró el negocio. Para fechar la apertura sirve más la fecha de la
+reseña más antigua.
+
+### 11.2 Facebook e Instagram: el canal correcto, la puerta cerrada
+
+| Vía | Estado | Sirve |
+|---|---|---|
+| Graph API, páginas de terceros | Requiere *Page Public Content Access* con App Review y verificación de negocio | Muy improbable para una tesis |
+| Instagram Graph API | Solo cuentas que tú administras | No |
+| Instagram Basic Display | Descontinuada (2024) | No |
+| Búsqueda pública de FB | Retirada tras 2018 | No |
+| CrowdTangle | **Cerrado en agosto de 2024** | No |
+| **Meta Content Library** | Reemplazo de CrowdTangle, **para investigadores académicos** vía solicitud (ICPSR) | **Sí, si se obtiene acceso** |
+| Raspado | Viola ToS, bloqueo agresivo | No |
+
+**La Meta Content Library es la única vía legítima**, y existe justamente
+para casos como este: investigación académica con afiliación institucional.
+Vale la solicitud, pero es un trámite con tiempos propios, así que **no
+puede ser una dependencia del camino crítico**. Diseñar asumiendo que no se
+tiene, y sumarla si llega.
+
+Señal indirecta y accesible: una página de Facebook cerrada suele aparecer
+en los resultados de un buscador web con su último post o con reseñas que
+dicen "ya cerró". Eso entra por la vía de búsqueda, no por la API de Meta.
+
+### 11.3 Motores de búsqueda
+
+| Fuente | Acceso | Nota |
+|---|---|---|
+| **Brave Search API** | Oficial, índice propio, capa gratuita + ~$3–5/1000 | **Primera opción**: sin zona gris de ToS |
+| **Serper.dev** | ~$1/1000, resultados de Google | El más barato; servicio intermediario de Google |
+| SerpAPI | ~$10/1000 | Más caro, muy establecido |
+| Tavily / Exa | Diseñadas para agentes, devuelven contenido limpio | Útiles: menos post-procesamiento |
+| **DuckDuckGo** | **Sin API oficial de resultados web** | El paquete `ddgs` raspa un endpoint HTML: se rompe seguido y limita por tasa. No apto |
+| Bing Web Search | Microsoft movió/retiró estas APIs; verificar estado actual | No asumir disponibilidad |
+
+Con la muestra de 2,400, Brave o Serper cuestan entre $3 y $12. El costo
+deja de ser un criterio de diseño.
+
+### 11.4 Fuentes oficiales mexicanas
+
+Aquí hay algo importante para la tesis, y es incómodo:
+
+| Fuente | Qué da | Para quién sirve |
+|---|---|---|
+| Registro Público de Comercio / SIGER | Disolución de sociedades | Solo las **constituidas** (SA de CV) |
+| SAT — padrón de contribuyentes | Estatus del RFC | Sin consulta masiva por nombre |
+| IMSS | Patrones registrados | Publica **agregados** por municipio y sector, no por negocio |
+| DENUE (el propio) | Ausencia en un corte posterior | Es la señal que queremos validar, no sirve para validarse |
+
+**Para los negocios formales y constituidos existen registros oficiales.
+Para los micronegocios no existe ninguna fuente.** Y los micronegocios son
+el objeto de estudio.
+
+### 11.5 La verificabilidad está estratificada, y eso es un hallazgo
+
+La conclusión de juntar §11.1–11.4:
+
+```
+negocio constituido, con ficha en Maps y presencia en redes
+    →  verificable por varias fuentes independientes
+micronegocio de barrio, sin RFC visible, sin ficha, sin redes
+    →  NINGUNA fuente lo alcanza
+```
+
+Eso **no es una limitación que haya que esconder**: es un resultado
+reportable. Decir *"la supervivencia de los micronegocios mexicanos no es
+verificable con fuentes públicas, y aquí está la medición de esa brecha por
+estrato"* es una contribución, y además justifica por qué el DENUE —con
+todos sus defectos de reasignación de claves— sigue siendo la mejor fuente
+disponible para ese segmento.
+
+**Consecuencia de diseño:** el agente 2 reporta obligatoriamente
+`SIN_EVIDENCIA` como valor de primera clase y **la cobertura por estrato de
+tamaño** es una de sus salidas principales, no un diagnóstico secundario.
+
+### 11.6 Cascada de verificación
+
+Barato y estructurado primero; el LLM al final y solo donde hace falta:
+
+```
+1. Google Places business_status        ← bandera, sin LLM. Resuelve lo que puede
+2. Si no hay ficha o dice OPERATIONAL dudoso:
+   búsqueda web (Brave/Serper) por nombre + municipio
+3. El LLM lee los resultados y decide:   CERRADO | ABIERTO | SIN_EVIDENCIA
+   + fecha estimada + las URLs que lo sustentan
+4. Meta Content Library, si hay acceso, solo para los ambiguos del paso 3
+```
+
+El LLM entra en el paso 3, que es donde aporta: interpretar texto libre
+—reseñas, posts, notas— para distinguir "cerró definitivamente" de "cambió
+de dirección" o "cerró por remodelación". Los pasos 1 y 2 no lo necesitan.
+
+**Guardar el snapshot crudo de cada paso** (§9.7): los resultados de
+búsqueda de hoy no son los de dentro de seis meses, y sin el snapshot la
+tesis no es re-verificable.
