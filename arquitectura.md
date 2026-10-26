@@ -12,6 +12,9 @@ Complementa, no reemplaza:
   y la configuración de Postgres derivada de él.
 - `docs/comandos.md` — los comandos de operación: base de pruebas, extract,
   cada paso del transform por separado, seguimiento y estado de la base.
+- `crear_agentes.md` — plan del adjudicador LLM (Ollama sobre la RTX 5090)
+  como tercer método de resolución. **Afecta a §2.3.3**: sería la primera
+  etapa del pipeline que usa la GPU.
 - `docs/separacion_ingest_clee.md` — propuesta de sacar el resultado de la
   propagación CLEE a una tabla por método (`silver.clee_radio`,
   `silver.clee_h3`, y la futura `silver.clee_llm`), para que una falla de una
