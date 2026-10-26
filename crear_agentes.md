@@ -1,11 +1,15 @@
-# Plan — adjudicador LLM para la resolución CLEE
+# Plan — agentes LLM sobre el warehouse
 
 **Estado:** propuesto, nada implementado. Decidido el 2026-10-26 escribirlo
 antes de tocar código.
 
-**Qué entrega:** una tercera tabla de resolución, `silver.clee_llm`, poblada
-con un modelo corriendo en Ollama sobre la RTX 5090 de indominus, comparable
-contra `clee_radio` y `clee_h3` con el mismo arnés de evaluación.
+**Qué entrega:** la arquitectura de `src/agents/` para tres agentes de forma
+distinta (§9), y el primero de ellos completo — un adjudicador que puebla
+`silver.clee_llm` con un modelo en Ollama sobre la RTX 5090 de indominus,
+comparable contra `clee_radio` y `clee_h3` con el mismo arnés de evaluación.
+
+Las §§1–8 son el adjudicador CLEE. La **§9 es la arquitectura compartida** y
+manda sobre lo que digan las secciones anteriores si algo difiere.
 
 ---
 
@@ -114,42 +118,22 @@ corazonada** — es el paso 1 de la §6.
 
 ---
 
-## 3. Organización de carpetas
+## 3. Dónde vive el adjudicador
 
-Sí, va en `src/`. Dos paquetes, por una razón concreta:
+Sí, va en `src/`. La estructura completa de los tres agentes está en la
+**§9.3**; para el adjudicador son dos archivos:
 
 ```
-src/
-├── shared/
-│   └── llm/                      ← infraestructura: no sabe qué es un CLEE
-│       ├── __init__.py
-│       ├── client.py             ← HTTP a Ollama, deadline total, reintentos
-│       ├── schema.py             ← salida estructurada + validación
-│       └── cache.py              ← memoización por hash del prompt
-└── etl/
-    └── agents/                   ← deciden sobre datos del ETL
-        ├── __init__.py
-        ├── clee_adjudicador.py   ← (registro, candidatos) -> decisión
-        └── prompts/
-            └── clee_v1.txt       ← versionado; su hash va en la tabla
+src/shared/llm/              ← cliente Ollama: infraestructura, sin dominio
+src/agents/clee/
+    adjudicador.py           ← (registro, candidatos) -> decisión
+    prompts/clee_v1.txt      ← versionado; su hash va en la tabla
 ```
 
-**Por qué `shared/llm` y no `etl/llm`:** el cliente es infraestructura, como
-`shared/db`. Si mañana el API quiere un endpoint "explica este match",
-necesita el cliente sin importar `src.etl` — y eso está prohibido por
-`tests/unit/test_layer_boundaries.py`.
-
-**Por qué `etl/agents` y no `src/agents`:** el adjudicador usa las utilidades
-de matching de `src.etl.utils`. Un paquete de primer nivel tendría que
-importar de `src.etl` (prohibido en la dirección contraria) o duplicarlas.
-Dentro de `etl/` respeta las fronteras que ya existen.
-
-**Detalle útil:** si creas `src/agents/` sin declarar sus fronteras, el test
-`test_los_paquetes_declarados_cubren_src` **falla a propósito** — obliga a
-decidir qué puede importar antes de escribir código. Si eliges ese camino,
-hay que agregar la entrada a `PROHIBIDOS`.
-
----
+Lo que importa no es la carpeta sino la dirección de las dependencias: el
+**ETL invoca al agente**, no al revés, y el adjudicador **no importa
+`src.etl`**. Recibe el registro y los candidatos como datos planos, porque
+quien lo llama ya normalizó y generó los vecinos. Al revés habría un ciclo.
 
 ## 4. La tabla `silver.clee_llm`
 
@@ -260,7 +244,7 @@ la base**.
         muchísimo entre cortes: la misma pareja no se pregunta dos veces.
         Es lo que puede bajar el costo un orden de magnitud.
 
-- [ ] **3. Adjudicador** (`src/etl/agents/clee_adjudicador.py`). Función
+- [ ] **3. Adjudicador** (`src/agents/clee/adjudicador.py`). Función
       pura sobre `(registro, candidatos) -> decisión`, probable sin servidor
       con un cliente de mentiras. Batch de hasta `OLLAMA_MAX_BATCH`.
 
@@ -307,3 +291,231 @@ la base**.
   derivándose de `clee_radio` (`IDENTITY_TABLE` en
   `src/etl/loaders/entidades.py`). Cambiar la unidad de análisis es una
   decisión aparte, y se toma **con** los resultados de la comparación.
+
+---
+
+## 9. Arquitectura para varios agentes
+
+Esta sección existe porque el adjudicador CLEE es el primero de **tres**, y
+los tres tienen formas distintas. Diseñar para el primero solamente llevaría
+a rehacer todo en el segundo.
+
+### 9.1 Los tres agentes no son el mismo animal
+
+| | **1. Adjudicador CLEE** | **2. Verificador de supervivencia** | **3. Analista** |
+|---|---|---|---|
+| Qué decide | cuál candidato es el mismo negocio | si el negocio cerró, y cuándo abrió | responde preguntas de análisis |
+| Pasos | **uno, fijo** | varios, con ramas | varios |
+| Herramientas | **ninguna** | búsqueda web, Maps, redes | SQL acotado sobre `gold` |
+| Datos | **en el prompt**, los pone el código | los **busca** el agente | los **consulta** el agente |
+| Volumen | ~300k decisiones | **cientos** (muestra) | decenas por sesión |
+| Invocación | batch, desde el transform | batch, desde un comando | interactiva |
+| Escribe en | `silver.clee_llm` | `gold.supervivencia_verificada` | nada |
+| Determinismo | requisito | imposible (la web cambia) | no aplica |
+
+El 1 es un **clasificador**. El 2 es un **agente de verdad**: no sabe qué va
+a encontrar y tiene que decidir qué buscar después. El 3 es un **cliente**
+de herramientas que nosotros exponemos.
+
+Mi recomendación anterior de "nada de frameworks" era correcta para el 1 y
+**no** se extiende al 2.
+
+### 9.2 La regla que hace reutilizable todo esto
+
+> **El contrato es nuestro; el framework es un detalle de implementación de
+> un agente.**
+
+Cada agente depende de `src/agents/base.py`, no de Agno ni de LangGraph. Si
+Agno resulta un callejón, cambia **un** módulo y los otros dos agentes no se
+enteran. Si al revés resulta excelente, el adjudicador no tiene por qué
+adoptarlo: para 300k decisiones de un paso sigue siendo sobrecarga.
+
+Esa inversión es lo mismo que ya hiciste con `METHODS` en el resolver: el
+orquestador no sabe si es radio o H3, y agregar un método es una entrada en
+un registro.
+
+### 9.3 Estructura
+
+```
+src/
+├── shared/
+│   └── llm/                      ← infraestructura, sin dominio ni tools
+│       ├── client.py             ← Ollama HTTP, deadline total, reintentos
+│       ├── schema.py             ← pydantic -> JSON Schema para `format`
+│       ├── cache.py              ← memoización por hash de entrada
+│       └── budget.py             ← tope de llamadas, tiempo y costo POR CORRIDA
+│
+├── agents/                       ← paquete nuevo de primer nivel
+│   ├── base.py                   ← Agente (Protocol), Decision, Evidencia
+│   ├── registry.py               ← nombre -> clase; de aquí sale el CLI
+│   ├── clee/                     ← #1  batch, sin tools
+│   │   ├── adjudicador.py
+│   │   └── prompts/clee_v1.txt
+│   ├── supervivencia/            ← #2  tools externas, multi-paso
+│   │   ├── verificador.py
+│   │   ├── fuentes/              ← una por archivo: busqueda, maps, redes
+│   │   └── prompts/
+│   └── analista/                 ← #3  consume las tools de src/mcp
+│       └── analista.py
+│
+└── mcp/                          ← servidor FastMCP sobre gold y meta
+    ├── server.py
+    └── consultas.py              ← SELECT parametrizados, nunca SQL del modelo
+```
+
+**Por qué `src/agents` es de primer nivel y no `src/etl/agents`:** solo el
+adjudicador pertenece al ETL. El verificador escribe en `gold` y el analista
+no toca el ETL en absoluto, asi que meter a los tres bajo `etl/` mentiría
+sobre lo que son.
+
+**Quién llama a quién** importa más que dónde viven:
+
+```
+src.etl.transformers.clee_resolver  →  src.agents.clee        (el ETL invoca al agente)
+src.agents.*                        →  src.shared, src.meta   (y nada mas)
+src.mcp                             →  src.shared, src.meta
+```
+
+El adjudicador **no importa `src.etl`**, y eso no es casual: recibe el
+registro y los candidatos como datos planos. La normalización y la
+generación de candidatos ya las hizo quien lo llama. Si necesitara
+`src.etl.utils.matching` habría un ciclo.
+
+Fronteras a declarar en `tests/unit/test_layer_boundaries.py` (el test falla
+hasta que se hagan, a propósito):
+
+```python
+"src.agents": ("src.api", "src.etl", "src.scheduler", "src.mcp"),
+"src.mcp":    ("src.api", "src.etl", "src.agents", "src.scheduler"),
+"src.etl":    ("src.api", "src.scheduler", "src.mcp"),   # etl -> agents SÍ se permite
+```
+
+### 9.4 El contrato
+
+```python
+class Evidencia(BaseModel):
+    """De dónde salió la decisión. Para el agente 2, el snapshot crudo."""
+    fuente: str          # "prompt" | "serpapi" | "google_maps" | ...
+    referencia: str      # URL, o el hash del prompt
+    contenido_hash: str  # hash del contenido guardado
+
+class Decision(BaseModel):
+    """Lo que devuelve TODO agente, sin importar su forma."""
+    veredicto: Any
+    confianza: float
+    evidencia: list[Evidencia]
+    modelo: str
+    prompt_version: str
+    latencia_ms: int
+
+class Agente(Protocol):
+    nombre: str
+    version: str
+    def decidir(self, entrada: Any) -> Decision: ...
+```
+
+Y **una sola tabla de auditoría para los tres**, porque la forma del registro
+es idéntica:
+
+```
+meta.agent_decisions
+    agente, version, modelo, prompt_version,
+    entrada_hash, veredicto (jsonb), confianza,
+    evidencia (jsonb), latencia_ms, decidido_en
+```
+
+Eso sirve a tres cosas a la vez: **caché** (lookup por `entrada_hash`),
+**auditoría** (qué decidió cada agente y con qué vio) y **reproducibilidad**
+(re-correr con la caché poblada da los mismos números, que es la única
+garantía real — ver §7).
+
+### 9.5 Tecnología por agente
+
+| Agente | Tecnología | Por qué |
+|---|---|---|
+| **1. CLEE** | `requests` + pydantic + `ThreadPoolExecutor` | Un paso, sin tools. Un framework solo agrega latencia por decisión ×300k |
+| **2. Supervivencia** | **Agno** detrás de `base.Agente` — con bucle propio como punto de partida | Tiene tools y ramas, que es lo que un framework de agentes resuelve. Pero el conjunto de tools es chico (3–4), así que arrancar con un bucle propio de ~100 líneas mantiene el trace auditable. Se adopta Agno si el bucle se vuelve el cuello |
+| **3. Analista** | **FastMCP** | Es literalmente para lo que existe MCP: exponer tools a un cliente LLM. No tiene sentido escribirlo a mano |
+
+**LangGraph** queda fuera por ahora: su valor diferencial son los ciclos con
+checkpointing, y el checkpointing ya lo tenemos en Postgres —`meta` y el
+swap de particiones— que es donde queremos que viva el estado de una corrida
+de horas, no en un store del framework.
+
+### 9.6 El analista: dos consumidores, una definición de tools
+
+```
+src/mcp/consultas.py   ← los SELECT, parametrizados y acotados
+          │
+          ├── src/mcp/server.py (FastMCP)  →  Claude Desktop / IDE
+          └── src/agents/analista           →  Ollama local, vía CLI o API
+```
+
+Las consultas se definen **una vez** y las usan los dos. Y nota lo que esto
+implica: con el servidor MCP conectado a Claude Desktop, el agente 3 **ya no
+hace falta** para el caso interactivo — Claude es el agente y nosotros solo
+damos las herramientas. El `src/agents/analista` tiene sentido solo si
+quieres respuestas sin salir del stack local.
+
+**Nunca SQL generado por el modelo.** Las tools son funciones con parámetros
+tipados (`negocios_desaparecidos(entidad, periodo_desde, periodo_hasta)`),
+no un `ejecutar_sql(texto)`. El motivo está medido en este mismo repo: dos
+consultas que yo escribí a mano tumbaron la corrida —el anti-join que
+desbordó `/dev/shm` y el `SELECT DISTINCT` que se auto-bloqueó—. Un modelo
+generando SQL contra 82.9M filas es la peor idea del diseño.
+
+El rol **`api_ro`** ya acota el daño: `SELECT` solo en `gold` y `meta`, nunca
+`silver`.
+
+### 9.7 El agente 2 es un instrumento de muestreo, no un censo
+
+Esto es lo más importante de su diseño, y sale de `docs/findings.md` §2:
+
+| Par de cortes | Identidades | Desaparecen | % |
+|---|---:|---:|---:|
+| 2017-11 → 2018-03 | 2,100,277 | 21,267 | 1.0 |
+| 2018-11 → 2019-04 | 2,168,018 | 42,039 | 1.9 |
+| **2019-04 → 2019-11** | 2,246,283 | **922,285** | **41.1** |
+
+La tasa aparente de desaparición oscila por un **factor de 400**. La
+hipótesis documentada es que las desapariciones masivas son reasignación de
+claves, no cierres.
+
+**922,285 negocios no se verifican con búsquedas web.** Ni por costo ni por
+tiempo ni por términos de servicio. El agente 2 existe para **estimar**: una
+muestra estratificada de cientos de negocios por par de cortes, con la que
+se calibra qué fracción de las "desapariciones" son cierres reales.
+
+Eso cambia su tabla destino: no es "el estado de cada negocio" sino
+`gold.supervivencia_verificada`, con los cientos verificados y su evidencia,
+que es lo que sostiene una afirmación sobre los millones.
+
+**Y obliga a guardar la evidencia cruda, no solo el veredicto.** Los
+resultados de búsqueda cambian con el tiempo: sin el snapshot del HTML/JSON
+que el agente leyó, en seis meses la tesis no es re-verificable. El
+`contenido_hash` de `Evidencia` apunta a ese snapshot.
+
+### 9.8 Riesgos propios del agente 2
+
+| Riesgo | Mitigación |
+|---|---|
+| **Ausencia de evidencia ≠ cierre.** Una taquería chica no aparece en ningún lado | El veredicto tiene que admitir `SIN_EVIDENCIA` como valor de primera clase, distinto de `CERRADO`. Codificar lo primero como lo segundo inventaría cierres |
+| **Costo**: Google Places y las APIs de búsqueda se pagan por llamada | `shared/llm/budget.py` con tope duro por corrida. El muestreo mantiene el orden en cientos, no millones |
+| **Términos de servicio**: raspar resultados de Google o redes sociales los viola y termina bloqueado | Usar APIs oficiales con llave, respetar `robots.txt`, y documentar la fuente de cada dato en la tesis |
+| **No reproducible**: la web de hoy no es la de ayer | Guardar el snapshot crudo, fechado. Es un requisito, no una optimización |
+| **Sesgo de visibilidad**: los negocios grandes dejan rastro y los chicos no — y los chicos son el objeto de estudio | Medirlo: reportar la tasa de `SIN_EVIDENCIA` por estrato de tamaño. Si es alta en los micro, el instrumento tiene un límite que hay que declarar |
+
+### 9.9 Orden de construcción
+
+No es el orden en que los enumeraste, y el motivo es dónde está el riesgo:
+
+1. **`shared/llm/` + `agents/base.py` + `meta.agent_decisions`.** Los tres
+   agentes dependen de esto. Es poco código y define el contrato.
+2. **Agente 1 (CLEE)**, siguiendo los pasos de la §6. Es el que tiene
+   criterio de aceptación objetivo —el arnés de CLEEs enmascarados— así que
+   valida la infraestructura contra algo medible.
+3. **`src/mcp/` con dos o tres consultas.** Barato, y te da valor inmediato
+   para explorar los resultados del agente 1.
+4. **Agente 2**, al final. Es el de más incógnitas abiertas: fuente de
+   datos, costo, diseño del muestreo y el límite ético. Y **depende de
+   Gold**, que todavía no existe (Fase 5).
