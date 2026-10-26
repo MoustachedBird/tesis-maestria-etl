@@ -12,9 +12,13 @@ Complementa, no reemplaza:
   y la configuración de Postgres derivada de él.
 - `docs/comandos.md` — los comandos de operación: base de pruebas, extract,
   cada paso del transform por separado, seguimiento y estado de la base.
-- `crear_agentes.md` — plan del adjudicador LLM (Ollama sobre la RTX 5090)
-  como tercer método de resolución. **Afecta a §2.3.3**: sería la primera
-  etapa del pipeline que usa la GPU.
+- `crear_agentes.md` — plan de los agentes LLM: el adjudicador CLEE (Ollama
+  sobre la RTX 5090) como tercer método de resolución, más el verificador de
+  supervivencia y el analista. **Afecta a §2.3.3**: sería la primera etapa
+  del pipeline que usa la GPU.
+- `docs/apis_externas.md` — trámites, páginas oficiales y costos de las
+  fuentes externas que necesita el verificador (Places, Meta Content
+  Library, buscadores). El trámite de Meta tarda semanas: va primero.
 - `docs/separacion_ingest_clee.md` — propuesta de sacar el resultado de la
   propagación CLEE a una tabla por método (`silver.clee_radio`,
   `silver.clee_h3`, y la futura `silver.clee_llm`), para que una falla de una

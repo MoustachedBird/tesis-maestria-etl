@@ -632,6 +632,9 @@ El canal que importa está bien identificado: **los cierres de negocios
 establecidos se anuncian en redes sociales**. El problema es el acceso, que
 cambió mucho desde 2018.
 
+> Los trámites, URLs oficiales, costos y el presupuesto están en
+> **`docs/apis_externas.md`**. Aquí va solo qué sirve y qué no.
+
 ### 11.1 El hallazgo: `business_status` de Google Places
 
 Antes de cualquier LLM o búsqueda de texto, Places devuelve un campo
