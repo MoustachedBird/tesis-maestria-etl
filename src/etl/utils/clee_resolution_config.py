@@ -153,6 +153,23 @@ MATCH_PARALLEL_THRESHOLD: int = int(os.environ.get("MATCH_PARALLEL_THRESHOLD", "
 """Minimo de filas pendientes para activar multiprocessing: por debajo,
 el overhead de fork no compensa y se usa el loop secuencial."""
 
+H3_TARGET_CHUNK_ROWS: int = int(os.environ.get("H3_TARGET_CHUNK_ROWS", "250000"))
+"""Filas del target por lote en `find_h3_neighbors` (cota de RAM del
+blocking H3).
+
+El blocking materializa los pares candidatos antes de filtrar por distancia:
+cada fila del target se cruza con las ~37 celdas de su grid_disk, y cada
+celda con las referencias que contiene. Sobre 2.7M de target eso da
+cientos de millones de pares, y el `sort` posterior sobre esa tabla es lo
+que agota la memoria del contenedor.
+
+Trocear el target acota cada lote a decenas de millones de pares. NO cambia
+el resultado: la agregacion es por fila del target, y cada fila cae
+completa en un solo lote.
+
+Menor = menos RAM pico y mas lotes; mayor = menos overhead por lote. 250k
+mantiene el pico por debajo de ~2 GB con la densidad del DENUE."""
+
 KB_MAX_ROWS_PER_PARTITION: int = int(os.environ.get("KB_MAX_ROWS_PER_PARTITION", "1500000"))
 """Maximo de filas por particion de la KB de referencia (knob principal de
 RAM del matching). Si la KB excede este umbral, se divide en particiones

@@ -200,7 +200,10 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
     """
     from h3.api import basic_int as h3i
 
-    from src.etl.utils.clee_resolution_config import H3_GRID_DISK_K
+    from src.etl.utils.clee_resolution_config import (
+        H3_GRID_DISK_K,
+        H3_TARGET_CHUNK_ROWS,
+    )
 
     n_target = target_df.height
 
@@ -230,6 +233,14 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
         pl.col("longitud").alias("tgt_lon"),
     )
 
+    # Salida preasignada: se llena por lote, indexada por posicion en
+    # `target_df`, asi que el troceo de abajo no altera el alineamiento.
+    indices = np.empty(n_target, dtype=object)
+    distances = np.empty(n_target, dtype=object)
+    for i in range(n_target):
+        indices[i] = np.array([], dtype=np.int64)
+        distances[i] = np.array([], dtype=np.float64)
+
     # 1. grid_disk solo por celda distinta del target (loop C corto).
     # RAM: los pares (celda_target, celda_vecina) se acumulan en arrays
     # numpy preasignados, NUNCA en una lista de tuplas Python -- con ~1M de
@@ -256,52 +267,62 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
     disk = pl.DataFrame({"tgt_cell": tgt_cells_arr[:pos], "nb_cell": nb_cells_arr[:pos]})
     del tgt_cells_arr, nb_cells_arr
 
-    # 2-3. Joins + haversine exacto (lazy/streaming para acotar RAM)
+    # 2-3. Joins + haversine exacto, POR LOTES DE TARGET.
+    #
+    # Los joins materializan los pares candidatos antes de filtrar por
+    # distancia: cada fila del target se cruza con las ~37 celdas de su
+    # grid_disk y cada celda con sus referencias, lo que sobre millones de
+    # filas da cientos de millones de pares -- y el `sort` sobre esa tabla
+    # es lo que agota la memoria del contenedor. Trocear acota el pico sin
+    # cambiar el resultado: la agregacion es por `tgt_idx` y cada fila del
+    # target cae completa en un solo lote.
     rad = np.pi / 180.0
-    pairs = (
-        tg.lazy()
-        .join(disk.lazy(), on="tgt_cell", how="inner")
-        .join(kb.lazy(), left_on="nb_cell", right_on="kb_cell", how="inner")
-        .with_columns(
-            (
-                2
-                * _EARTH_RADIUS_M
-                * (
-                    (
-                        ((pl.col("kb_lat") - pl.col("tgt_lat")) * rad / 2).sin() ** 2
-                        + (pl.col("tgt_lat") * rad).cos()
-                        * (pl.col("kb_lat") * rad).cos()
-                        * ((pl.col("kb_lon") - pl.col("tgt_lon")) * rad / 2).sin() ** 2
+    disk_lazy = disk.lazy()
+    kb_lazy = kb.lazy()
+
+    for offset in range(0, n_target, H3_TARGET_CHUNK_ROWS):
+        lote = tg.slice(offset, H3_TARGET_CHUNK_ROWS)
+        pairs = (
+            lote.lazy()
+            .join(disk_lazy, on="tgt_cell", how="inner")
+            .join(kb_lazy, left_on="nb_cell", right_on="kb_cell", how="inner")
+            .with_columns(
+                (
+                    2
+                    * _EARTH_RADIUS_M
+                    * (
+                        (
+                            ((pl.col("kb_lat") - pl.col("tgt_lat")) * rad / 2).sin() ** 2
+                            + (pl.col("tgt_lat") * rad).cos()
+                            * (pl.col("kb_lat") * rad).cos()
+                            * ((pl.col("kb_lon") - pl.col("tgt_lon")) * rad / 2).sin() ** 2
+                        )
+                        .sqrt()
+                        .arcsin()
                     )
-                    .sqrt()
-                    .arcsin()
-                )
-            ).alias("dist_m")
+                ).alias("dist_m")
+            )
+            .filter(pl.col("dist_m") <= radius_meters)
+            .select("tgt_idx", "kb_idx", "dist_m")
+            # kb_idx como llave terciaria: tie-break determinista en empates
+            # exactos de distancia (coords identicas), igual que el BallTree.
+            .sort(["tgt_idx", "dist_m", "kb_idx"])
+            .group_by("tgt_idx", maintain_order=True)
+            .agg(pl.col("kb_idx"), pl.col("dist_m"))
+            .collect(engine="streaming")
         )
-        .filter(pl.col("dist_m") <= radius_meters)
-        .select("tgt_idx", "kb_idx", "dist_m")
-        # kb_idx como llave terciaria: tie-break determinista en empates
-        # exactos de distancia (coords identicas), igual que el BallTree.
-        .sort(["tgt_idx", "dist_m", "kb_idx"])
-        .group_by("tgt_idx", maintain_order=True)
-        .agg(pl.col("kb_idx"), pl.col("dist_m"))
-        .collect(engine="streaming")
-    )
 
-    # 4. Dispersar a arrays por fila alineados a 0..n_target-1
-    indices = np.empty(n_target, dtype=object)
-    distances = np.empty(n_target, dtype=object)
-    for i in range(n_target):
-        indices[i] = np.array([], dtype=np.int64)
-        distances[i] = np.array([], dtype=np.float64)
+        # 4. Dispersar al arreglo global. `tgt_idx` ya es la posicion en
+        # `target_df` porque el int_range se calculo antes del slice.
+        for tgt_idx, kb_idx_list, dist_list in zip(
+            pairs.get_column("tgt_idx").to_list(),
+            pairs.get_column("kb_idx").to_list(),
+            pairs.get_column("dist_m").to_list(),
+        ):
+            indices[tgt_idx] = np.asarray(kb_idx_list, dtype=np.int64)
+            distances[tgt_idx] = np.asarray(dist_list, dtype=np.float64)
 
-    for tgt_idx, kb_idx_list, dist_list in zip(
-        pairs.get_column("tgt_idx").to_list(),
-        pairs.get_column("kb_idx").to_list(),
-        pairs.get_column("dist_m").to_list(),
-    ):
-        indices[tgt_idx] = np.asarray(kb_idx_list, dtype=np.int64)
-        distances[tgt_idx] = np.asarray(dist_list, dtype=np.float64)
+        del pairs
 
     return indices, distances
 
