@@ -612,17 +612,98 @@ veredicto de una sola fuente, sin revisar, sobre datos donde la mayoría no
 tiene presencia web. **Un muestreo bien hecho es evidencia más fuerte que un
 censo mal hecho**, y aquí el censo no puede hacerse bien.
 
-### 10.4 Diseño híbrido
+### 10.4 El diseño: caso-control en dos fases
 
-Da las dos cosas sin pagar $50k:
+Una muestra de 2,400 da **±2.0%** para una proporción nacional, y el tamaño
+de la población es irrelevante —el mismo margen para 922,285 que para
+10.4M—. Eso basta y sobra para distinguir "41% son cierres" de "41% es
+artefacto".
 
-- **Muestra nacional** de ~2,400, estratificada por par de cortes y por
-  tamaño (`per_ocu_id`) → la estimación con intervalo de confianza.
-- **Censo completo de un municipio** → caso de estudio con cobertura total,
-  donde sí se puede afirmar "verificamos todos". Son decenas de miles, no
-  millones: factible y defendible.
+Pero hay tres cosas que el tamaño de muestra **no** resuelve, y son las que
+definen el diseño.
 
-Estimación nacional más caso de estudio exhaustivo es un diseño estándar.
+#### a. El margen es POR CELDA, así que la estratificación tiene que ser gruesa
+
+| Estratificación | n/celda | Margen |
+|---|---:|---:|
+| 19 pares × 7 estratos de tamaño = 133 celdas | 18 | **±23%** inservible |
+| 4 grupos de pares × 3 tamaños = 12 celdas | 200 | ±6.9% |
+| 2 grupos × 3 tamaños = 6 celdas | 400 | ±4.9% |
+
+Con 200 por celda se detectan diferencias de **14 puntos o más** entre
+estratos. Alcanza si la brecha de verificabilidad es grande —lo que espero—
+y no alcanza para matices.
+
+**Decisión:** el par anómalo (2019-04 → 2019-11) más dos o tres pares de
+control, y tres estratos de tamaño (micro / pequeña / mediana+). No 133
+celdas.
+
+#### b. Sin controles, la evidencia no se puede interpretar
+
+```
+casos:     identidades que DESAPARECEN entre el corte t y t+1
+controles: identidades presentes en AMBOS  →  no cerraron, por definición
+```
+
+Si los controles también vuelven `SIN_EVIDENCIA` al 70%, entonces
+`SIN_EVIDENCIA` **no carga información sobre cierre** y el instrumento no
+sirve para nada. La medición real es el **contraste entre los dos grupos**,
+no la tasa en los casos.
+
+#### c. La cobertura, no n, es la variable crítica
+
+Si el 70% vuelve `SIN_EVIDENCIA`, lo que se estima es *"de los que pudimos
+verificar, X% cerró"* — y ese subconjunto es sistemáticamente más grande,
+más formal y más urbano. Es *missing not at random*: **una muestra de 10,000
+con 70% de faltantes sigue sesgada.**
+
+Las cotas honestas (Manski), si de los verificados el 50% cerró:
+
+| Cobertura | La tasa real está entre | Ancho |
+|---|---|---|
+| 30% | 15% y 85% | **70%** — no responde nada |
+| 50% | 25% y 75% | 50% |
+| 70% | 35% y 65% | 30% |
+| 90% | 45% y 55% | 10% |
+
+**Segunda fase para estrechar las cotas.** El DENUE trae `telefono`:
+llamar a ~150 de los `SIN_EVIDENCIA` permite estimar la tasa de cierre entre
+los no verificables y bajar el ancho de 70 puntos a algo usable. Es el
+patrón estándar de seguimiento de no respuesta.
+
+#### d. Medir el sesgo hoy, sin gastar un peso
+
+El DENUE ya trae `www`, `correoelec` y `telefono`. **La presencia de esos
+campos predice la verificabilidad**, así que buena parte de la brecha por
+estrato se mide con una consulta sobre Silver, antes de contratar nada:
+
+```sql
+select ep.per_ocu,
+       count(*) as negocios,
+       round(100.0*count(e.www) filter (where e.www <> '')/count(*), 1) as pct_con_web,
+       round(100.0*count(e.telefono) filter (where e.telefono <> '')/count(*), 1) as pct_con_tel
+from silver.establecimientos e
+left join silver.denue_estratos_personal ep on ep.id = e.per_ocu_id
+where e.period = '2019-11-01'
+group by ep.per_ocu order by 2 desc;
+```
+
+Si confirma que los micronegocios casi no tienen web ni correo, el sesgo
+queda cuantificado de gratis — y es un argumento más fuerte en la solicitud
+a Meta, porque justifica por qué hace falta una fuente externa.
+
+#### Resumen del diseño
+
+1. **Medir** la cobertura esperada con `www`/`correoelec` por estrato (gratis).
+2. **Fase 1**: caso-control, estratificación gruesa, ~2,400 en total → cascada
+   de §11.6 (Places → búsqueda web → LLM).
+3. **Fase 2**: llamadas a ~150 de los `SIN_EVIDENCIA` → estrecha las cotas.
+4. **Censo de un municipio** como caso de estudio, solo si la fase 1 muestra
+   que la cobertura lo justifica.
+
+Estimación nacional con controles, más seguimiento de no respuesta, más caso
+de estudio exhaustivo. Los tres son diseños estándar; lo que no es estándar
+es saltarse los controles.
 
 ---
 
