@@ -107,8 +107,36 @@ class PermanenciaMixin:
             "es el campo sobre el que se aplica la regla de cierre"
         ),
     )
+    duracion_periodos: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment=(
+            "Cortes transcurridos entre el primero y el ultimo en que se observo "
+            "(idx_ultimo - idx_primer). Es la VARIABLE DE TIEMPO del modelo de "
+            "supervivencia, y difiere de cortes_observados cuando hubo huecos"
+        ),
+    )
+    presente_desde_el_inicio: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si ya estaba en la primera edicion disponible: su antiguedad real "
+            "es DESCONOCIDA (censura por la izquierda). El protocolo exige este "
+            "indicador explicito, porque la antiguedad se mide desde el primer corte "
+            "observado y para estas unidades ese corte no es su inicio"
+        ),
+    )
     fecha_alta_date: Mapped[date | None] = mapped_column(
         Date, comment="Fecha de alta en el RENEM mas antigua observada (no inicio de operaciones)"
+    )
+    dias_alta_a_primera: Mapped[int | None] = mapped_column(
+        Integer,
+        comment=(
+            "Dias entre fecha_alta_date y primer_periodo. Diagnostico de la calidad "
+            "de la fecha de alta: un valor NEGATIVO es inconsistente (alta posterior "
+            "a la primera aparicion), y uno muy grande indica que el negocio existia "
+            "mucho antes de que el directorio lo viera"
+        ),
     )
 
     # ===== ALIAS Y VARIANTES =====

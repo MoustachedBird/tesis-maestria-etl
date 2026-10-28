@@ -20,7 +20,7 @@ from src.etl.loaders.permanencia import (
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
 from src.shared.db.partitions import create_partition
-from src.shared.enums import OrigenClee
+from src.shared.enums import EstatusNegocio, OrigenClee
 
 pytestmark = pytest.mark.postgres
 
@@ -40,8 +40,11 @@ CORTES = [date(2019, 11, 1), date(2020, 4, 1), date(2020, 11, 1), date(2021, 5, 
 #:   una mudanza. Es el caso que el rectángulo solo no distingue.
 #:
 #: (id, corte, identidad, nombre, codigo_act, cve_ent, cve_mun, lat, lon,
-#:  nom_vial, numero_ext, nomb_asent, cod_postal, telefono, correoelec)
+#:  nom_vial, numero_ext, nomb_asent, cod_postal, telefono, correoelec,
+#:  fecha_alta_date)
 OBSERVACIONES = [
+    # id, corte, identidad, nombre, act, ent, mun, lat, lon,
+    #     vialidad, numero, asentamiento, CP, telefono, correo, fecha_alta
     (
         "a1",
         CORTES[0],
@@ -58,6 +61,7 @@ OBSERVACIONES = [
         "44100",
         "",
         "",
+        date(2010, 7, 1),
     ),
     (
         "a2",
@@ -75,6 +79,7 @@ OBSERVACIONES = [
         "44100",
         "",
         "",
+        date(2010, 7, 1),
     ),
     (
         "a3",
@@ -92,6 +97,7 @@ OBSERVACIONES = [
         "44100",
         "",
         "",
+        date(2010, 7, 1),
     ),
     (
         "a4",
@@ -109,6 +115,7 @@ OBSERVACIONES = [
         "44100",
         "",
         "",
+        date(2010, 7, 1),
     ),
     (
         "b1",
@@ -126,6 +133,7 @@ OBSERVACIONES = [
         "44100",
         "3312345678",
         "hola@donjuan.mx",
+        None,
     ),
     (
         "b3",
@@ -143,6 +151,7 @@ OBSERVACIONES = [
         "44200",
         "",
         "",
+        None,
     ),
     (
         "c1",
@@ -160,6 +169,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "c2",
@@ -177,6 +187,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "d1",
@@ -194,6 +205,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "d2",
@@ -211,6 +223,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "e1",
@@ -228,6 +241,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "f1",
@@ -245,6 +259,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "f2",
@@ -262,6 +277,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
     (
         "f3",
@@ -279,6 +295,7 @@ OBSERVACIONES = [
         "",
         "",
         "",
+        None,
     ),
 ]
 
@@ -335,6 +352,7 @@ def conn(silver_engine, metodo):
                     "cod_postal": pl.Utf8,
                     "telefono": pl.Utf8,
                     "correoelec": pl.Utf8,
+                    "fecha_alta_date": pl.Date,
                 },
                 orient="row",
             ),
@@ -556,6 +574,72 @@ class TestRepresentante:
         p = permanencia(conn, metodo)
         assert p["NEW_REG_1234-abcdef"]["es_sintetica"] is True
         assert p["C_VIVE"]["es_sintetica"] is False
+
+
+@pytest.mark.unit
+class TestAntiguedadYCensuraIzquierda:
+    """Lo que el protocolo exige para tratar la censura por la izquierda."""
+
+    def test_duracion_es_el_span_no_los_observados(self, conn, metodo):
+        """Difieren cuando hubo huecos, y la duración es la variable de tiempo."""
+        construir_permanencia(conn, metodo)
+        hueco = permanencia(conn, metodo)["C_HUECO"]
+        assert hueco["duracion_periodos"] == 2  # del corte 0 al 2
+        assert hueco["cortes_observados"] == 2  # pero solo se vio dos veces
+
+    def test_marca_a_los_presentes_en_la_primera_edicion(self, conn, metodo):
+        """Su antigüedad real es DESCONOCIDA: el protocolo exige el indicador."""
+        construir_permanencia(conn, metodo)
+        p = permanencia(conn, metodo)
+        assert p["C_VIVE"]["presente_desde_el_inicio"] is True
+        assert p["NEW_REG_1234-abcdef"]["presente_desde_el_inicio"] is False
+
+    def test_dias_entre_el_alta_y_la_primera_aparicion(self, conn, metodo):
+        """Diagnóstico de la fecha de alta, que es de registro y no de operación."""
+        construir_permanencia(conn, metodo)
+        vive = permanencia(conn, metodo)["C_VIVE"]
+        # alta 2010-07-01, primera aparición 2019-11-01
+        assert vive["dias_alta_a_primera"] > 3000
+
+    def test_sin_fecha_de_alta_el_diagnostico_queda_nulo(self, conn, metodo):
+        construir_permanencia(conn, metodo)
+        assert permanencia(conn, metodo)["C_HUECO"]["dias_alta_a_primera"] is None
+
+
+@pytest.mark.unit
+class TestVistaEstatus:
+    """El estatus es una vista, no una columna: la regla es preliminar."""
+
+    def estatus(self, conn, metodo: str) -> dict[str, dict]:
+        filas = conn.execute(text(f"SELECT * FROM silver.estatus_{metodo}")).mappings()
+        return {f["clee_resuelto"]: dict(f) for f in filas}
+
+    def test_presente_en_el_ultimo_corte_es_activo(self, conn, metodo):
+        """ACTIVO no es "sigue abierto": es censura por la derecha."""
+        construir_permanencia(conn, metodo)
+        assert self.estatus(conn, metodo)["C_VIVE"]["estatus"] == EstatusNegocio.ACTIVO
+
+    def test_dos_ausencias_son_cierre(self, conn, metodo):
+        construir_permanencia(conn, metodo)
+        assert self.estatus(conn, metodo)["C_CERRO"]["estatus"] == EstatusNegocio.CERRADO
+
+    def test_una_sola_ausencia_es_incierto(self, conn, metodo):
+        """Una ausencia no distingue un cierre de una omisión del directorio."""
+        construir_permanencia(conn, metodo)
+        assert self.estatus(conn, metodo)["C_HUECO"]["estatus"] == EstatusNegocio.INCIERTO
+
+    def test_marca_a_quien_ya_reaparecio(self, conn, metodo):
+        """Demostró, para sí mismo, que una ausencia no implica cierre."""
+        construir_permanencia(conn, metodo)
+        e = self.estatus(conn, metodo)
+        assert e["C_HUECO"]["reaparecio"] is True
+        assert e["C_VIVE"]["reaparecio"] is False
+
+    def test_el_estatus_no_es_una_columna_de_la_tabla(self, conn, metodo):
+        """Si alguien lo materializa, cambiar la regla cuesta 10M de filas."""
+        columnas = {c.name for c in get_table(tabla_destino(metodo)).columns}
+        assert "estatus" not in columnas
+        assert "cerrado" not in columnas
 
 
 @pytest.mark.unit

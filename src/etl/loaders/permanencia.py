@@ -20,6 +20,7 @@ from sqlalchemy.engine import Connection
 
 from src.shared.db.base import DEFAULT_SCHEMA
 from src.shared.db.partitions import existing_partitions
+from src.shared.enums import EstatusNegocio
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_permanencia.log"))
@@ -32,6 +33,19 @@ METODOS: dict[str, str] = {
 
 El destino es `permanencia_<metodo>`. Agregar un método es una entrada aquí
 más su tabla, sin tocar el SQL.
+"""
+
+CORTES_PARA_CIERRE = 2
+"""Cortes consecutivos de ausencia que la regla toma como cierre.
+
+Viene del protocolo: "se considerará cerrado el establecimiento que deja de
+aparecer en dos cortes consecutivos y no reaparece después, lo que reduce el
+riesgo de confundir un cierre con una omisión del directorio a costa de
+fechar el evento con menor precisión".
+
+**La regla es preliminar** y de ahí que viva aquí y se materialice en una
+VISTA en vez de una columna: cambiar el umbral redefine la vista en un
+segundo, mientras que una columna obligaría a reconstruir 10M de filas.
 """
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -102,7 +116,8 @@ def _build_sql(metodo: str, cortes: list[date], schema: str = DEFAULT_SCHEMA) ->
 INSERT INTO {schema}.{destino} (
     clee_resuelto, es_sintetica,
     primer_periodo, ultimo_periodo, idx_primer, idx_ultimo,
-    cortes_observados, huecos, cortes_tras_ultimo, fecha_alta_date,
+    cortes_observados, huecos, cortes_tras_ultimo,
+    duracion_periodos, presente_desde_el_inicio, fecha_alta_date, dias_alta_a_primera,
     nombres, n_nombres, razones_sociales, codigos_act, cambio_actividad,
     municipios, cambio_municipio, cod_postales,
     direcciones, n_direcciones, tipos_asent,
@@ -196,7 +211,13 @@ SELECT
     v.cortes_observados,
     (v.idx_ultimo - v.idx_primer + 1) - v.cortes_observados AS huecos,
     {ultimo_idx} - v.idx_ultimo AS cortes_tras_ultimo,
+    v.idx_ultimo - v.idx_primer AS duracion_periodos,
+    -- Censura por la izquierda: ya estaba en la primera edicion, asi que su
+    -- antiguedad real es desconocida. El protocolo exige el indicador.
+    v.idx_primer = 0 AS presente_desde_el_inicio,
     v.fecha_alta_date,
+    CASE WHEN v.fecha_alta_date IS NULL THEN NULL
+         ELSE (v.primer_periodo - v.fecha_alta_date) END AS dias_alta_a_primera,
     v.nombres,
     COALESCE(CARDINALITY(v.nombres), 0) AS n_nombres,
     v.razones_sociales,
@@ -290,3 +311,59 @@ def construir_permanencia(conn: Connection, metodo: str, schema: str = DEFAULT_S
         logger.info(f"   ✅ {destino}: {escritas:,} establecimientos")
 
     return escritas
+
+
+def _vista_sql(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
+    """SQL de la vista que aplica la regla de cierre a un método.
+
+    El estatus es una VISTA y no una columna de `permanencia_<metodo>`
+    porque la regla es preliminar: `docs/findings.md` §2 mide que la tasa de
+    desaparición oscila por un factor de 400 entre pares de cortes, lo que
+    sugiere que buena parte de las ausencias son reasignación de claves. Si
+    la validación externa mueve el umbral, redefinir una vista cuesta un
+    segundo y reconstruir una columna cuesta 10M de filas.
+
+    `reaparecio` va en la vista porque cambia cómo se lee el estatus: un
+    establecimiento que ya desapareció y volvió demostró, para sí mismo, que
+    una ausencia no implica cierre.
+
+    Args:
+        metodo: clave de `METODOS`.
+        schema: schema de la tabla y de la vista.
+
+    Returns:
+        str: `CREATE OR REPLACE VIEW` completo.
+    """
+    origen = tabla_destino(metodo)
+    return f"""
+CREATE OR REPLACE VIEW {schema}.estatus_{metodo} AS
+SELECT
+    p.*,
+    CASE
+        WHEN p.cortes_tras_ultimo = 0 THEN '{EstatusNegocio.ACTIVO.value}'
+        WHEN p.cortes_tras_ultimo >= {CORTES_PARA_CIERRE} THEN '{EstatusNegocio.CERRADO.value}'
+        ELSE '{EstatusNegocio.INCIERTO.value}'
+    END AS estatus,
+    p.huecos > 0 AS reaparecio
+FROM {schema}.{origen} p
+"""
+
+
+def crear_vistas_estatus(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[str]:
+    """Crea o redefine la vista de estatus de cada método.
+
+    Idempotente: `CREATE OR REPLACE`. Se llama desde la migración y puede
+    re-ejecutarse cuando cambie `CORTES_PARA_CIERRE`.
+
+    Args:
+        conn: conexión con permisos de DDL.
+        schema: schema de las tablas y vistas.
+
+    Returns:
+        list[str]: nombres de las vistas creadas.
+    """
+    creadas = []
+    for metodo in METODOS:
+        conn.execute(text(_vista_sql(metodo, schema)))
+        creadas.append(f"{schema}.estatus_{metodo}")
+    return creadas
