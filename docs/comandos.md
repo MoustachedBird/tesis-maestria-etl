@@ -130,6 +130,28 @@ dañar al otro.
 docker compose run --rm etl transform --only clee          # alias de grupo
 ```
 
+### Permanencia: una fila por establecimiento
+
+Colapsa las 82.9M observaciones a ~10M establecimientos con su ventana en el
+directorio, los alias que tuvo y los ingredientes de censura. Es lo que
+consume el modelo de supervivencia.
+
+```bash
+docker compose run --rm etl transform --only permanencia-radio
+docker compose run --rm etl transform --only permanencia-h3
+docker compose run --rm etl transform --only permanencia      # las dos
+```
+
+Hay una por método, y cada una se construye por separado — pedir una no
+reconstruye la otra.
+
+**Va después de su resolución**: colapsa lo que `clee-radio` / `clee-h3`
+escribieron. Si la tabla de identidad está vacía, avisa y no inventa nada.
+
+Sube `work_mem` a 4 GB solo para esa consulta: el agregado produce ~10M
+grupos con cinco arrays cada uno. El knob está en `SET_WORK_MEM` del loader
+si hace falta bajarlo.
+
 ### Todo el transform
 
 ```bash

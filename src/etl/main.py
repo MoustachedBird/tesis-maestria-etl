@@ -80,7 +80,8 @@ def _run_denue_transform(
     ingest: bool,
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
-    permanencia: bool,
+    permanencia_radio: bool,
+    permanencia_h3: bool,
     force: bool,
     periods: list[str] | None = None,
 ) -> bool:
@@ -100,8 +101,9 @@ def _run_denue_transform(
         console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
         success = transformer.run_clee_resolution_h3_stage(force=force)
     # Va al final porque colapsa lo que las resoluciones acaban de escribir.
-    if permanencia and success:
-        success = _run_permanencia(force=force)
+    metodos = [m for m, activo in (("radio", permanencia_radio), ("h3", permanencia_h3)) if activo]
+    if metodos and success:
+        success = _run_permanencia(metodos=metodos)
     return success
 
 
@@ -267,10 +269,15 @@ def transform(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking -> silver.clee_h3), comparison track",
     ),
-    permanencia: bool = typer.Option(
+    permanencia_radio: bool = typer.Option(
         True,
-        "--permanencia/--no-permanencia",
-        help="Build silver.permanencia_<metodo>: una fila por establecimiento con su ventana",
+        "--permanencia-radio/--no-permanencia-radio",
+        help="Build silver.permanencia_radio: una fila por establecimiento con su ventana",
+    ),
+    permanencia_h3: bool = typer.Option(
+        True,
+        "--permanencia-h3/--no-permanencia-h3",
+        help="Build silver.permanencia_h3, pista de comparacion",
     ),
     sesnsp: bool = typer.Option(
         True,
@@ -314,9 +321,12 @@ def transform(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
-        permanencia = Section.permanencia in selected
+        permanencia_radio = Section.permanencia_radio in selected
+        permanencia_h3 = Section.permanencia_h3 in selected
         sesnsp = Section.sesnsp in selected
-        denue = ingest or clee_resolution_radio or clee_resolution_h3 or permanencia
+        denue = any(
+            (ingest, clee_resolution_radio, clee_resolution_h3, permanencia_radio, permanencia_h3)
+        )
 
     if force:
         console.print("[bold orange3]   FORCE MODE: Reprocessing all data[/bold orange3]")
@@ -331,7 +341,8 @@ def transform(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
-                    permanencia=permanencia,
+                    permanencia_radio=permanencia_radio,
+                    permanencia_h3=permanencia_h3,
                     force=force,
                     periods=period,
                 )
@@ -380,10 +391,15 @@ def pipeline(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking), comparison track",
     ),
-    permanencia: bool = typer.Option(
+    permanencia_radio: bool = typer.Option(
         True,
-        "--permanencia/--no-permanencia",
-        help="Build silver.permanencia_<metodo>: una fila por establecimiento con su ventana",
+        "--permanencia-radio/--no-permanencia-radio",
+        help="Build silver.permanencia_radio: una fila por establecimiento con su ventana",
+    ),
+    permanencia_h3: bool = typer.Option(
+        True,
+        "--permanencia-h3/--no-permanencia-h3",
+        help="Build silver.permanencia_h3, pista de comparacion",
     ),
     sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
     only: list[Section] = typer.Option(
@@ -411,9 +427,12 @@ def pipeline(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
-        permanencia = Section.permanencia in selected
+        permanencia_radio = Section.permanencia_radio in selected
+        permanencia_h3 = Section.permanencia_h3 in selected
         sesnsp = Section.sesnsp in selected
-        denue = ingest or clee_resolution_radio or clee_resolution_h3 or permanencia
+        denue = any(
+            (ingest, clee_resolution_radio, clee_resolution_h3, permanencia_radio, permanencia_h3)
+        )
 
     console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
     console.print("=" * 60)
@@ -439,7 +458,8 @@ def pipeline(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
-                    permanencia=permanencia,
+                    permanencia_radio=permanencia_radio,
+                    permanencia_h3=permanencia_h3,
                     force=force,
                 )
                 and overall_ok
