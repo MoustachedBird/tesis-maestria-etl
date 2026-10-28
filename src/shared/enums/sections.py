@@ -23,6 +23,7 @@ class Section(StrEnum):
     ingest = "ingest"
     clee_radio = "clee-radio"
     clee_h3 = "clee-h3"
+    permanencia = "permanencia"
     sesnsp = "sesnsp"
     denue = "denue"  # group -> all DENUE sub-steps
     clee = "clee"  # group -> clee-radio + clee-h3
@@ -32,6 +33,7 @@ DENUE_ATOMIC: tuple[Section, ...] = (
     Section.ingest,
     Section.clee_radio,
     Section.clee_h3,
+    Section.permanencia,
 )
 """Secciones atómicas a las que se expande el alias de grupo ``denue``.
 

@@ -8,10 +8,13 @@ estructura de `models/` no cambie cuando se llene.
 Lo que vendrá aquí, con el contrato ya escrito en
 `docs/cruce_denue_sesnsp.md`:
 
-- `Establecimiento` — una fila por negocio resuelto (`clee_resuelto`)
-  con su ventana de vida `primer_periodo..ultimo_periodo`. **Mismo nombre
-  que `silver.Establecimiento` y grano distinto**: 10.45M negocios frente a
-  82.9M observaciones. Como vista materializada, no tabla (§Fase 5).
+- `Establecimiento` — una fila por negocio resuelto, con la **regla de
+  cierre aplicada** sobre `silver.permanencia_<metodo>` del método elegido.
+  Esa tabla ya trae la ventana observada y los ingredientes de censura
+  (`huecos`, `cortes_tras_ultimo`); lo que Gold agrega es el veredicto, y
+  por eso espera a que la regla esté validada. **Mismo nombre que
+  `silver.Establecimiento` y grano distinto**: ~10M negocios frente a 82.9M
+  observaciones.
 - Los agregados del análisis: panel negocio×periodo e incidencia municipal
   alineada temporalmente.
 """

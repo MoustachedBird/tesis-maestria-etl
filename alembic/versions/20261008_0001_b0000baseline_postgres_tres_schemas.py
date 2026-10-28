@@ -13,7 +13,7 @@ Crea el esquema objetivo de §2.3 completo:
   - `silver.*`: catalogos de geografia, SCIAN con su jerarquia, los cuatro
     catalogos de dominio con surrogate id, la tabla de hechos
     `establecimientos` con sus FKs reales e indices, las dos de SESNSP y la
-    dimension `entidades_economicas` (que se movera a `gold` en la Fase 5).
+    las tablas de permanencia por metodo (ver b0005permanencia_por_metodo).
   - `meta.*`: las seis tablas de tracking, ahora con FKs reales hacia
     `job_runs` y `ON DELETE CASCADE` -- lo que el DDL de DuckDB documentaba
     como imposible.
@@ -54,7 +54,6 @@ SILVER_TABLES = [
     "establecimientos",
     "sesnsp_delitos",
     "sesnsp_incidencia_municipal",
-    "entidades_economicas",
 ]
 """Tablas de `silver`, en orden de dependencia.
 

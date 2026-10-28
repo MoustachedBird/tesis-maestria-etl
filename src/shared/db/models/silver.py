@@ -17,7 +17,6 @@ from datetime import date
 
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     Date,
     Double,
     ForeignKey,
@@ -726,71 +725,4 @@ class SesnspIncidenciaMunicipal(Base):
         return (
             f"<SesnspIncidenciaMunicipal(mun={self.cve_ent}{self.cve_mun}, "
             f"delito_id={self.delito_id}, fecha={self.fecha}, carpetas={self.carpetas})>"
-        )
-
-
-class EntidadEconomica(Base):
-    """
-    Economic Entity Dimension (N3) -- one row per resolved business.
-
-    Collapses per-period observations in `establecimientos` to one row per
-    resolved identity (`silver.clee_radio.clee_resuelto`): attributes from the most
-    recent period plus the observed lifespan (primer/ultimo periodo). This
-    is the survival/mortality unit of analysis for the thesis.
-
-    Fully DERIVED artifact: rebuilt from scratch after each CLEE
-    resolution run (NEW_* synthetic ids are not stable across --force
-    runs). Deliberately carries no FKs to the catalogs -- the fact table
-    already enforces those domains and the dimension is bulk-rebuilt.
-    Built by `loaders/entidades.py:build_entidades_economicas()`.
-    """
-
-    __tablename__ = "entidades_economicas"
-
-    clee_resuelto: Mapped[str] = mapped_column(
-        String(50), primary_key=True, comment="Resolved identity (CLEE or NEW_* synthetic)"
-    )
-    es_sintetica: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, comment="True if NEW_* synthetic id (no match found)"
-    )
-    nom_estab: Mapped[str | None] = mapped_column(
-        String(200), comment="Business name (most recent period)"
-    )
-    raz_social: Mapped[str | None] = mapped_column(
-        String(200), comment="Legal name (most recent period)"
-    )
-    codigo_act: Mapped[str | None] = mapped_column(
-        String(10), comment="SCIAN activity (most recent period)"
-    )
-    cve_ent: Mapped[str | None] = mapped_column(
-        String(2), comment="State code (most recent period)"
-    )
-    cve_mun: Mapped[str | None] = mapped_column(
-        String(3), comment="Municipality code (most recent period)"
-    )
-    cod_postal: Mapped[str | None] = mapped_column(
-        String(10), comment="Postal code (most recent period)"
-    )
-    latitud: Mapped[float | None] = mapped_column(Double, comment="Latitude (most recent period)")
-    longitud: Mapped[float | None] = mapped_column(Double, comment="Longitude (most recent period)")
-    h3_cell_9: Mapped[int | None] = mapped_column(
-        BigInteger, comment="H3 res-9 cell (most recent period)"
-    )
-    primer_periodo: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="First period the entity was observed"
-    )
-    ultimo_periodo: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="Last period the entity was observed"
-    )
-    n_periodos: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="Number of distinct periods observed"
-    )
-    fecha_alta_date: Mapped[date | None] = mapped_column(
-        Date, comment="Earliest known INEGI registration date"
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<EntidadEconomica(clee={self.clee_resuelto}, "
-            f"{self.primer_periodo}..{self.ultimo_periodo}, n={self.n_periodos})>"
         )

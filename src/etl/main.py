@@ -80,6 +80,7 @@ def _run_denue_transform(
     ingest: bool,
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
+    permanencia: bool,
     force: bool,
     periods: list[str] | None = None,
 ) -> bool:
@@ -98,7 +99,31 @@ def _run_denue_transform(
     if clee_resolution_h3 and success:
         console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
         success = transformer.run_clee_resolution_h3_stage(force=force)
+    # Va al final porque colapsa lo que las resoluciones acaban de escribir.
+    if permanencia and success:
+        success = _run_permanencia(force=force)
     return success
+
+
+def _run_permanencia(*, force: bool) -> bool:
+    """Reconstruye `silver.permanencia_<metodo>` para cada metodo resuelto.
+
+    Ignora `force`: la tabla se reconstruye entera siempre, porque las
+    identidades sinteticas `NEW_*` no son estables entre corridas y no hay
+    nada que preservar de una construccion previa.
+    """
+    from src.etl.loaders.permanencia import METODOS, construir_permanencia
+    from src.shared.db.session import get_engine
+
+    console.print(
+        "[bold magenta]   Running: permanencia (ventana por establecimiento)[/bold magenta]"
+    )
+    total = 0
+    with get_engine().begin() as conn:
+        for metodo in METODOS:
+            total += construir_permanencia(conn, metodo)
+    console.print(f"   {total:,} fila(s) de permanencia en {len(METODOS)} metodo(s)")
+    return total > 0
 
 
 def _run_sesnsp_transform(*, force: bool) -> bool:
@@ -242,6 +267,11 @@ def transform(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking -> silver.clee_h3), comparison track",
     ),
+    permanencia: bool = typer.Option(
+        True,
+        "--permanencia/--no-permanencia",
+        help="Build silver.permanencia_<metodo>: una fila por establecimiento con su ventana",
+    ),
     sesnsp: bool = typer.Option(
         True,
         "--sesnsp/--no-sesnsp",
@@ -284,8 +314,9 @@ def transform(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
+        permanencia = Section.permanencia in selected
         sesnsp = Section.sesnsp in selected
-        denue = ingest or clee_resolution_radio or clee_resolution_h3
+        denue = ingest or clee_resolution_radio or clee_resolution_h3 or permanencia
 
     if force:
         console.print("[bold orange3]   FORCE MODE: Reprocessing all data[/bold orange3]")
@@ -300,6 +331,7 @@ def transform(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
+                    permanencia=permanencia,
                     force=force,
                     periods=period,
                 )
@@ -348,6 +380,11 @@ def pipeline(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking), comparison track",
     ),
+    permanencia: bool = typer.Option(
+        True,
+        "--permanencia/--no-permanencia",
+        help="Build silver.permanencia_<metodo>: una fila por establecimiento con su ventana",
+    ),
     sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
     only: list[Section] = typer.Option(
         None,
@@ -374,8 +411,9 @@ def pipeline(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
+        permanencia = Section.permanencia in selected
         sesnsp = Section.sesnsp in selected
-        denue = ingest or clee_resolution_radio or clee_resolution_h3
+        denue = ingest or clee_resolution_radio or clee_resolution_h3 or permanencia
 
     console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
     console.print("=" * 60)
@@ -401,6 +439,7 @@ def pipeline(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
+                    permanencia=permanencia,
                     force=force,
                 )
                 and overall_ok
@@ -436,35 +475,6 @@ def pipeline(
 
 # ---------------------------------------------------------------------------
 # BUILD ENTIDADES (dimension N3)
-# ---------------------------------------------------------------------------
-@app.command()
-def build_entidades():
-    """
-    Build the entidades_economicas dimension (one row per resolved business).
-
-    Run AFTER CLEE resolution: aggregates establecimientos by
-    silver.clee_radio (full rebuild -- NEW_* ids are not
-    stable across --force resolutions). Gold inherits on `make load`.
-    """
-    console.print("[bold blue]Building entidades_economicas dimension[/bold blue]")
-    try:
-        from src.etl.loaders.entidades import EntidadesDimensionBuilder
-
-        builder = EntidadesDimensionBuilder(data_root=DATA_ROOT)
-        if builder.run():
-            console.print("[bold green]Dimension built successfully.[/bold green]")
-        else:
-            console.print("[bold yellow]Dimension build failed. Check logs.[/bold yellow]")
-            raise typer.Exit(code=1)
-    except typer.Exit:
-        raise
-    except Exception as e:
-        console.print(f"[bold red]Dimension build failed: {escape(str(e))}[/bold red]")
-        raise typer.Exit(code=1)
-
-
-# ---------------------------------------------------------------------------
-# RETRY (placeholder)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     app()

@@ -67,7 +67,7 @@ SYNTHETIC_PREFIX = "NEW_"
 """Prefijo de las identidades sinteticas que asigna `assign_new_clees()`
 (`NEW_{prefijo_region}-{uuid12}`). NO es configurable por .env: esta
 acoplado al formato materializado en `clee_resuelto` y a
-`entidades_economicas.es_sintetica`, que lo usa con el mismo literal."""
+`permanencia_<metodo>.es_sintetica`, que lo usa con el mismo literal."""
 
 DEFAULT_METHODS = list(CLEEResolver.METHODS)
 """Metodos a analizar por defecto, del registro del resolver (radio, h3, y
