@@ -20,7 +20,7 @@ from sqlalchemy.engine import Connection
 
 from src.shared.db.base import DEFAULT_SCHEMA
 from src.shared.db.partitions import existing_partitions
-from src.shared.enums import EstatusNegocio
+from src.shared.enums import EstatusNegocio, OrigenClee
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_permanencia.log"))
@@ -111,6 +111,8 @@ def _build_sql(metodo: str, cortes: list[date], schema: str = DEFAULT_SCHEMA) ->
     ultimo_idx = len(cortes) - 1
 
     valores = ", ".join(f"(DATE '{c.isoformat()}', {i})" for i, c in enumerate(cortes))
+    directo = OrigenClee.DIRECTO.value
+    propagado = OrigenClee.PROPAGADO.value
 
     return f"""
 INSERT INTO {schema}.{destino} (
@@ -119,6 +121,11 @@ INSERT INTO {schema}.{destino} (
     cortes_observados, huecos, cortes_tras_ultimo,
     duracion_periodos, presente_desde_el_inicio, fecha_alta_date, dias_alta_a_primera,
     nombres, n_nombres, razones_sociales, codigos_act, cambio_actividad,
+    per_ocu, categoria_tamano, empleados_min, empleados_max,
+    estratos, cambio_tamano, delta_empleados_min,
+    tipounieco, tipos_unieco,
+    cve_loc, ageb, h3_cell_5, en_centro_comercial,
+    cortes_idx, cortes_directo, cortes_propagado,
     municipios, cambio_municipio, cod_postales,
     direcciones, n_direcciones, tipos_asent,
     telefonos, correos, sitios,
@@ -135,6 +142,11 @@ obs AS (
         e.cve_ent, e.cve_mun, e.cod_postal,
         e.latitud, e.longitud, e.h3_cell_9, e.fecha_alta_date,
         e.telefono, e.correoelec, e.www, ta.tipo_asent,
+        e.cve_loc, e.ageb, e.h3_cell_5, e.nom_cencom,
+        i.origen,
+        ep.per_ocu, ep.categoria AS categoria_tamano,
+        ep.empleados_min, ep.empleados_max,
+        tu.tipounieco,
         -- El domicilio como UNA cadena: arrays paralelos por componente
         -- perderian que numero va con que calle.
         NULLIF(CONCAT_WS(' | ',
@@ -145,6 +157,8 @@ obs AS (
     JOIN {schema}.{identidad} i ON i.id = e.id AND i.period = e.period
     JOIN cortes c ON c.period = e.period
     LEFT JOIN {schema}.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
+    LEFT JOIN {schema}.denue_estratos_personal ep ON ep.id = e.per_ocu_id
+    LEFT JOIN {schema}.denue_tipos_unidad_economica tu ON tu.id = e.tipounieco_id
     WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
 ),
 ventana AS (
@@ -169,6 +183,17 @@ ventana AS (
         ARRAY_AGG(DISTINCT cod_postal) FILTER (
             WHERE cod_postal IS NOT NULL AND cod_postal <> '') AS cod_postales,
         ARRAY_AGG(DISTINCT direccion) FILTER (WHERE direccion IS NOT NULL) AS direcciones,
+        ARRAY_AGG(DISTINCT per_ocu) FILTER (
+            WHERE per_ocu IS NOT NULL AND per_ocu <> '') AS estratos,
+        ARRAY_AGG(DISTINCT tipounieco) FILTER (
+            WHERE tipounieco IS NOT NULL AND tipounieco <> '') AS tipos_unieco,
+        -- Patron de presencia completo: de aqui el analisis deriva cualquier
+        -- medida de ausencia sin volver a los 82.9M de hechos.
+        ARRAY_AGG(DISTINCT idx ORDER BY idx) AS cortes_idx,
+        -- Cuanto de la identidad es observado frente a inferido.
+        COUNT(DISTINCT idx) FILTER (WHERE origen = '{directo}') AS cortes_directo,
+        COUNT(DISTINCT idx) FILTER (WHERE origen = '{propagado}') AS cortes_propagado,
+        BOOL_OR(nom_cencom IS NOT NULL AND nom_cencom <> '') AS en_centro_comercial,
         ARRAY_AGG(DISTINCT tipo_asent) FILTER (
             WHERE tipo_asent IS NOT NULL AND tipo_asent <> '') AS tipos_asent,
         -- Contacto: UNION de todos los cortes, no el mas reciente. Para
@@ -193,6 +218,7 @@ primera AS (
     -- entre las esquinas del rectangulo, que pueden ser puntos donde el
     -- establecimiento nunca estuvo.
     SELECT clee_resuelto, latitud AS lat_primera, longitud AS lon_primera,
+           empleados_min AS empleados_min_primera,
            ROW_NUMBER() OVER (PARTITION BY clee_resuelto ORDER BY period ASC, id) AS rn
     FROM obs
 ),
@@ -201,6 +227,8 @@ representante AS (
     -- desempatado por id para que el resultado sea determinista.
     SELECT clee_resuelto, nom_estab, raz_social, codigo_act,
            cve_ent, cve_mun, cod_postal, latitud, longitud, h3_cell_9,
+           per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
+           cve_loc, ageb, h3_cell_5,
            ROW_NUMBER() OVER (PARTITION BY clee_resuelto ORDER BY period DESC, id) AS rn
     FROM obs
 )
@@ -223,6 +251,19 @@ SELECT
     v.razones_sociales,
     v.codigos_act,
     COALESCE(CARDINALITY(v.codigos_act), 0) > 1 AS cambio_actividad,
+    r.per_ocu, r.categoria_tamano, r.empleados_min, r.empleados_max,
+    v.estratos,
+    COALESCE(CARDINALITY(v.estratos), 0) > 1 AS cambio_tamano,
+    -- Trayectoria de tamano: ultimo menos primero, en empleados. Respeta el
+    -- orden, asi que distingue crecer de encogerse -- que un array de
+    -- estratos no puede.
+    r.empleados_min - p.empleados_min_primera AS delta_empleados_min,
+    r.tipounieco, v.tipos_unieco,
+    r.cve_loc, r.ageb, r.h3_cell_5,
+    COALESCE(v.en_centro_comercial, FALSE) AS en_centro_comercial,
+    v.cortes_idx,
+    COALESCE(v.cortes_directo, 0) AS cortes_directo,
+    COALESCE(v.cortes_propagado, 0) AS cortes_propagado,
     v.municipios,
     COALESCE(CARDINALITY(v.municipios), 0) > 1 AS cambio_municipio,
     v.cod_postales,

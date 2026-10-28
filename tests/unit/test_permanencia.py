@@ -11,7 +11,10 @@ from datetime import date
 import polars as pl
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
+from src.etl.loaders.dominios import build_rows
+from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.permanencia import (
     METODOS,
     construir_permanencia,
@@ -19,6 +22,7 @@ from src.etl.loaders.permanencia import (
 )
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
+from src.shared.db.models.silver import EstratoPersonal, TipoUnidadEconomica
 from src.shared.db.partitions import create_partition
 from src.shared.enums import EstatusNegocio, OrigenClee
 
@@ -42,9 +46,17 @@ CORTES = [date(2019, 11, 1), date(2020, 4, 1), date(2020, 11, 1), date(2021, 5, 
 #: (id, corte, identidad, nombre, codigo_act, cve_ent, cve_mun, lat, lon,
 #:  nom_vial, numero_ext, nomb_asent, cod_postal, telefono, correoelec,
 #:  fecha_alta_date)
+#: Ids de catálogo, por nombre: los números sueltos en las tuplas de abajo
+#: serían ilegibles. Salen de `data/seeds/seed_estratos_personal.parquet` y
+#: de `build_rows()["denue_tipos_unidad_economica"]`.
+MICRO = 2  # "0 A 5 PERSONAS", categoria Micro, empleados_min = 0
+PEQUENA = 4  # "11 A 30 PERSONAS", categoria Small, empleados_min = 11
+FIJO = 2  # tipo de unidad economica
+
 OBSERVACIONES = [
     # id, corte, identidad, nombre, act, ent, mun, lat, lon,
-    #     vialidad, numero, asentamiento, CP, telefono, correo, fecha_alta
+    #   vialidad, numero, asentamiento, CP, telefono, correo, fecha_alta,
+    #   per_ocu_id, tipounieco_id
     (
         "a1",
         CORTES[0],
@@ -62,6 +74,8 @@ OBSERVACIONES = [
         "",
         "",
         date(2010, 7, 1),
+        MICRO,
+        FIJO,
     ),
     (
         "a2",
@@ -80,6 +94,8 @@ OBSERVACIONES = [
         "",
         "",
         date(2010, 7, 1),
+        MICRO,
+        FIJO,
     ),
     (
         "a3",
@@ -98,6 +114,8 @@ OBSERVACIONES = [
         "",
         "",
         date(2010, 7, 1),
+        MICRO,
+        FIJO,
     ),
     (
         "a4",
@@ -116,6 +134,8 @@ OBSERVACIONES = [
         "",
         "",
         date(2010, 7, 1),
+        MICRO,
+        FIJO,
     ),
     (
         "b1",
@@ -134,6 +154,8 @@ OBSERVACIONES = [
         "3312345678",
         "hola@donjuan.mx",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "b3",
@@ -152,6 +174,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "c1",
@@ -170,6 +194,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "c2",
@@ -188,6 +214,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "d1",
@@ -206,6 +234,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "d2",
@@ -224,6 +254,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "e1",
@@ -242,6 +274,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "f1",
@@ -260,6 +294,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "f2",
@@ -278,6 +314,8 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
     ),
     (
         "f3",
@@ -296,6 +334,49 @@ OBSERVACIONES = [
         "",
         "",
         None,
+        MICRO,
+        FIJO,
+    ),
+    # Crece de Micro a Small entre el primer y el ultimo corte.
+    (
+        "g1",
+        CORTES[0],
+        "C_CRECIO",
+        "TALLER PEPE",
+        "811111",
+        "14",
+        "039",
+        20.66,
+        -103.34,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        None,
+        MICRO,
+        FIJO,
+    ),
+    (
+        "g2",
+        CORTES[3],
+        "C_CRECIO",
+        "TALLER PEPE",
+        "811111",
+        "14",
+        "039",
+        20.66,
+        -103.34,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        None,
+        PEQUENA,
+        FIJO,
     ),
 ]
 
@@ -308,8 +389,20 @@ def metodo(request):
 
 @pytest.fixture
 def conn(silver_engine, metodo):
-    """Hechos e identidad cargados, para el método bajo prueba."""
+    """Hechos e identidad cargados, para el método bajo prueba.
+
+    Los catálogos de estrato y tipo de unidad se siembran primero: la tabla
+    de hechos tiene FK hacia ellos, y la permanencia los resuelve a sus
+    etiquetas para `categoria_tamano` y `tipounieco`.
+    """
     identidad = METODOS[metodo]
+    with Session(silver_engine) as sesion:
+        sesion.add_all(
+            [EstratoPersonal(**r) for r in build_estrato_rows()]
+            + [TipoUnidadEconomica(**r) for r in build_rows()["denue_tipos_unidad_economica"]]
+        )
+        sesion.commit()
+
     with silver_engine.begin() as conn:
         for corte in CORTES:
             create_partition(conn, corte)
@@ -353,6 +446,8 @@ def conn(silver_engine, metodo):
                     "telefono": pl.Utf8,
                     "correoelec": pl.Utf8,
                     "fecha_alta_date": pl.Date,
+                    "per_ocu_id": pl.Int64,
+                    "tipounieco_id": pl.Int64,
                 },
                 orient="row",
             ),
@@ -395,21 +490,22 @@ def permanencia(conn, metodo: str) -> dict[str, dict]:
 @pytest.mark.unit
 class TestColapso:
     def test_una_fila_por_identidad(self, conn, metodo):
-        """Catorce observaciones de seis establecimientos -> seis filas."""
-        assert construir_permanencia(conn, metodo) == 6
+        """Dieciséis observaciones de siete establecimientos -> siete filas."""
+        assert construir_permanencia(conn, metodo) == 7
         assert set(permanencia(conn, metodo)) == {
             "C_VIVE",
             "C_HUECO",
             "C_CERRO",
             "C_MUDO",
             "C_JITTER",
+            "C_CRECIO",
             "NEW_REG_1234-abcdef",
         }
 
     def test_reconstruir_no_duplica(self, conn, metodo):
         """Es reconstrucción total: los NEW_* no son estables entre corridas."""
         construir_permanencia(conn, metodo)
-        assert construir_permanencia(conn, metodo) == 6
+        assert construir_permanencia(conn, metodo) == 7
 
     def test_el_metodo_escribe_solo_su_tabla(self, conn, metodo):
         """La razón de que sea una tabla por método y no una columna."""
@@ -604,6 +700,53 @@ class TestAntiguedadYCensuraIzquierda:
     def test_sin_fecha_de_alta_el_diagnostico_queda_nulo(self, conn, metodo):
         construir_permanencia(conn, metodo)
         assert permanencia(conn, metodo)["C_HUECO"]["dias_alta_a_primera"] is None
+
+
+@pytest.mark.unit
+class TestTamanoYTipo:
+    """El tamaño es variable del protocolo, y su trayectoria es señal."""
+
+    def test_trae_la_categoria_mipyme(self, conn, metodo):
+        """`categoria` del catálogo es el sujeto mismo de la tesis."""
+        construir_permanencia(conn, metodo)
+        vive = permanencia(conn, metodo)["C_VIVE"]
+        assert vive["categoria_tamano"] == "Micro"
+        assert vive["empleados_min"] == 0
+        assert vive["empleados_max"] == 5
+
+    def test_el_delta_distingue_crecer_de_encogerse(self, conn, metodo):
+        """Un array de estratos no tiene orden; el delta sí.
+
+        `C_CRECIO` pasa de 0-5 a 11-30 empleados: delta positivo.
+        """
+        construir_permanencia(conn, metodo)
+        p = permanencia(conn, metodo)
+        assert p["C_CRECIO"]["cambio_tamano"] is True
+        assert p["C_CRECIO"]["delta_empleados_min"] == 11  # 11 - 0
+        assert p["C_VIVE"]["delta_empleados_min"] == 0
+
+    def test_trae_el_tipo_de_unidad_economica(self, conn, metodo):
+        """Distingue fijo de ambulante: dinámicas y verificabilidad distintas."""
+        construir_permanencia(conn, metodo)
+        assert permanencia(conn, metodo)["C_VIVE"]["tipounieco"] == "FIJO"
+
+
+@pytest.mark.unit
+class TestPatronDePresencia:
+    def test_guarda_los_indices_exactos(self, conn, metodo):
+        """De aquí se deriva cualquier patrón de ausencia sin volver a los hechos."""
+        construir_permanencia(conn, metodo)
+        p = permanencia(conn, metodo)
+        assert p["C_VIVE"]["cortes_idx"] == [0, 1, 2, 3]
+        assert p["C_HUECO"]["cortes_idx"] == [0, 2]  # el hueco es visible
+
+    def test_mide_cuanto_de_la_identidad_es_observado(self, conn, metodo):
+        """10 cortes DIRECTO son más confiables que 1 directo y 9 propagados."""
+        construir_permanencia(conn, metodo)
+        p = permanencia(conn, metodo)
+        # el escenario los marca todos PROPAGADO salvo los sintéticos
+        assert p["C_VIVE"]["cortes_propagado"] == 4
+        assert p["C_VIVE"]["cortes_directo"] == 0
 
 
 @pytest.mark.unit

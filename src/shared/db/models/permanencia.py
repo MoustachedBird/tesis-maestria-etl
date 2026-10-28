@@ -139,6 +139,91 @@ class PermanenciaMixin:
         ),
     )
 
+    # ===== TAMANO =====
+    # El protocolo nombra el tamano como variable del establecimiento, y el
+    # catalogo `denue_estratos_personal` trae la cota de empleados y la
+    # categoria MIPYME, que es el sujeto mismo de la tesis.
+    per_ocu: Mapped[str | None] = mapped_column(
+        String, comment="Estrato de personal ocupado en el corte mas reciente"
+    )
+    categoria_tamano: Mapped[str | None] = mapped_column(
+        String,
+        comment="Micro / Small / Medium / Large / Unknown en el corte mas reciente",
+    )
+    empleados_min: Mapped[int | None] = mapped_column(
+        Integer, comment="Cota inferior de empleados del estrato mas reciente"
+    )
+    empleados_max: Mapped[int | None] = mapped_column(
+        Integer, comment="Cota superior de empleados del estrato mas reciente"
+    )
+    estratos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Estratos de personal distintos a lo largo de su ventana"
+    )
+    cambio_tamano: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si cambio de estrato de personal entre cortes"
+    )
+    delta_empleados_min: Mapped[int | None] = mapped_column(
+        Integer,
+        comment=(
+            "Cota inferior de empleados del ULTIMO corte menos la del PRIMERO. "
+            "Positivo = crecio, negativo = se encogio. Es una medida de "
+            "trayectoria, no de nivel, y por eso respeta el orden temporal"
+        ),
+    )
+
+    # ===== TIPO DE UNIDAD ECONOMICA =====
+    # Distingue fijo de semifijo y ambulante, que tienen dinamicas de
+    # supervivencia distintas -- y determina si el negocio es verificable
+    # con fuentes externas (un puesto ambulante no deja rastro digital).
+    tipounieco: Mapped[str | None] = mapped_column(
+        String, comment="Tipo de unidad economica en el corte mas reciente"
+    )
+    tipos_unieco: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Tipos de unidad economica distintos observados"
+    )
+
+    # ===== GEOGRAFIA FINA =====
+    cve_loc: Mapped[str | None] = mapped_column(
+        String(4), comment="Localidad en el corte mas reciente: distingue urbano de rural"
+    )
+    ageb: Mapped[str | None] = mapped_column(
+        String,
+        comment=(
+            "Area Geoestadistica Basica del corte mas reciente. Es la llave con que "
+            "se une a los indices de marginacion y a los datos censales por AGEB"
+        ),
+    )
+    h3_cell_5: Mapped[int | None] = mapped_column(
+        BigInteger, comment="Celda H3 res 5 (~8.5 km) del corte mas reciente, para agregados"
+    )
+    en_centro_comercial: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment="True si en algun corte estuvo dentro de un centro comercial o mercado",
+    )
+
+    # ===== PATRON DE PRESENCIA Y CONFIANZA EN LA IDENTIDAD =====
+    cortes_idx: Mapped[list[int] | None] = mapped_column(
+        ARRAY(Integer),
+        comment=(
+            "Indices EXACTOS de los cortes en que aparecio, ordenados. De aqui se "
+            "derivan duracion, huecos y cualquier patron de ausencia que el analisis "
+            "quiera medir, sin volver a la tabla de hechos"
+        ),
+    )
+    cortes_directo: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment=(
+            "Cortes en que la identidad vino de INEGI (origen=DIRECTO). Mide cuanto "
+            "de la identidad es OBSERVADO frente a inferido: 10 cortes directos son "
+            "mas confiables que 1 directo y 9 propagados"
+        ),
+    )
+    cortes_propagado: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Cortes en que la identidad se infirio por similitud"
+    )
+
     # ===== ALIAS Y VARIANTES =====
     # No son adorno: son control de calidad de la resolucion de identidad.
     # Un "establecimiento" que cambio de municipio Y de actividad es casi
