@@ -142,13 +142,68 @@ class PermanenciaMixin:
     cod_postales: Mapped[list[str] | None] = mapped_column(
         ARRAY(String), comment="Codigos postales distintos observados"
     )
-    desplazamiento_m: Mapped[float | None] = mapped_column(
+    direcciones: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String),
+        comment=(
+            "Domicilios distintos, cada uno CONCATENADO: "
+            "'vialidad | numero | asentamiento | CP'. Concatenados y no un array "
+            "por componente, porque arrays paralelos pierden la correspondencia: "
+            "no se sabria que numero iba con que calle"
+        ),
+    )
+    n_direcciones: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Cuantos domicilios distintos tuvo"
+    )
+    tipos_asent: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Tipos de asentamiento distintos observados"
+    )
+
+    # ===== CONTACTO: UNION, no el mas reciente =====
+    # Para verificar si un negocio cerro sirve CUALQUIER telefono que haya
+    # publicado, aunque fuera en 2016. Y la presencia de correo o sitio es a
+    # la vez variable del modelo --correlaciona con formalidad-- y predictor
+    # de si el negocio es verificable con fuentes externas.
+    telefonos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Telefonos distintos publicados en cualquier corte"
+    )
+    correos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Correos distintos publicados en cualquier corte"
+    )
+    sitios: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), comment="Sitios web distintos publicados en cualquier corte"
+    )
+
+    # ===== GEOGRAFIA: DOS MEDIDAS, QUE RESPONDEN COSAS DISTINTAS =====
+    lat_primera: Mapped[float | None] = mapped_column(
+        Double, comment="Latitud en el PRIMER corte en que se observo"
+    )
+    lon_primera: Mapped[float | None] = mapped_column(
+        Double, comment="Longitud en el primer corte en que se observo"
+    )
+    n_posiciones: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Pares (lat, lon) distintos que tuvo"
+    )
+    desplazamiento_neto_m: Mapped[float | None] = mapped_column(
         Double,
         comment=(
-            "Diagonal del rectangulo que contiene todas sus coordenadas, en metros. "
-            "Cota SUPERIOR de cuanto se movio, no la distancia exacta: se calcula "
-            "con cuatro agregados (min/max de lat y lon) en vez de comparar todos "
-            "los pares de observaciones"
+            "Distancia entre la PRIMERA y la ULTIMA posicion observada, en metros. "
+            "Son dos puntos REALES y respeta el orden temporal: responde "
+            "'termino en otro lado?'"
+        ),
+    )
+    lat_min: Mapped[float | None] = mapped_column(Double, comment="Latitud minima observada")
+    lat_max: Mapped[float | None] = mapped_column(Double, comment="Latitud maxima observada")
+    lon_min: Mapped[float | None] = mapped_column(Double, comment="Longitud minima observada")
+    lon_max: Mapped[float | None] = mapped_column(Double, comment="Longitud maxima observada")
+    dispersion_max_m: Mapped[float | None] = mapped_column(
+        Double,
+        comment=(
+            "Diagonal del rectangulo que contiene todas sus coordenadas. Es una "
+            "COTA SUPERIOR de cuanto se movio, no una distancia recorrida: sus "
+            "esquinas pueden ser puntos donde el negocio nunca estuvo, y es ciega "
+            "al orden temporal. Se lee JUNTO al neto -- neto ~0 con dispersion "
+            "grande es jitter de GPS o una coordenada mala; neto grande y "
+            "dispersion similar es una mudanza real"
         ),
     )
 

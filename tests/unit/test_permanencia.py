@@ -35,19 +35,183 @@ CORTES = [date(2019, 11, 1), date(2020, 4, 1), date(2020, 11, 1), date(2021, 5, 
 #: - `cerro`: solo en los dos primeros -> 2 cortes tras el último.
 #: - `mudo`: cambia de municipio Y de actividad -> fusión indebida probable.
 #: - `nuevo`: identidad sintética, un solo corte.
+#: - `jitter`: el mismo local con coordenadas que oscilan ~80 m y vuelven al
+#:   punto de partida. Neto ~0 pero dispersión grande: es ruido de GPS, no
+#:   una mudanza. Es el caso que el rectángulo solo no distingue.
 #:
-#: (id, corte, identidad, nombre, codigo_act, cve_ent, cve_mun, lat, lon)
+#: (id, corte, identidad, nombre, codigo_act, cve_ent, cve_mun, lat, lon,
+#:  nom_vial, numero_ext, nomb_asent, cod_postal, telefono, correoelec)
 OBSERVACIONES = [
-    ("a1", CORTES[0], "C_VIVE", "PANADERIA SOL", "311811", "14", "039", 20.67, -103.35),
-    ("a2", CORTES[1], "C_VIVE", "PANADERIA SOL", "311811", "14", "039", 20.67, -103.35),
-    ("a3", CORTES[2], "C_VIVE", "PANADERIA SOL", "311811", "14", "039", 20.67, -103.35),
-    ("a4", CORTES[3], "C_VIVE", "PANADERIA SOL", "311811", "14", "039", 20.67, -103.35),
-    ("b1", CORTES[0], "C_HUECO", "TACOS DON JUAN", "722513", "14", "039", 20.70, -103.30),
-    ("b3", CORTES[2], "C_HUECO", "TAQUERIA DON JUAN", "722513", "14", "039", 20.70, -103.30),
-    ("c1", CORTES[0], "C_CERRO", "FARMACIA LUZ", "464111", "14", "039", 20.60, -103.40),
-    ("c2", CORTES[1], "C_CERRO", "FARMACIA LUZ", "464111", "14", "039", 20.60, -103.40),
-    ("d1", CORTES[0], "C_MUDO", "ABARROTES MARY", "461110", "14", "039", 20.65, -103.33),
-    ("d2", CORTES[1], "C_MUDO", "ABARROTES MARY", "722513", "09", "015", 19.43, -99.13),
+    (
+        "a1",
+        CORTES[0],
+        "C_VIVE",
+        "PANADERIA SOL",
+        "311811",
+        "14",
+        "039",
+        20.67,
+        -103.35,
+        "CALLE SOL",
+        "5",
+        "CENTRO",
+        "44100",
+        "",
+        "",
+    ),
+    (
+        "a2",
+        CORTES[1],
+        "C_VIVE",
+        "PANADERIA SOL",
+        "311811",
+        "14",
+        "039",
+        20.67,
+        -103.35,
+        "CALLE SOL",
+        "5",
+        "CENTRO",
+        "44100",
+        "",
+        "",
+    ),
+    (
+        "a3",
+        CORTES[2],
+        "C_VIVE",
+        "PANADERIA SOL",
+        "311811",
+        "14",
+        "039",
+        20.67,
+        -103.35,
+        "CALLE SOL",
+        "5",
+        "CENTRO",
+        "44100",
+        "",
+        "",
+    ),
+    (
+        "a4",
+        CORTES[3],
+        "C_VIVE",
+        "PANADERIA SOL",
+        "311811",
+        "14",
+        "039",
+        20.67,
+        -103.35,
+        "CALLE SOL",
+        "5",
+        "CENTRO",
+        "44100",
+        "",
+        "",
+    ),
+    (
+        "b1",
+        CORTES[0],
+        "C_HUECO",
+        "TACOS DON JUAN",
+        "722513",
+        "14",
+        "039",
+        20.70,
+        -103.30,
+        "AV JUAREZ",
+        "123",
+        "CENTRO",
+        "44100",
+        "3312345678",
+        "hola@donjuan.mx",
+    ),
+    (
+        "b3",
+        CORTES[2],
+        "C_HUECO",
+        "TAQUERIA DON JUAN",
+        "722513",
+        "14",
+        "039",
+        20.70,
+        -103.30,
+        "AV JUAREZ",
+        "125",
+        "CENTRO",
+        "44200",
+        "",
+        "",
+    ),
+    (
+        "c1",
+        CORTES[0],
+        "C_CERRO",
+        "FARMACIA LUZ",
+        "464111",
+        "14",
+        "039",
+        20.60,
+        -103.40,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "c2",
+        CORTES[1],
+        "C_CERRO",
+        "FARMACIA LUZ",
+        "464111",
+        "14",
+        "039",
+        20.60,
+        -103.40,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "d1",
+        CORTES[0],
+        "C_MUDO",
+        "ABARROTES MARY",
+        "461110",
+        "14",
+        "039",
+        20.65,
+        -103.33,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "d2",
+        CORTES[1],
+        "C_MUDO",
+        "ABARROTES MARY",
+        "722513",
+        "09",
+        "015",
+        19.43,
+        -99.13,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
     (
         "e1",
         CORTES[2],
@@ -58,6 +222,63 @@ OBSERVACIONES = [
         "039",
         20.68,
         -103.36,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "f1",
+        CORTES[0],
+        "C_JITTER",
+        "ESTETICA ANA",
+        "812110",
+        "14",
+        "039",
+        20.7000,
+        -103.4000,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "f2",
+        CORTES[1],
+        "C_JITTER",
+        "ESTETICA ANA",
+        "812110",
+        "14",
+        "039",
+        20.7007,
+        -103.4000,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ),
+    (
+        "f3",
+        CORTES[2],
+        "C_JITTER",
+        "ESTETICA ANA",
+        "812110",
+        "14",
+        "039",
+        20.7000,
+        -103.4000,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
     ),
 ]
 
@@ -80,7 +301,25 @@ def conn(silver_engine, metodo):
         copy_dataframe(
             conn,
             pl.DataFrame(
-                [(o[0], o[1], o[3], o[4], o[5], o[6], o[7], o[8]) for o in OBSERVACIONES],
+                [
+                    (
+                        o[0],
+                        o[1],
+                        o[3],
+                        o[4],
+                        o[5],
+                        o[6],
+                        o[7],
+                        o[8],
+                        o[9],
+                        o[10],
+                        o[11],
+                        o[12],
+                        o[13],
+                        o[14],
+                    )
+                    for o in OBSERVACIONES
+                ],
                 schema={
                     "id": pl.Utf8,
                     "period": pl.Date,
@@ -90,6 +329,12 @@ def conn(silver_engine, metodo):
                     "cve_mun": pl.Utf8,
                     "latitud": pl.Float64,
                     "longitud": pl.Float64,
+                    "nom_vial": pl.Utf8,
+                    "numero_ext": pl.Utf8,
+                    "nomb_asent": pl.Utf8,
+                    "cod_postal": pl.Utf8,
+                    "telefono": pl.Utf8,
+                    "correoelec": pl.Utf8,
                 },
                 orient="row",
             ),
@@ -132,20 +377,21 @@ def permanencia(conn, metodo: str) -> dict[str, dict]:
 @pytest.mark.unit
 class TestColapso:
     def test_una_fila_por_identidad(self, conn, metodo):
-        """Once observaciones de cinco establecimientos -> cinco filas."""
-        assert construir_permanencia(conn, metodo) == 5
+        """Catorce observaciones de seis establecimientos -> seis filas."""
+        assert construir_permanencia(conn, metodo) == 6
         assert set(permanencia(conn, metodo)) == {
             "C_VIVE",
             "C_HUECO",
             "C_CERRO",
             "C_MUDO",
+            "C_JITTER",
             "NEW_REG_1234-abcdef",
         }
 
     def test_reconstruir_no_duplica(self, conn, metodo):
         """Es reconstrucción total: los NEW_* no son estables entre corridas."""
         construir_permanencia(conn, metodo)
-        assert construir_permanencia(conn, metodo) == 5
+        assert construir_permanencia(conn, metodo) == 6
 
     def test_el_metodo_escribe_solo_su_tabla(self, conn, metodo):
         """La razón de que sea una tabla por método y no una columna."""
@@ -229,18 +475,72 @@ class TestAliasYVariantes:
         assert mudo["cambio_actividad"] is True
         assert sorted(mudo["municipios"]) == ["09015", "14039"]
 
+    def test_la_direccion_va_concatenada_no_en_fragmentos(self, conn, metodo):
+        """Un array por componente perdería qué número va con qué calle."""
+        construir_permanencia(conn, metodo)
+        hueco = permanencia(conn, metodo)["C_HUECO"]
+        assert hueco["n_direcciones"] == 2
+        assert sorted(hueco["direcciones"]) == [
+            "AV JUAREZ | 123 | CENTRO | 44100",
+            "AV JUAREZ | 125 | CENTRO | 44200",
+        ]
+
+    def test_el_contacto_es_la_union_no_el_mas_reciente(self, conn, metodo):
+        """Para verificar un cierre sirve cualquier teléfono que publicó.
+
+        `C_HUECO` trae teléfono solo en el primer corte; si se tomara el del
+        representante se perdería.
+        """
+        construir_permanencia(conn, metodo)
+        hueco = permanencia(conn, metodo)["C_HUECO"]
+        assert hueco["telefonos"] == ["3312345678"]
+        assert hueco["correos"] == ["hola@donjuan.mx"]
+
+    def test_sin_contacto_el_array_queda_nulo_no_con_vacios(self, conn, metodo):
+        """Una cadena vacía no es una variante, es un dato ausente."""
+        construir_permanencia(conn, metodo)
+        assert permanencia(conn, metodo)["C_VIVE"]["telefonos"] is None
+
     def test_no_marca_cambio_cuando_no_se_movio(self, conn, metodo):
         construir_permanencia(conn, metodo)
         vive = permanencia(conn, metodo)["C_VIVE"]
         assert vive["cambio_municipio"] is False
         assert vive["cambio_actividad"] is False
 
-    def test_el_desplazamiento_detecta_la_mudanza(self, conn, metodo):
-        """Guadalajara a CDMX son ~460 km; el mismo local, ~0."""
+    def test_el_neto_detecta_la_mudanza_real(self, conn, metodo):
+        """Guadalajara a CDMX son ~460 km entre dos puntos REALES."""
         construir_permanencia(conn, metodo)
         p = permanencia(conn, metodo)
-        assert p["C_MUDO"]["desplazamiento_m"] > 400_000
-        assert p["C_VIVE"]["desplazamiento_m"] == pytest.approx(0, abs=1)
+        assert p["C_MUDO"]["desplazamiento_neto_m"] > 400_000
+        assert p["C_VIVE"]["desplazamiento_neto_m"] == pytest.approx(0, abs=1)
+
+    def test_el_neto_distingue_jitter_de_mudanza(self, conn, metodo):
+        """El par neto/dispersión es lo que el rectángulo solo no puede.
+
+        `C_JITTER` oscila ~80 m y vuelve al origen: neto ~0 pero dispersión
+        grande. Con solo la diagonal del rectángulo se leería como si se
+        hubiera movido.
+        """
+        construir_permanencia(conn, metodo)
+        jitter = permanencia(conn, metodo)["C_JITTER"]
+        assert jitter["desplazamiento_neto_m"] == pytest.approx(0, abs=1)
+        assert jitter["dispersion_max_m"] > 50
+        assert jitter["n_posiciones"] == 2
+
+    def test_la_dispersion_expone_el_rectangulo(self, conn, metodo):
+        """Las cuatro esquinas quedan accesibles, no solo su diagonal."""
+        construir_permanencia(conn, metodo)
+        mudo = permanencia(conn, metodo)["C_MUDO"]
+        assert mudo["lat_min"] == pytest.approx(19.43)
+        assert mudo["lat_max"] == pytest.approx(20.65)
+        assert mudo["dispersion_max_m"] > 400_000
+
+    def test_guarda_la_primera_posicion(self, conn, metodo):
+        """El otro extremo real del recorrido, para calcular el neto."""
+        construir_permanencia(conn, metodo)
+        mudo = permanencia(conn, metodo)["C_MUDO"]
+        assert mudo["lat_primera"] == pytest.approx(20.65)
+        assert mudo["latitud"] == pytest.approx(19.43)  # el representante
 
 
 @pytest.mark.unit

@@ -104,7 +104,11 @@ INSERT INTO {schema}.{destino} (
     primer_periodo, ultimo_periodo, idx_primer, idx_ultimo,
     cortes_observados, huecos, cortes_tras_ultimo, fecha_alta_date,
     nombres, n_nombres, razones_sociales, codigos_act, cambio_actividad,
-    municipios, cambio_municipio, cod_postales, desplazamiento_m,
+    municipios, cambio_municipio, cod_postales,
+    direcciones, n_direcciones, tipos_asent,
+    telefonos, correos, sitios,
+    lat_primera, lon_primera, n_posiciones, desplazamiento_neto_m,
+    lat_min, lat_max, lon_min, lon_max, dispersion_max_m,
     nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal,
     latitud, longitud, h3_cell_9
 )
@@ -114,10 +118,18 @@ obs AS (
         i.clee_resuelto, c.idx, e.period, e.id,
         e.nom_estab, e.raz_social, e.codigo_act,
         e.cve_ent, e.cve_mun, e.cod_postal,
-        e.latitud, e.longitud, e.h3_cell_9, e.fecha_alta_date
+        e.latitud, e.longitud, e.h3_cell_9, e.fecha_alta_date,
+        e.telefono, e.correoelec, e.www, ta.tipo_asent,
+        -- El domicilio como UNA cadena: arrays paralelos por componente
+        -- perderian que numero va con que calle.
+        NULLIF(CONCAT_WS(' | ',
+            NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''),
+            NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, '')
+        ), '') AS direccion
     FROM {schema}.establecimientos e
     JOIN {schema}.{identidad} i ON i.id = e.id AND i.period = e.period
     JOIN cortes c ON c.period = e.period
+    LEFT JOIN {schema}.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
     WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
 ),
 ventana AS (
@@ -141,12 +153,33 @@ ventana AS (
             WHERE cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS municipios,
         ARRAY_AGG(DISTINCT cod_postal) FILTER (
             WHERE cod_postal IS NOT NULL AND cod_postal <> '') AS cod_postales,
-        -- Rectangulo envolvente de sus coordenadas: cuatro agregados en vez
-        -- de comparar todos los pares de observaciones.
+        ARRAY_AGG(DISTINCT direccion) FILTER (WHERE direccion IS NOT NULL) AS direcciones,
+        ARRAY_AGG(DISTINCT tipo_asent) FILTER (
+            WHERE tipo_asent IS NOT NULL AND tipo_asent <> '') AS tipos_asent,
+        -- Contacto: UNION de todos los cortes, no el mas reciente. Para
+        -- verificar un cierre sirve cualquier telefono que haya publicado.
+        ARRAY_AGG(DISTINCT telefono) FILTER (
+            WHERE telefono IS NOT NULL AND telefono <> '') AS telefonos,
+        ARRAY_AGG(DISTINCT correoelec) FILTER (
+            WHERE correoelec IS NOT NULL AND correoelec <> '') AS correos,
+        ARRAY_AGG(DISTINCT www) FILTER (WHERE www IS NOT NULL AND www <> '') AS sitios,
+        -- Rectangulo envolvente: cota SUPERIOR del movimiento, ciega al
+        -- orden. Se lee junto al desplazamiento neto de abajo.
         MIN(latitud) AS lat_min, MAX(latitud) AS lat_max,
-        MIN(longitud) AS lon_min, MAX(longitud) AS lon_max
+        MIN(longitud) AS lon_min, MAX(longitud) AS lon_max,
+        COUNT(DISTINCT (latitud, longitud)) FILTER (
+            WHERE latitud IS NOT NULL AND longitud IS NOT NULL) AS n_posiciones
     FROM obs
     GROUP BY clee_resuelto
+),
+primera AS (
+    -- La posicion con que empezo. Es el otro extremo REAL del recorrido:
+    -- el desplazamiento neto se mide entre esta y la del representante, no
+    -- entre las esquinas del rectangulo, que pueden ser puntos donde el
+    -- establecimiento nunca estuvo.
+    SELECT clee_resuelto, latitud AS lat_primera, longitud AS lon_primera,
+           ROW_NUMBER() OVER (PARTITION BY clee_resuelto ORDER BY period ASC, id) AS rn
+    FROM obs
 ),
 representante AS (
     -- La fila con que el establecimiento "termino": el corte mas reciente,
@@ -172,18 +205,35 @@ SELECT
     v.municipios,
     COALESCE(CARDINALITY(v.municipios), 0) > 1 AS cambio_municipio,
     v.cod_postales,
+    v.direcciones,
+    COALESCE(CARDINALITY(v.direcciones), 0) AS n_direcciones,
+    v.tipos_asent,
+    v.telefonos, v.correos, v.sitios,
+    p.lat_primera, p.lon_primera,
+    COALESCE(v.n_posiciones, 0) AS n_posiciones,
+    -- Neto: entre dos puntos REALES, respetando el orden temporal.
+    CASE WHEN p.lat_primera IS NULL OR r.latitud IS NULL THEN NULL ELSE
+        2 * {_EARTH_RADIUS_M} * ASIN(SQRT(
+            POWER(SIN(RADIANS(r.latitud - p.lat_primera) / 2), 2)
+            + COS(RADIANS(p.lat_primera)) * COS(RADIANS(r.latitud))
+            * POWER(SIN(RADIANS(r.longitud - p.lon_primera) / 2), 2)
+        ))
+    END AS desplazamiento_neto_m,
+    v.lat_min, v.lat_max, v.lon_min, v.lon_max,
+    -- Dispersion: la diagonal del rectangulo. Cota superior, no recorrido.
     CASE WHEN v.lat_min IS NULL THEN NULL ELSE
         2 * {_EARTH_RADIUS_M} * ASIN(SQRT(
             POWER(SIN(RADIANS(v.lat_max - v.lat_min) / 2), 2)
             + COS(RADIANS(v.lat_min)) * COS(RADIANS(v.lat_max))
             * POWER(SIN(RADIANS(v.lon_max - v.lon_min) / 2), 2)
         ))
-    END AS desplazamiento_m,
+    END AS dispersion_max_m,
     r.nom_estab, r.raz_social, r.codigo_act, r.cve_ent, r.cve_mun, r.cod_postal,
     r.latitud, r.longitud, r.h3_cell_9
 FROM ventana v
+JOIN primera p USING (clee_resuelto)
 JOIN representante r USING (clee_resuelto)
-WHERE r.rn = 1
+WHERE p.rn = 1 AND r.rn = 1
 """
 
 
