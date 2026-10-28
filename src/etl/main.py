@@ -107,24 +107,33 @@ def _run_denue_transform(
     return success
 
 
-def _run_permanencia(*, force: bool) -> bool:
-    """Reconstruye `silver.permanencia_<metodo>` para cada metodo resuelto.
+def _run_permanencia(*, metodos: list[str]) -> bool:
+    """Reconstruye `silver.permanencia_<metodo>` para los metodos pedidos.
 
-    Ignora `force`: la tabla se reconstruye entera siempre, porque las
+    No recibe `force`: la tabla se reconstruye entera siempre, porque las
     identidades sinteticas `NEW_*` no son estables entre corridas y no hay
     nada que preservar de una construccion previa.
+
+    Cada metodo va en su propia transaccion: una falla en h3 no debe tirar
+    lo que radio ya construyo, que es la misma razon por la que son tablas
+    separadas.
+
+    Args:
+        metodos: claves de `METODOS` a construir.
+
+    Returns:
+        bool: True si se escribio al menos una fila.
     """
-    from src.etl.loaders.permanencia import METODOS, construir_permanencia
+    from src.etl.loaders.permanencia import construir_permanencia
     from src.shared.db.session import get_engine
 
-    console.print(
-        "[bold magenta]   Running: permanencia (ventana por establecimiento)[/bold magenta]"
-    )
+    console.print(f"[bold magenta]   Running: permanencia ({', '.join(metodos)})[/bold magenta]")
     total = 0
-    with get_engine().begin() as conn:
-        for metodo in METODOS:
+    engine = get_engine()
+    for metodo in metodos:
+        with engine.begin() as conn:
             total += construir_permanencia(conn, metodo)
-    console.print(f"   {total:,} fila(s) de permanencia en {len(METODOS)} metodo(s)")
+    console.print(f"   {total:,} fila(s) de permanencia en {len(metodos)} metodo(s)")
     return total > 0
 
 

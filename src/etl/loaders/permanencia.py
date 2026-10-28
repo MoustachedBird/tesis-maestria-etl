@@ -2,12 +2,21 @@
 
 Colapsa las 82.9M observaciones de `silver.establecimientos` a una fila por
 establecimiento resuelto: su ventana de permanencia en el directorio, los
-alias que tuvo y los ingredientes de censura.
+ingredientes de censura y un resumen de cuánto varió entre cortes.
 
 Existe como tabla materializada y no como vista porque el `GROUP BY` sobre
 82.9M filas unidas a la tabla de identidades cuesta minutos, y el modelo de
 supervivencia la lee decenas de veces --cada partición de la validación
 cruzada, cada iteración de variables, el cálculo de SHAP.
+
+**Guarda cuántas variantes hubo, no cuáles.** Los nombres, domicilios y
+teléfonos que tuvo un establecimiento ya están en los hechos, alcanzables
+por la tabla de identidad; materializarlos como arrays duplicaría ~3-4 GB
+para ahorrar un join que es barato justo en el caso en que se necesita --un
+establecimiento, o una muestra de ellos. Lo que sí se materializa son los
+escalares (`n_nombres`, `cambio_municipio`, ...), porque esos responden las
+preguntas agregadas sobre los 10M de un golpe y son lo que el modelo puede
+consumir. Para los valores está la vista `silver.variantes_<metodo>`.
 """
 
 from __future__ import annotations
@@ -54,10 +63,11 @@ _EARTH_RADIUS_M = 6_371_000.0
 SET_WORK_MEM = "SET LOCAL work_mem = '4GB'"
 """Memoria de trabajo para esta consulta y solo para ella.
 
-El agregado produce ~10M grupos con cinco arrays cada uno; con el `work_mem`
-global (256 MB, modesto a propósito porque es POR NODO y POR CONEXIÓN) el
-hash aggregate se derrama a disco y tarda mucho más. Subirlo por sesión en
-las cargas masivas es el patrón que documenta `.env.example`.
+El agregado produce ~10M grupos, cada uno con una decena de `COUNT(DISTINCT
+...)` que mantienen su propio conjunto mientras dura el grupo. Con el
+`work_mem` global (256 MB, modesto a propósito porque es POR NODO y POR
+CONEXIÓN) el hash aggregate se derrama a disco y tarda mucho más. Subirlo
+por sesión en las cargas masivas es el patrón que documenta `.env.example`.
 """
 
 
@@ -120,18 +130,16 @@ INSERT INTO {schema}.{destino} (
     primer_periodo, ultimo_periodo, idx_primer, idx_ultimo,
     cortes_observados, huecos, cortes_tras_ultimo,
     duracion_periodos, presente_desde_el_inicio, fecha_alta_date, dias_alta_a_primera,
-    nombres, n_nombres, razones_sociales, codigos_act, cambio_actividad,
     per_ocu, categoria_tamano, empleados_min, empleados_max,
-    estratos, cambio_tamano, delta_empleados_min,
-    tipounieco, tipos_unieco,
+    cambio_tamano, delta_empleados_min,
+    tipounieco,
     cve_loc, ageb, h3_cell_5, en_centro_comercial,
     cortes_idx, cortes_directo, cortes_propagado,
-    municipios, cambio_municipio, cod_postales,
-    direcciones, n_direcciones, tipos_asent,
-    telefonos, correos, sitios,
+    n_nombres, cambio_actividad, cambio_municipio, n_direcciones,
+    tiene_telefono, tiene_correo, tiene_sitio,
     lat_primera, lon_primera, n_posiciones, desplazamiento_neto_m,
     lat_min, lat_max, lon_min, lon_max, dispersion_max_m,
-    nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal,
+    nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal, tipo_asent,
     latitud, longitud, h3_cell_9
 )
 WITH cortes(period, idx) AS (VALUES {valores}),
@@ -170,39 +178,33 @@ ventana AS (
         MAX(idx) AS idx_ultimo,
         COUNT(DISTINCT idx) AS cortes_observados,
         MIN(fecha_alta_date) AS fecha_alta_date,
-        -- Arrays de variantes. El FILTER descarta nulos y cadenas vacias:
-        -- un array con un '' no es una variante, es un dato ausente.
-        ARRAY_AGG(DISTINCT nom_estab) FILTER (
-            WHERE nom_estab IS NOT NULL AND nom_estab <> '') AS nombres,
-        ARRAY_AGG(DISTINCT raz_social) FILTER (
-            WHERE raz_social IS NOT NULL AND raz_social <> '') AS razones_sociales,
-        ARRAY_AGG(DISTINCT codigo_act) FILTER (
-            WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS codigos_act,
-        ARRAY_AGG(DISTINCT cve_ent || cve_mun) FILTER (
-            WHERE cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS municipios,
-        ARRAY_AGG(DISTINCT cod_postal) FILTER (
-            WHERE cod_postal IS NOT NULL AND cod_postal <> '') AS cod_postales,
-        ARRAY_AGG(DISTINCT direccion) FILTER (WHERE direccion IS NOT NULL) AS direcciones,
-        ARRAY_AGG(DISTINCT per_ocu) FILTER (
-            WHERE per_ocu IS NOT NULL AND per_ocu <> '') AS estratos,
-        ARRAY_AGG(DISTINCT tipounieco) FILTER (
-            WHERE tipounieco IS NOT NULL AND tipounieco <> '') AS tipos_unieco,
+        -- Resumen de variantes: CUANTAS hubo, no cuales. Los valores salen de
+        -- la vista `variantes_<metodo>`, que es este mismo join sin agregar.
+        -- El FILTER descarta nulos y cadenas vacias: un '' no es una
+        -- variante, es un dato ausente.
+        COUNT(DISTINCT nom_estab) FILTER (
+            WHERE nom_estab IS NOT NULL AND nom_estab <> '') AS n_nombres,
+        COUNT(DISTINCT codigo_act) FILTER (
+            WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS n_actividades,
+        COUNT(DISTINCT cve_ent || cve_mun) FILTER (
+            WHERE cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS n_municipios,
+        COUNT(DISTINCT direccion) FILTER (WHERE direccion IS NOT NULL) AS n_direcciones,
+        COUNT(DISTINCT per_ocu) FILTER (
+            WHERE per_ocu IS NOT NULL AND per_ocu <> '') AS n_estratos,
         -- Patron de presencia completo: de aqui el analisis deriva cualquier
-        -- medida de ausencia sin volver a los 82.9M de hechos.
+        -- medida de ausencia sin volver a los 82.9M de hechos. Es el unico
+        -- array que se queda: reconstruirlo exigiria rehacer el mapeo
+        -- periodo->indice, y son smallint de a lo mas veinte elementos.
         ARRAY_AGG(DISTINCT idx ORDER BY idx) AS cortes_idx,
         -- Cuanto de la identidad es observado frente a inferido.
         COUNT(DISTINCT idx) FILTER (WHERE origen = '{directo}') AS cortes_directo,
         COUNT(DISTINCT idx) FILTER (WHERE origen = '{propagado}') AS cortes_propagado,
         BOOL_OR(nom_cencom IS NOT NULL AND nom_cencom <> '') AS en_centro_comercial,
-        ARRAY_AGG(DISTINCT tipo_asent) FILTER (
-            WHERE tipo_asent IS NOT NULL AND tipo_asent <> '') AS tipos_asent,
         -- Contacto: UNION de todos los cortes, no el mas reciente. Para
         -- verificar un cierre sirve cualquier telefono que haya publicado.
-        ARRAY_AGG(DISTINCT telefono) FILTER (
-            WHERE telefono IS NOT NULL AND telefono <> '') AS telefonos,
-        ARRAY_AGG(DISTINCT correoelec) FILTER (
-            WHERE correoelec IS NOT NULL AND correoelec <> '') AS correos,
-        ARRAY_AGG(DISTINCT www) FILTER (WHERE www IS NOT NULL AND www <> '') AS sitios,
+        BOOL_OR(telefono IS NOT NULL AND telefono <> '') AS tiene_telefono,
+        BOOL_OR(correoelec IS NOT NULL AND correoelec <> '') AS tiene_correo,
+        BOOL_OR(www IS NOT NULL AND www <> '') AS tiene_sitio,
         -- Rectangulo envolvente: cota SUPERIOR del movimiento, ciega al
         -- orden. Se lee junto al desplazamiento neto de abajo.
         MIN(latitud) AS lat_min, MAX(latitud) AS lat_max,
@@ -226,7 +228,7 @@ representante AS (
     -- La fila con que el establecimiento "termino": el corte mas reciente,
     -- desempatado por id para que el resultado sea determinista.
     SELECT clee_resuelto, nom_estab, raz_social, codigo_act,
-           cve_ent, cve_mun, cod_postal, latitud, longitud, h3_cell_9,
+           cve_ent, cve_mun, cod_postal, tipo_asent, latitud, longitud, h3_cell_9,
            per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
            cve_loc, ageb, h3_cell_5,
            ROW_NUMBER() OVER (PARTITION BY clee_resuelto ORDER BY period DESC, id) AS rn
@@ -246,31 +248,25 @@ SELECT
     v.fecha_alta_date,
     CASE WHEN v.fecha_alta_date IS NULL THEN NULL
          ELSE (v.primer_periodo - v.fecha_alta_date) END AS dias_alta_a_primera,
-    v.nombres,
-    COALESCE(CARDINALITY(v.nombres), 0) AS n_nombres,
-    v.razones_sociales,
-    v.codigos_act,
-    COALESCE(CARDINALITY(v.codigos_act), 0) > 1 AS cambio_actividad,
     r.per_ocu, r.categoria_tamano, r.empleados_min, r.empleados_max,
-    v.estratos,
-    COALESCE(CARDINALITY(v.estratos), 0) > 1 AS cambio_tamano,
+    v.n_estratos > 1 AS cambio_tamano,
     -- Trayectoria de tamano: ultimo menos primero, en empleados. Respeta el
-    -- orden, asi que distingue crecer de encogerse -- que un array de
-    -- estratos no puede.
+    -- orden, asi que distingue crecer de encogerse -- que un conteo de
+    -- estratos distintos no puede.
     r.empleados_min - p.empleados_min_primera AS delta_empleados_min,
-    r.tipounieco, v.tipos_unieco,
+    r.tipounieco,
     r.cve_loc, r.ageb, r.h3_cell_5,
     COALESCE(v.en_centro_comercial, FALSE) AS en_centro_comercial,
     v.cortes_idx,
     COALESCE(v.cortes_directo, 0) AS cortes_directo,
     COALESCE(v.cortes_propagado, 0) AS cortes_propagado,
-    v.municipios,
-    COALESCE(CARDINALITY(v.municipios), 0) > 1 AS cambio_municipio,
-    v.cod_postales,
-    v.direcciones,
-    COALESCE(CARDINALITY(v.direcciones), 0) AS n_direcciones,
-    v.tipos_asent,
-    v.telefonos, v.correos, v.sitios,
+    v.n_nombres,
+    v.n_actividades > 1 AS cambio_actividad,
+    v.n_municipios > 1 AS cambio_municipio,
+    v.n_direcciones,
+    COALESCE(v.tiene_telefono, FALSE) AS tiene_telefono,
+    COALESCE(v.tiene_correo, FALSE) AS tiene_correo,
+    COALESCE(v.tiene_sitio, FALSE) AS tiene_sitio,
     p.lat_primera, p.lon_primera,
     COALESCE(v.n_posiciones, 0) AS n_posiciones,
     -- Neto: entre dos puntos REALES, respetando el orden temporal.
@@ -291,6 +287,7 @@ SELECT
         ))
     END AS dispersion_max_m,
     r.nom_estab, r.raz_social, r.codigo_act, r.cve_ent, r.cve_mun, r.cod_postal,
+    r.tipo_asent,
     r.latitud, r.longitud, r.h3_cell_9
 FROM ventana v
 JOIN primera p USING (clee_resuelto)
@@ -354,6 +351,46 @@ def construir_permanencia(conn: Connection, metodo: str, schema: str = DEFAULT_S
     return escritas
 
 
+def _vista_variantes_sql(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
+    """SQL de la vista que devuelve las variantes de un establecimiento.
+
+    Es el join que `permanencia_<metodo>` deliberadamente no materializa:
+    une los hechos con la tabla de identidad y deja una fila por corte, con
+    los campos que varían entre ellos.
+
+    Responde "¿qué nombres/domicilios/teléfonos tuvo ESTE establecimiento?".
+    Es barata para eso --`clee_resuelto` está indexado en la tabla de
+    identidad y el regreso a los hechos va por su llave primaria-- y cara si
+    se pide sin filtro, que es justo la consulta que el análisis no hace.
+
+    Args:
+        metodo: clave de `METODOS`.
+        schema: schema de las tablas y de la vista.
+
+    Returns:
+        str: `CREATE OR REPLACE VIEW` completo.
+    """
+    identidad = METODOS[metodo]
+    return f"""
+CREATE OR REPLACE VIEW {schema}.variantes_{metodo} AS
+SELECT
+    i.clee_resuelto, i.origen, e.period, e.id,
+    e.nom_estab, e.raz_social, e.codigo_act,
+    e.cve_ent, e.cve_mun, e.cve_loc, e.ageb, e.cod_postal,
+    ta.tipo_asent, e.nomb_asent, e.nom_vial, e.numero_ext, e.nom_cencom,
+    e.latitud, e.longitud, e.h3_cell_9,
+    ep.per_ocu, ep.categoria AS categoria_tamano,
+    tu.tipounieco,
+    e.telefono, e.correoelec, e.www
+FROM {schema}.establecimientos e
+JOIN {schema}.{identidad} i ON i.id = e.id AND i.period = e.period
+LEFT JOIN {schema}.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
+LEFT JOIN {schema}.denue_estratos_personal ep ON ep.id = e.per_ocu_id
+LEFT JOIN {schema}.denue_tipos_unidad_economica tu ON tu.id = e.tipounieco_id
+WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
+"""
+
+
 def _vista_sql(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
     """SQL de la vista que aplica la regla de cierre a un método.
 
@@ -390,8 +427,11 @@ FROM {schema}.{origen} p
 """
 
 
-def crear_vistas_estatus(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[str]:
-    """Crea o redefine la vista de estatus de cada método.
+def crear_vistas(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[str]:
+    """Crea o redefine las dos vistas de cada método.
+
+    `estatus_<metodo>` aplica la regla de cierre; `variantes_<metodo>`
+    devuelve los valores que la tabla resume en conteos.
 
     Idempotente: `CREATE OR REPLACE`. Se llama desde la migración y puede
     re-ejecutarse cuando cambie `CORTES_PARA_CIERRE`.
@@ -407,4 +447,6 @@ def crear_vistas_estatus(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list
     for metodo in METODOS:
         conn.execute(text(_vista_sql(metodo, schema)))
         creadas.append(f"{schema}.estatus_{metodo}")
+        conn.execute(text(_vista_variantes_sql(metodo, schema)))
+        creadas.append(f"{schema}.variantes_{metodo}")
     return creadas

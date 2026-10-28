@@ -54,7 +54,7 @@ def upgrade() -> None:
     Los imports de `src` van aqui adentro: al correr el CLI de alembic el
     `sys.path` lo arma `env.py`.
     """
-    from src.etl.loaders.permanencia import _vista_sql
+    from src.etl.loaders.permanencia import _vista_sql, _vista_variantes_sql
     from src.shared.db.base import Base
     from src.shared.db.models import permanencia  # noqa: F401  (puebla el metadata)
     from src.shared.enums import Layer
@@ -63,6 +63,7 @@ def upgrade() -> None:
 
     for metodo in METODOS:
         op.execute(f"DROP VIEW IF EXISTS {schema}.estatus_{metodo}")
+        op.execute(f"DROP VIEW IF EXISTS {schema}.variantes_{metodo}")
     for nombre in TABLAS:
         op.execute(f"DROP TABLE IF EXISTS {schema}.{nombre}")
 
@@ -75,7 +76,8 @@ def upgrade() -> None:
     # antes de aplicarla.
     for metodo in METODOS:
         op.execute(_vista_sql(metodo, schema))
-    print(f"   silver: {len(METODOS)} vistas de estatus de cierre")
+        op.execute(_vista_variantes_sql(metodo, schema))
+    print(f"   silver: {2 * len(METODOS)} vistas (estatus de cierre y variantes)")
 
     op.execute(f"DROP TABLE IF EXISTS {schema}.entidades_economicas")
     print("   silver.entidades_economicas eliminada (estaba vacia)")
@@ -92,5 +94,6 @@ def downgrade() -> None:
     schema = Layer.SILVER.value
     for metodo in METODOS:
         op.execute(f"DROP VIEW IF EXISTS {schema}.estatus_{metodo}")
+        op.execute(f"DROP VIEW IF EXISTS {schema}.variantes_{metodo}")
     for nombre in TABLAS:
         op.execute(f"DROP TABLE IF EXISTS {schema}.{nombre}")

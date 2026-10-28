@@ -140,6 +140,34 @@ consume el modelo de supervivencia.
 docker compose run --rm etl transform --only permanencia-radio
 docker compose run --rm etl transform --only permanencia-h3
 docker compose run --rm etl transform --only permanencia      # las dos
+
+Cada método va en su propia transacción: si h3 falla, lo que radio escribió
+se queda.
+
+### Ver las variantes de un establecimiento
+
+La tabla guarda **cuántas** variantes hubo (`n_nombres`, `n_direcciones`,
+`cambio_municipio`...); los valores salen de la vista:
+
+```sql
+-- nombres que tuvo
+SELECT DISTINCT nom_estab FROM silver.variantes_radio
+WHERE clee_resuelto = '14010000123456';
+
+-- contactos de una muestra, para el agente verificador
+SELECT clee_resuelto,
+       array_agg(DISTINCT telefono) FILTER (WHERE telefono <> '') AS telefonos,
+       array_agg(DISTINCT correoelec) FILTER (WHERE correoelec <> '') AS correos
+FROM silver.variantes_radio
+WHERE clee_resuelto = ANY(:muestra)
+GROUP BY clee_resuelto;
+```
+
+### Estatus de cierre
+
+```sql
+SELECT estatus, count(*) FROM silver.estatus_radio GROUP BY estatus;
+```
 ```
 
 Hay una por método, y cada una se construye por separado — pedir una no

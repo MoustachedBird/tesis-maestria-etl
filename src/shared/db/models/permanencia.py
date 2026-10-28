@@ -156,9 +156,6 @@ class PermanenciaMixin:
     empleados_max: Mapped[int | None] = mapped_column(
         Integer, comment="Cota superior de empleados del estrato mas reciente"
     )
-    estratos: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Estratos de personal distintos a lo largo de su ventana"
-    )
     cambio_tamano: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si cambio de estrato de personal entre cortes"
     )
@@ -177,9 +174,6 @@ class PermanenciaMixin:
     # con fuentes externas (un puesto ambulante no deja rastro digital).
     tipounieco: Mapped[str | None] = mapped_column(
         String, comment="Tipo de unidad economica en el corte mas reciente"
-    )
-    tipos_unieco: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Tipos de unidad economica distintos observados"
     )
 
     # ===== GEOGRAFIA FINA =====
@@ -224,66 +218,52 @@ class PermanenciaMixin:
         Integer, nullable=False, comment="Cortes en que la identidad se infirio por similitud"
     )
 
-    # ===== ALIAS Y VARIANTES =====
-    # No son adorno: son control de calidad de la resolucion de identidad.
-    # Un "establecimiento" que cambio de municipio Y de actividad es casi
-    # seguro una fusion de dos distintos. Y varias de estas columnas sirven
-    # como variables del modelo, no solo como diagnostico.
-    nombres: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Nombres distintos observados a lo largo de su ventana"
-    )
+    # ===== RESUMEN DE VARIANTES =====
+    # Conteos y banderas, no los valores: los valores mismos salen de la
+    # vista `silver.variantes_<metodo>`, que une los hechos con la tabla de
+    # identidad. Materializar los arrays duplicaria ~3-4 GB de datos que ese
+    # join ya entrega, y cargaria doce arrays mas al GROUP BY de 10M grupos.
+    #
+    # Lo que se queda son los ESCALARES, por dos razones: responden las
+    # preguntas agregadas sobre los 10M de un golpe ("cuantos cambiaron de
+    # nombre"), y son lo que un modelo puede consumir -- un `text[]` no entra
+    # a un arbol de decision sin codificar.
+    #
+    # Y no son adorno: un establecimiento que cambio de municipio Y de
+    # actividad es casi seguro una fusion indebida de la resolucion.
     n_nombres: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="Cuantos nombres distintos tuvo"
     )
-    razones_sociales: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Razones sociales distintas observadas"
-    )
-    codigos_act: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Codigos SCIAN distintos observados"
-    )
     cambio_actividad: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si cambio de actividad economica entre cortes"
-    )
-    municipios: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Municipios distintos observados, como cve_ent||cve_mun"
     )
     cambio_municipio: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         comment="True si cambio de municipio: la senal mas fuerte de fusion indebida",
     )
-    cod_postales: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Codigos postales distintos observados"
-    )
-    direcciones: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String),
-        comment=(
-            "Domicilios distintos, cada uno CONCATENADO: "
-            "'vialidad | numero | asentamiento | CP'. Concatenados y no un array "
-            "por componente, porque arrays paralelos pierden la correspondencia: "
-            "no se sabria que numero iba con que calle"
-        ),
-    )
     n_direcciones: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="Cuantos domicilios distintos tuvo"
     )
-    tipos_asent: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Tipos de asentamiento distintos observados"
-    )
 
-    # ===== CONTACTO: UNION, no el mas reciente =====
-    # Para verificar si un negocio cerro sirve CUALQUIER telefono que haya
-    # publicado, aunque fuera en 2016. Y la presencia de correo o sitio es a
-    # la vez variable del modelo --correlaciona con formalidad-- y predictor
-    # de si el negocio es verificable con fuentes externas.
-    telefonos: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Telefonos distintos publicados en cualquier corte"
+    # ===== CONTACTO: SI LO HUBO, no cual =====
+    # Banderas y no valores, por el mismo criterio que las variantes: los
+    # numeros y correos salen de la vista cuando se necesitan, que es para
+    # una muestra y no para los 10M.
+    #
+    # Son UNION sobre todos los cortes, no del mas reciente: para verificar
+    # si un negocio cerro sirve cualquier telefono que haya publicado, aunque
+    # fuera en 2016. Y la bandera por si misma es variable del modelo
+    # --correlaciona con formalidad-- y filtro de verificabilidad para el
+    # agente que busca en fuentes externas.
+    tiene_telefono: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si publico telefono en algun corte"
     )
-    correos: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Correos distintos publicados en cualquier corte"
+    tiene_correo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si publico correo en algun corte"
     )
-    sitios: Mapped[list[str] | None] = mapped_column(
-        ARRAY(String), comment="Sitios web distintos publicados en cualquier corte"
+    tiene_sitio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si publico sitio web en algun corte"
     )
 
     # ===== GEOGRAFIA: DOS MEDIDAS, QUE RESPONDEN COSAS DISTINTAS =====
@@ -339,6 +319,13 @@ class PermanenciaMixin:
     )
     cod_postal: Mapped[str | None] = mapped_column(
         String, comment="Codigo postal en el corte mas reciente"
+    )
+    tipo_asent: Mapped[str | None] = mapped_column(
+        String,
+        comment=(
+            "Tipo de asentamiento en el corte mas reciente (colonia, fraccionamiento, "
+            "pueblo...). El protocolo lo nombra como variable del establecimiento"
+        ),
     )
     latitud: Mapped[float | None] = mapped_column(Double, comment="Latitud del corte mas reciente")
     longitud: Mapped[float | None] = mapped_column(

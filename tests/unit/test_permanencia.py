@@ -1,9 +1,13 @@
-"""La tabla de permanencia: colapso por identidad, alias y censura.
+"""La tabla de permanencia: colapso por identidad, variantes y censura.
 
 Fija lo que el modelo de supervivencia consume: una fila por
 establecimiento, su ventana en el directorio, y los ingredientes con que se
-aplica la regla de cierre aguas abajo. Y los alias, que son control de
-calidad de la resolución de identidad.
+aplica la regla de cierre aguas abajo.
+
+Y fija el reparto entre la tabla y su vista: la tabla guarda CUÁNTAS
+variantes hubo --que es lo que responde las preguntas agregadas-- y la
+vista `variantes_<metodo>` devuelve cuáles fueron. `TestVistaVariantes` es
+la mitad que prueba que no se perdió nada al dejar de materializarlas.
 """
 
 from datetime import date
@@ -18,11 +22,16 @@ from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.permanencia import (
     METODOS,
     construir_permanencia,
+    crear_vistas,
     tabla_destino,
 )
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
-from src.shared.db.models.silver import EstratoPersonal, TipoUnidadEconomica
+from src.shared.db.models.silver import (
+    EstratoPersonal,
+    TipoAsentamiento,
+    TipoUnidadEconomica,
+)
 from src.shared.db.partitions import create_partition
 from src.shared.enums import EstatusNegocio, OrigenClee
 
@@ -52,6 +61,7 @@ CORTES = [date(2019, 11, 1), date(2020, 4, 1), date(2020, 11, 1), date(2021, 5, 
 MICRO = 2  # "0 A 5 PERSONAS", categoria Micro, empleados_min = 0
 PEQUENA = 4  # "11 A 30 PERSONAS", categoria Small, empleados_min = 11
 FIJO = 2  # tipo de unidad economica
+COLONIA = 8  # tipo de asentamiento, igual para todo el escenario
 
 OBSERVACIONES = [
     # id, corte, identidad, nombre, act, ent, mun, lat, lon,
@@ -400,6 +410,7 @@ def conn(silver_engine, metodo):
         sesion.add_all(
             [EstratoPersonal(**r) for r in build_estrato_rows()]
             + [TipoUnidadEconomica(**r) for r in build_rows()["denue_tipos_unidad_economica"]]
+            + [TipoAsentamiento(**r) for r in build_rows()["denue_tipos_asentamiento"]]
         )
         sesion.commit()
 
@@ -411,25 +422,10 @@ def conn(silver_engine, metodo):
         copy_dataframe(
             conn,
             pl.DataFrame(
-                [
-                    (
-                        o[0],
-                        o[1],
-                        o[3],
-                        o[4],
-                        o[5],
-                        o[6],
-                        o[7],
-                        o[8],
-                        o[9],
-                        o[10],
-                        o[11],
-                        o[12],
-                        o[13],
-                        o[14],
-                    )
-                    for o in OBSERVACIONES
-                ],
+                # Todo menos `identidad` (indice 2), que va en la otra tabla.
+                # El asentamiento es constante: solo se prueba que la tabla y
+                # la vista lo resuelvan a su etiqueta, no que varie.
+                [(o[0], o[1], *o[3:], COLONIA) for o in OBSERVACIONES],
                 schema={
                     "id": pl.Utf8,
                     "period": pl.Date,
@@ -448,6 +444,7 @@ def conn(silver_engine, metodo):
                     "fecha_alta_date": pl.Date,
                     "per_ocu_id": pl.Int64,
                     "tipounieco_id": pl.Int64,
+                    "tipo_asent_id": pl.Int64,
                 },
                 orient="row",
             ),
@@ -477,6 +474,9 @@ def conn(silver_engine, metodo):
             ),
             identidad,
         )
+        # Las vistas no salen de `create_all`: las crea la migracion, y sin
+        # ellas no hay como probar ni el estatus ni las variantes.
+        crear_vistas(conn)
         yield conn
 
 
@@ -569,13 +569,22 @@ class TestCensura:
         assert {"huecos", "cortes_tras_ultimo"} <= columnas
 
 
+def variantes(conn, metodo: str, clee: str) -> list[dict]:
+    """Las filas que la vista de variantes devuelve para una identidad."""
+    filas = conn.execute(
+        text(f"SELECT * FROM silver.variantes_{metodo} WHERE clee_resuelto = :c ORDER BY period"),
+        {"c": clee},
+    ).mappings()
+    return [dict(f) for f in filas]
+
+
 @pytest.mark.unit
-class TestAliasYVariantes:
-    def test_recoge_los_nombres_distintos(self, conn, metodo):
+class TestResumenDeVariantes:
+    """La tabla guarda CUÁNTAS variantes hubo, no cuáles."""
+
+    def test_cuenta_los_nombres_distintos(self, conn, metodo):
         construir_permanencia(conn, metodo)
-        hueco = permanencia(conn, metodo)["C_HUECO"]
-        assert sorted(hueco["nombres"]) == ["TACOS DON JUAN", "TAQUERIA DON JUAN"]
-        assert hueco["n_nombres"] == 2
+        assert permanencia(conn, metodo)["C_HUECO"]["n_nombres"] == 2
 
     def test_un_solo_nombre_no_es_variante(self, conn, metodo):
         construir_permanencia(conn, metodo)
@@ -587,33 +596,44 @@ class TestAliasYVariantes:
         mudo = permanencia(conn, metodo)["C_MUDO"]
         assert mudo["cambio_municipio"] is True
         assert mudo["cambio_actividad"] is True
-        assert sorted(mudo["municipios"]) == ["09015", "14039"]
 
-    def test_la_direccion_va_concatenada_no_en_fragmentos(self, conn, metodo):
-        """Un array por componente perdería qué número va con qué calle."""
+    def test_cuenta_los_domicilios_distintos(self, conn, metodo):
         construir_permanencia(conn, metodo)
-        hueco = permanencia(conn, metodo)["C_HUECO"]
-        assert hueco["n_direcciones"] == 2
-        assert sorted(hueco["direcciones"]) == [
-            "AV JUAREZ | 123 | CENTRO | 44100",
-            "AV JUAREZ | 125 | CENTRO | 44200",
-        ]
+        assert permanencia(conn, metodo)["C_HUECO"]["n_direcciones"] == 2
 
     def test_el_contacto_es_la_union_no_el_mas_reciente(self, conn, metodo):
         """Para verificar un cierre sirve cualquier teléfono que publicó.
 
-        `C_HUECO` trae teléfono solo en el primer corte; si se tomara el del
-        representante se perdería.
+        `C_HUECO` trae teléfono solo en el primer corte; si la bandera se
+        tomara del representante quedaría en falso.
         """
         construir_permanencia(conn, metodo)
         hueco = permanencia(conn, metodo)["C_HUECO"]
-        assert hueco["telefonos"] == ["3312345678"]
-        assert hueco["correos"] == ["hola@donjuan.mx"]
+        assert hueco["tiene_telefono"] is True
+        assert hueco["tiene_correo"] is True
 
-    def test_sin_contacto_el_array_queda_nulo_no_con_vacios(self, conn, metodo):
-        """Una cadena vacía no es una variante, es un dato ausente."""
+    def test_sin_contacto_la_bandera_es_falsa_no_nula(self, conn, metodo):
+        """Una cadena vacía no es un contacto, es un dato ausente."""
         construir_permanencia(conn, metodo)
-        assert permanencia(conn, metodo)["C_VIVE"]["telefonos"] is None
+        assert permanencia(conn, metodo)["C_VIVE"]["tiene_telefono"] is False
+
+    def test_no_guarda_los_valores_solo_los_conteos(self, conn, metodo):
+        """Materializarlos duplicaría lo que el join ya entrega."""
+        columnas = {c.name for c in get_table(tabla_destino(metodo)).columns}
+        assert not columnas & {
+            "nombres",
+            "razones_sociales",
+            "codigos_act",
+            "municipios",
+            "direcciones",
+            "telefonos",
+            "correos",
+            "sitios",
+            "estratos",
+            "tipos_unieco",
+            "tipos_asent",
+            "cod_postales",
+        }
 
     def test_no_marca_cambio_cuando_no_se_movio(self, conn, metodo):
         construir_permanencia(conn, metodo)
@@ -783,6 +803,54 @@ class TestVistaEstatus:
         columnas = {c.name for c in get_table(tabla_destino(metodo)).columns}
         assert "estatus" not in columnas
         assert "cerrado" not in columnas
+
+
+@pytest.mark.unit
+class TestVistaVariantes:
+    """Lo que la tabla no materializa, la vista lo recupera.
+
+    Es la mitad que justifica guardar solo conteos: si el join no devolviera
+    los valores, la información se habría perdido de verdad.
+    """
+
+    def test_devuelve_los_nombres_que_tuvo(self, conn, metodo):
+        nombres = {v["nom_estab"] for v in variantes(conn, metodo, "C_HUECO")}
+        assert nombres == {"TACOS DON JUAN", "TAQUERIA DON JUAN"}
+
+    def test_devuelve_los_municipios_que_tuvo(self, conn, metodo):
+        mudo = variantes(conn, metodo, "C_MUDO")
+        assert {v["cve_ent"] + v["cve_mun"] for v in mudo} == {"09015", "14039"}
+
+    def test_devuelve_el_domicilio_por_componentes_y_por_corte(self, conn, metodo):
+        """Una fila por corte: qué número va con qué calle no se pierde."""
+        hueco = variantes(conn, metodo, "C_HUECO")
+        domicilios = {(v["nom_vial"], v["numero_ext"], v["cod_postal"]) for v in hueco}
+        assert domicilios == {
+            ("AV JUAREZ", "123", "44100"),
+            ("AV JUAREZ", "125", "44200"),
+        }
+
+    def test_devuelve_el_contacto_de_cualquier_corte(self, conn, metodo):
+        """El teléfono de 2019 sigue sirviendo para verificar un cierre."""
+        telefonos = {v["telefono"] for v in variantes(conn, metodo, "C_HUECO")}
+        assert "3312345678" in telefonos
+
+    def test_una_fila_por_corte_observado(self, conn, metodo):
+        """El grano de la vista es la observación, no el establecimiento."""
+        construir_permanencia(conn, metodo)
+        observados = permanencia(conn, metodo)["C_HUECO"]["cortes_observados"]
+        assert len(variantes(conn, metodo, "C_HUECO")) == observados
+
+    def test_resuelve_los_catalogos_a_sus_etiquetas(self, conn, metodo):
+        """Sin esto habría que volver a unir los catálogos a mano."""
+        vive = variantes(conn, metodo, "C_VIVE")[0]
+        assert vive["categoria_tamano"] == "Micro"
+        assert vive["tipo_asent"] == "COLONIA"
+
+    def test_no_devuelve_observaciones_sin_identidad(self, conn, metodo):
+        """La vista es el mismo filtro que la tabla: sin CLEE no hay fila."""
+        conn.execute(text(f"DELETE FROM silver.{METODOS[metodo]}"))
+        assert variantes(conn, metodo, "C_VIVE") == []
 
 
 @pytest.mark.unit

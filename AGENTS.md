@@ -57,7 +57,7 @@ periodo completo — todo código de matching debe tolerarlo
 ### Regla de corridas largas — SIEMPRE `caffeinate`
 
 **Todo comando del pipeline con tiempo de ejecución largo (ingest masivo,
-normalize-dates, resolución CLEE, build-entidades, load) se lanza con
+resolución CLEE, permanencia, load) se lanza con
 `caffeinate -dims` antepuesto:**
 
 ```bash
@@ -749,37 +749,75 @@ query patrón negocio-intervalo, limitaciones): `docs/cruce_denue_sesnsp.md`.
 
 ---
 
-## N3: Dimensión `entidades_economicas`
+## N3: Permanencia (`silver.permanencia_<metodo>`)
 
-Una fila por identidad de negocio resuelta (`clee_propagado_radio`), no
-por observación-periodo — la unidad de análisis de supervivencia/
-mortalidad de la tesis. Preparada en código (`loaders/entidades.py`,
-migración `a3000entidades`); **pendiente de aplicar** hasta que termine la
-re-resolución CLEE con el código actual (los ids `NEW_*` van a cambiar).
+Una fila por identidad resuelta, no por observación-periodo: la unidad de
+análisis de supervivencia de la tesis.
 
-- **Construcción**: `build_entidades_economicas(conn)` agrega
-  `establecimientos` por `clee_propagado_radio` — atributos del periodo
-  MÁS RECIENTE (desempate determinista por `id`), `primer_periodo`/
-  `ultimo_periodo`/`n_periodos` del rango observado,
-  `fecha_alta_date` = mínima conocida, `es_sintetica` = prefijo `NEW_`.
-- **Rebuild total siempre** (DROP + CREATE + INSERT transaccional): los
-  ids sintéticos no son estables entre corridas `--force`, así que la
-  dimensión NUNCA se actualiza incrementalmente — se reconstruye después
-  de cada re-resolución.
-- **Sin FKs a catálogos a propósito**: artefacto derivado de una tabla
-  que ya garantiza esos dominios; agregar FKs solo encarecería el
-  INSERT masivo sin aportar integridad nueva.
-- **Se construye en Silver** (no en Gold pese a que N3 originalmente lo
-  proponía ahí): `docker compose run --rm etl load` la copia a Gold sin lógica adicional, igual
-  que el resto del esquema.
-
-```bash
-docker compose run --rm etl build-entidades   # correr DESPUES de clee-resolution-radio --force
-# equivalente: uv run python -m src.etl.main build-entidades
+```
+silver.establecimientos    82.9M   una fila cada vez que INEGI lo vio
+silver.permanencia_<m>     ~10M    una fila por establecimiento
 ```
 
-Log del stage: `data/etl_entidades.log`. Tracking: job `entidades_build`
-en metadata (`process_tasks`).
+**Una tabla por método** (`permanencia_radio`, `permanencia_h3`), igual
+que `clee_radio`/`clee_h3`: el método va en el `FROM`, así que una
+consulta no puede mezclarlos por descuido. Con una sola tabla y columna
+`metodo`, un `WHERE` olvidado duplica cada establecimiento y los agregados
+salen al doble, en silencio.
+
+### Qué guarda y qué no
+
+- **Ventana observada**: `primer_periodo`/`ultimo_periodo` para reportar,
+  `idx_primer`/`idx_ultimo` para calcular. Los cortes distan entre 4 y 12
+  meses, así que el tiempo se mide en PERIODOS y no en días.
+  `duracion_periodos` es la variable de tiempo del modelo.
+- **Ingredientes de censura, no el veredicto**: `cortes_tras_ultimo`,
+  `huecos`, `presente_desde_el_inicio` (censura por la izquierda). El
+  estatus de cierre vive en la vista `silver.estatus_<metodo>` porque el
+  protocolo llama *preliminar* a la regla: redefinir una vista cuesta un
+  segundo, reconstruir una columna cuesta 10M de filas.
+- **Variables del establecimiento** que el protocolo nombra: tamaño
+  (`categoria_tamano`, `empleados_min/max`, `delta_empleados_min`),
+  `tipounieco`, `tipo_asent`, `codigo_act`, geografía (`cve_ent`,
+  `cve_mun`, `cve_loc`, `ageb`, `h3_cell_5/9`).
+- **Confianza en la identidad**: `cortes_directo`/`cortes_propagado`
+  miden cuánto de la identidad es observado frente a inferido.
+- **Cuántas variantes hubo, no cuáles**: `n_nombres`, `n_direcciones`,
+  `cambio_municipio`, `cambio_actividad`, `tiene_telefono`... Los valores
+  salen de la vista `silver.variantes_<metodo>`, que es el mismo join sin
+  agregar. Materializarlos como arrays duplicaría ~3-4 GB para ahorrar un
+  join barato justo en el caso en que se necesita —un establecimiento, o
+  una muestra. El único array que se queda es `cortes_idx`, porque
+  reconstruirlo exige rehacer el mapeo periodo→índice.
+
+### Las dos vistas
+
+| Vista | Grano | Para qué |
+|---|---|---|
+| `silver.estatus_<metodo>` | establecimiento | Aplica la regla de cierre (`CORTES_PARA_CIERRE = 2`) y añade `reaparecio` |
+| `silver.variantes_<metodo>` | observación | Los nombres, domicilios y contactos que tuvo, con los catálogos ya resueltos |
+
+```sql
+-- agregado sobre los 10M: lo responde la tabla
+SELECT count(*) FROM silver.permanencia_radio WHERE n_nombres > 1;
+
+-- detalle de uno: lo responde la vista
+SELECT DISTINCT nom_estab FROM silver.variantes_radio
+WHERE clee_resuelto = '14010000123456';
+```
+
+**Rebuild total siempre**: los ids sintéticos `NEW_*` no son estables
+entre corridas, así que no hay nada que preservar. Cada método va en su
+propia transacción, para que una falla en h3 no tire lo que radio
+construyó.
+
+```bash
+docker compose run --rm etl transform --only permanencia-radio
+docker compose run --rm etl transform --only permanencia-h3
+docker compose run --rm etl transform --only permanencia      # las dos
+```
+
+Log del stage: `data/etl_permanencia.log`.
 
 ---
 
@@ -1035,7 +1073,6 @@ docker compose run --rm etl transform --only clee-radio --force
 | `docker compose run --rm etl transform` | DENUE + SESNSP → Silver. `--period 03_2018` carga un corte solo |
 | `docker compose run --rm etl load` | Silver → Gold (solo acepta `--force`) |
 | `docker compose run --rm etl pipeline` | `[Extract →] Transform → Load` |
-| `docker compose run --rm etl build-entidades` | Dimensión N3; correr DESPUÉS de la resolución CLEE |
 | `docker compose run --rm etl retry` | **Placeholder**: hoy solo imprime un aviso |
 
 ### Evaluación Fase 7
@@ -1097,7 +1134,6 @@ Todo lo que va dentro de `ARGS="..."`. Los booleanos son flags de Typer
 | | `--only <token>` (repetible) | — | Aquí el token `load` SÍ aplica |
 | | `--headless/--no-headless` | ON | Solo si `--extract` |
 | | `--force` / `-f` | OFF | Reprocesa todo |
-| `build-entidades` | *(sin flags)* | — | Rebuild completo de `entidades_economicas` |
 | `retry` | *(sin flags)* | — | Placeholder |
 
 ### Flags del script de evaluación (`scripts/evaluate_masked_clee.py`)
@@ -1187,7 +1223,8 @@ caffeinate -dims docker compose run --rm etl transform ARGS="--no-clee-resolutio
 
 # Re-resolver CLEE radio y reconstruir lo que depende de esa columna:
 caffeinate -dims docker compose run --rm etl transform ARGS="--only clee-radio --force"
-docker compose run --rm etl build-entidades && docker compose run --rm etl load
+docker compose run --rm etl transform --only permanencia-radio
+docker compose run --rm etl load
 
 # Solo promover Silver -> Gold dentro del comando global:
 docker compose run --rm etl pipeline ARGS="--only load"          # equivalente a `docker compose run --rm etl load`
