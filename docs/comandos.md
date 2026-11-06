@@ -140,6 +140,7 @@ consume el modelo de supervivencia.
 docker compose run --rm etl transform --only permanencia-radio
 docker compose run --rm etl transform --only permanencia-h3
 docker compose run --rm etl transform --only permanencia      # las dos
+```
 
 Cada método va en su propia transacción: si h3 falla, lo que radio escribió
 se queda.
@@ -147,27 +148,40 @@ se queda.
 ### Ver las variantes de un establecimiento
 
 La tabla guarda **cuántas** variantes hubo (`n_nombres`, `n_direcciones`,
-`cambio_municipio`...); los valores salen de la vista:
+`cambio_municipio`...); los valores se recuperan volviendo a los hechos por
+la tabla de identidad:
 
 ```sql
 -- nombres que tuvo
-SELECT DISTINCT nom_estab FROM silver.variantes_radio
-WHERE clee_resuelto = '14010000123456';
+SELECT DISTINCT e.nom_estab
+FROM silver.clee_radio i
+JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
+WHERE i.clee_resuelto = '14010000123456';
 
 -- contactos de una muestra, para el agente verificador
-SELECT clee_resuelto,
-       array_agg(DISTINCT telefono) FILTER (WHERE telefono <> '') AS telefonos,
-       array_agg(DISTINCT correoelec) FILTER (WHERE correoelec <> '') AS correos
-FROM silver.variantes_radio
-WHERE clee_resuelto = ANY(:muestra)
-GROUP BY clee_resuelto;
+SELECT i.clee_resuelto,
+       array_agg(DISTINCT e.telefono) FILTER (WHERE e.telefono <> '') AS telefonos,
+       array_agg(DISTINCT e.correoelec) FILTER (WHERE e.correoelec <> '') AS correos
+FROM silver.clee_radio i
+JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
+WHERE i.clee_resuelto = ANY(:muestra)
+GROUP BY i.clee_resuelto;
 ```
 
 ### Estatus de cierre
 
+No está almacenado: la regla es preliminar, así que el umbral va en la
+consulta (ver `AGENTS.md` §N3).
+
 ```sql
-SELECT estatus, count(*) FROM silver.estatus_radio GROUP BY estatus;
-```
+SELECT CASE
+           WHEN cortes_tras_ultimo = 0 THEN 'ACTIVO'
+           WHEN cortes_tras_ultimo >= 2 THEN 'CERRADO'
+           ELSE 'INCIERTO'
+       END AS estatus,
+       count(*)
+FROM silver.permanencia_radio
+GROUP BY 1;
 ```
 
 Hay una por método, y cada una se construye por separado — pedir una no

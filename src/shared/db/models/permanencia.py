@@ -219,9 +219,9 @@ class PermanenciaMixin:
     )
 
     # ===== RESUMEN DE VARIANTES =====
-    # Conteos y banderas, no los valores: los valores mismos salen de la
-    # vista `silver.variantes_<metodo>`, que une los hechos con la tabla de
-    # identidad. Materializar los arrays duplicaria ~3-4 GB de datos que ese
+    # Conteos y banderas, no los valores: los valores mismos se recuperan
+    # uniendo `clee_resuelto` con la tabla de identidad y de ahi a los
+    # hechos. Materializar los arrays duplicaria ~3-4 GB de datos que ese
     # join ya entrega, y cargaria doce arrays mas al GROUP BY de 10M grupos.
     #
     # Lo que se queda son los ESCALARES, por dos razones: responden las

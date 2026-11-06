@@ -16,7 +16,14 @@ para ahorrar un join que es barato justo en el caso en que se necesita --un
 establecimiento, o una muestra de ellos. Lo que sí se materializa son los
 escalares (`n_nombres`, `cambio_municipio`, ...), porque esos responden las
 preguntas agregadas sobre los 10M de un golpe y son lo que el modelo puede
-consumir. Para los valores está la vista `silver.variantes_<metodo>`.
+consumir. Los valores se recuperan uniendo `clee_resuelto` con la tabla de
+identidad y de ahí a los hechos; `AGENTS.md` §N3 trae la consulta.
+
+**Tampoco guarda el veredicto de cierre**, que se deriva de
+`cortes_tras_ultimo` con un `CASE` en la consulta que lo necesite. El
+protocolo llama preliminar a la regla, así que el umbral vive donde se
+pregunta y no en el esquema: cambiarlo no debe costar 10M de filas ni un
+`CREATE OR REPLACE`.
 """
 
 from __future__ import annotations
@@ -29,7 +36,7 @@ from sqlalchemy.engine import Connection
 
 from src.shared.db.base import DEFAULT_SCHEMA
 from src.shared.db.partitions import existing_partitions
-from src.shared.enums import EstatusNegocio, OrigenClee
+from src.shared.enums import OrigenClee
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_permanencia.log"))
@@ -42,19 +49,6 @@ METODOS: dict[str, str] = {
 
 El destino es `permanencia_<metodo>`. Agregar un método es una entrada aquí
 más su tabla, sin tocar el SQL.
-"""
-
-CORTES_PARA_CIERRE = 2
-"""Cortes consecutivos de ausencia que la regla toma como cierre.
-
-Viene del protocolo: "se considerará cerrado el establecimiento que deja de
-aparecer en dos cortes consecutivos y no reaparece después, lo que reduce el
-riesgo de confundir un cierre con una omisión del directorio a costa de
-fechar el evento con menor precisión".
-
-**La regla es preliminar** y de ahí que viva aquí y se materialice en una
-VISTA en vez de una columna: cambiar el umbral redefine la vista en un
-segundo, mientras que una columna obligaría a reconstruir 10M de filas.
 """
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -179,7 +173,7 @@ ventana AS (
         COUNT(DISTINCT idx) AS cortes_observados,
         MIN(fecha_alta_date) AS fecha_alta_date,
         -- Resumen de variantes: CUANTAS hubo, no cuales. Los valores salen de
-        -- la vista `variantes_<metodo>`, que es este mismo join sin agregar.
+        -- este mismo join sin agregar, filtrando por clee_resuelto.
         -- El FILTER descarta nulos y cadenas vacias: un '' no es una
         -- variante, es un dato ausente.
         COUNT(DISTINCT nom_estab) FILTER (
@@ -349,104 +343,3 @@ def construir_permanencia(conn: Connection, metodo: str, schema: str = DEFAULT_S
         logger.info(f"   ✅ {destino}: {escritas:,} establecimientos")
 
     return escritas
-
-
-def _vista_variantes_sql(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
-    """SQL de la vista que devuelve las variantes de un establecimiento.
-
-    Es el join que `permanencia_<metodo>` deliberadamente no materializa:
-    une los hechos con la tabla de identidad y deja una fila por corte, con
-    los campos que varían entre ellos.
-
-    Responde "¿qué nombres/domicilios/teléfonos tuvo ESTE establecimiento?".
-    Es barata para eso --`clee_resuelto` está indexado en la tabla de
-    identidad y el regreso a los hechos va por su llave primaria-- y cara si
-    se pide sin filtro, que es justo la consulta que el análisis no hace.
-
-    Args:
-        metodo: clave de `METODOS`.
-        schema: schema de las tablas y de la vista.
-
-    Returns:
-        str: `CREATE OR REPLACE VIEW` completo.
-    """
-    identidad = METODOS[metodo]
-    return f"""
-CREATE OR REPLACE VIEW {schema}.variantes_{metodo} AS
-SELECT
-    i.clee_resuelto, i.origen, e.period, e.id,
-    e.nom_estab, e.raz_social, e.codigo_act,
-    e.cve_ent, e.cve_mun, e.cve_loc, e.ageb, e.cod_postal,
-    ta.tipo_asent, e.nomb_asent, e.nom_vial, e.numero_ext, e.nom_cencom,
-    e.latitud, e.longitud, e.h3_cell_9,
-    ep.per_ocu, ep.categoria AS categoria_tamano,
-    tu.tipounieco,
-    e.telefono, e.correoelec, e.www
-FROM {schema}.establecimientos e
-JOIN {schema}.{identidad} i ON i.id = e.id AND i.period = e.period
-LEFT JOIN {schema}.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
-LEFT JOIN {schema}.denue_estratos_personal ep ON ep.id = e.per_ocu_id
-LEFT JOIN {schema}.denue_tipos_unidad_economica tu ON tu.id = e.tipounieco_id
-WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
-"""
-
-
-def _vista_sql(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
-    """SQL de la vista que aplica la regla de cierre a un método.
-
-    El estatus es una VISTA y no una columna de `permanencia_<metodo>`
-    porque la regla es preliminar: `docs/findings.md` §2 mide que la tasa de
-    desaparición oscila por un factor de 400 entre pares de cortes, lo que
-    sugiere que buena parte de las ausencias son reasignación de claves. Si
-    la validación externa mueve el umbral, redefinir una vista cuesta un
-    segundo y reconstruir una columna cuesta 10M de filas.
-
-    `reaparecio` va en la vista porque cambia cómo se lee el estatus: un
-    establecimiento que ya desapareció y volvió demostró, para sí mismo, que
-    una ausencia no implica cierre.
-
-    Args:
-        metodo: clave de `METODOS`.
-        schema: schema de la tabla y de la vista.
-
-    Returns:
-        str: `CREATE OR REPLACE VIEW` completo.
-    """
-    origen = tabla_destino(metodo)
-    return f"""
-CREATE OR REPLACE VIEW {schema}.estatus_{metodo} AS
-SELECT
-    p.*,
-    CASE
-        WHEN p.cortes_tras_ultimo = 0 THEN '{EstatusNegocio.ACTIVO.value}'
-        WHEN p.cortes_tras_ultimo >= {CORTES_PARA_CIERRE} THEN '{EstatusNegocio.CERRADO.value}'
-        ELSE '{EstatusNegocio.INCIERTO.value}'
-    END AS estatus,
-    p.huecos > 0 AS reaparecio
-FROM {schema}.{origen} p
-"""
-
-
-def crear_vistas(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[str]:
-    """Crea o redefine las dos vistas de cada método.
-
-    `estatus_<metodo>` aplica la regla de cierre; `variantes_<metodo>`
-    devuelve los valores que la tabla resume en conteos.
-
-    Idempotente: `CREATE OR REPLACE`. Se llama desde la migración y puede
-    re-ejecutarse cuando cambie `CORTES_PARA_CIERRE`.
-
-    Args:
-        conn: conexión con permisos de DDL.
-        schema: schema de las tablas y vistas.
-
-    Returns:
-        list[str]: nombres de las vistas creadas.
-    """
-    creadas = []
-    for metodo in METODOS:
-        conn.execute(text(_vista_sql(metodo, schema)))
-        creadas.append(f"{schema}.estatus_{metodo}")
-        conn.execute(text(_vista_variantes_sql(metodo, schema)))
-        creadas.append(f"{schema}.variantes_{metodo}")
-    return creadas

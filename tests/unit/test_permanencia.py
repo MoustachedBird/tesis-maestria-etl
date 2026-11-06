@@ -4,10 +4,9 @@ Fija lo que el modelo de supervivencia consume: una fila por
 establecimiento, su ventana en el directorio, y los ingredientes con que se
 aplica la regla de cierre aguas abajo.
 
-Y fija el reparto entre la tabla y su vista: la tabla guarda CUÁNTAS
-variantes hubo --que es lo que responde las preguntas agregadas-- y la
-vista `variantes_<metodo>` devuelve cuáles fueron. `TestVistaVariantes` es
-la mitad que prueba que no se perdió nada al dejar de materializarlas.
+La tabla guarda CUÁNTAS variantes hubo, que es lo que responde las preguntas
+agregadas. `TestValoresRecuperables` es la mitad que prueba que no se perdió
+nada al dejar de materializarlas: el join a los hechos los devuelve.
 """
 
 from datetime import date
@@ -22,7 +21,6 @@ from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.permanencia import (
     METODOS,
     construir_permanencia,
-    crear_vistas,
     tabla_destino,
 )
 from src.shared.db.base import get_table
@@ -33,7 +31,7 @@ from src.shared.db.models.silver import (
     TipoUnidadEconomica,
 )
 from src.shared.db.partitions import create_partition
-from src.shared.enums import EstatusNegocio, OrigenClee
+from src.shared.enums import OrigenClee
 
 pytestmark = pytest.mark.postgres
 
@@ -474,9 +472,6 @@ def conn(silver_engine, metodo):
             ),
             identidad,
         )
-        # Las vistas no salen de `create_all`: las crea la migracion, y sin
-        # ellas no hay como probar ni el estatus ni las variantes.
-        crear_vistas(conn)
         yield conn
 
 
@@ -570,12 +565,54 @@ class TestCensura:
 
 
 def variantes(conn, metodo: str, clee: str) -> list[dict]:
-    """Las filas que la vista de variantes devuelve para una identidad."""
+    """Los valores que tuvo una identidad, corte por corte.
+
+    Es la consulta que sustituyó a la vista `variantes_<metodo>`: parte de
+    la identidad, filtra la tabla del método por ella y regresa a los hechos
+    por su llave primaria `(id, period)`. Vive aquí --y no en el código-- a
+    propósito: es la referencia ejecutable de lo que `AGENTS.md` §N3
+    documenta, y lo que prueba que no se perdió nada al no materializarla.
+    """
     filas = conn.execute(
-        text(f"SELECT * FROM silver.variantes_{metodo} WHERE clee_resuelto = :c ORDER BY period"),
+        text(f"""
+        SELECT i.period, e.nom_estab, e.raz_social, e.codigo_act,
+               e.cve_ent, e.cve_mun, e.cod_postal,
+               e.nom_vial, e.numero_ext, e.nomb_asent,
+               e.telefono, e.correoelec, e.www,
+               ep.categoria AS categoria_tamano, ta.tipo_asent
+        FROM silver.{METODOS[metodo]} i
+        JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
+        LEFT JOIN silver.denue_estratos_personal ep ON ep.id = e.per_ocu_id
+        LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
+        WHERE i.clee_resuelto = :c
+        ORDER BY i.period
+        """),
         {"c": clee},
     ).mappings()
     return [dict(f) for f in filas]
+
+
+def estatus(conn, metodo: str, cortes_para_cierre: int = 2) -> dict[str, dict]:
+    """La regla de cierre aplicada sobre la tabla, en la consulta.
+
+    El umbral es un parámetro de la consulta y no una constante del
+    esquema: el protocolo llama preliminar a la regla, así que moverlo no
+    debe costar ni una columna ni un `CREATE OR REPLACE`.
+    """
+    filas = conn.execute(
+        text(f"""
+        SELECT clee_resuelto,
+               CASE
+                   WHEN cortes_tras_ultimo = 0 THEN 'ACTIVO'
+                   WHEN cortes_tras_ultimo >= :umbral THEN 'CERRADO'
+                   ELSE 'INCIERTO'
+               END AS estatus,
+               huecos > 0 AS reaparecio
+        FROM silver.{tabla_destino(metodo)}
+        """),
+        {"umbral": cortes_para_cierre},
+    ).mappings()
+    return {f["clee_resuelto"]: dict(f) for f in filas}
 
 
 @pytest.mark.unit
@@ -770,31 +807,36 @@ class TestPatronDePresencia:
 
 
 @pytest.mark.unit
-class TestVistaEstatus:
-    """El estatus es una vista, no una columna: la regla es preliminar."""
-
-    def estatus(self, conn, metodo: str) -> dict[str, dict]:
-        filas = conn.execute(text(f"SELECT * FROM silver.estatus_{metodo}")).mappings()
-        return {f["clee_resuelto"]: dict(f) for f in filas}
+class TestReglaDeCierre:
+    """La regla se aplica en la consulta: la tabla da los ingredientes."""
 
     def test_presente_en_el_ultimo_corte_es_activo(self, conn, metodo):
         """ACTIVO no es "sigue abierto": es censura por la derecha."""
         construir_permanencia(conn, metodo)
-        assert self.estatus(conn, metodo)["C_VIVE"]["estatus"] == EstatusNegocio.ACTIVO
+        assert estatus(conn, metodo)["C_VIVE"]["estatus"] == "ACTIVO"
 
     def test_dos_ausencias_son_cierre(self, conn, metodo):
         construir_permanencia(conn, metodo)
-        assert self.estatus(conn, metodo)["C_CERRO"]["estatus"] == EstatusNegocio.CERRADO
+        assert estatus(conn, metodo)["C_CERRO"]["estatus"] == "CERRADO"
 
     def test_una_sola_ausencia_es_incierto(self, conn, metodo):
         """Una ausencia no distingue un cierre de una omisión del directorio."""
         construir_permanencia(conn, metodo)
-        assert self.estatus(conn, metodo)["C_HUECO"]["estatus"] == EstatusNegocio.INCIERTO
+        assert estatus(conn, metodo)["C_HUECO"]["estatus"] == "INCIERTO"
+
+    def test_mover_el_umbral_no_toca_la_tabla(self, conn, metodo):
+        """El protocolo llama preliminar a la regla: cambiarla es gratis.
+
+        Con umbral 1, la ausencia única de `C_HUECO` ya cuenta como cierre
+        sin reconstruir una sola fila.
+        """
+        construir_permanencia(conn, metodo)
+        assert estatus(conn, metodo, cortes_para_cierre=1)["C_HUECO"]["estatus"] == "CERRADO"
 
     def test_marca_a_quien_ya_reaparecio(self, conn, metodo):
         """Demostró, para sí mismo, que una ausencia no implica cierre."""
         construir_permanencia(conn, metodo)
-        e = self.estatus(conn, metodo)
+        e = estatus(conn, metodo)
         assert e["C_HUECO"]["reaparecio"] is True
         assert e["C_VIVE"]["reaparecio"] is False
 
@@ -806,8 +848,8 @@ class TestVistaEstatus:
 
 
 @pytest.mark.unit
-class TestVistaVariantes:
-    """Lo que la tabla no materializa, la vista lo recupera.
+class TestValoresRecuperables:
+    """Lo que la tabla no materializa, el join a los hechos lo recupera.
 
     Es la mitad que justifica guardar solo conteos: si el join no devolviera
     los valores, la información se habría perdido de verdad.
@@ -836,19 +878,23 @@ class TestVistaVariantes:
         assert "3312345678" in telefonos
 
     def test_una_fila_por_corte_observado(self, conn, metodo):
-        """El grano de la vista es la observación, no el establecimiento."""
+        """El grano del join es la observación, no el establecimiento.
+
+        Y coincide con el conteo que la tabla guarda: `cortes_observados`
+        es el número de filas que el join devuelve.
+        """
         construir_permanencia(conn, metodo)
         observados = permanencia(conn, metodo)["C_HUECO"]["cortes_observados"]
         assert len(variantes(conn, metodo, "C_HUECO")) == observados
 
-    def test_resuelve_los_catalogos_a_sus_etiquetas(self, conn, metodo):
-        """Sin esto habría que volver a unir los catálogos a mano."""
+    def test_los_catalogos_se_resuelven_a_sus_etiquetas(self, conn, metodo):
+        """Los catálogos están a un LEFT JOIN por id, no a una reconstrucción."""
         vive = variantes(conn, metodo, "C_VIVE")[0]
         assert vive["categoria_tamano"] == "Micro"
         assert vive["tipo_asent"] == "COLONIA"
 
-    def test_no_devuelve_observaciones_sin_identidad(self, conn, metodo):
-        """La vista es el mismo filtro que la tabla: sin CLEE no hay fila."""
+    def test_sin_identidad_no_hay_valores_que_recuperar(self, conn, metodo):
+        """El join parte de la tabla del método: sin CLEE no hay fila."""
         conn.execute(text(f"DELETE FROM silver.{METODOS[metodo]}"))
         assert variantes(conn, metodo, "C_VIVE") == []
 

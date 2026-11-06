@@ -773,9 +773,10 @@ salen al doble, en silencio.
   `duracion_periodos` es la variable de tiempo del modelo.
 - **Ingredientes de censura, no el veredicto**: `cortes_tras_ultimo`,
   `huecos`, `presente_desde_el_inicio` (censura por la izquierda). El
-  estatus de cierre vive en la vista `silver.estatus_<metodo>` porque el
-  protocolo llama *preliminar* a la regla: redefinir una vista cuesta un
-  segundo, reconstruir una columna cuesta 10M de filas.
+  estatus de cierre no se almacena en ninguna parte, porque el protocolo
+  llama *preliminar* a la regla: se deriva en la consulta que lo necesite
+  (ver abajo), así que mover el umbral no cuesta ni una columna ni un
+  objeto de base de datos.
 - **Variables del establecimiento** que el protocolo nombra: tamaño
   (`categoria_tamano`, `empleados_min/max`, `delta_empleados_min`),
   `tipounieco`, `tipo_asent`, `codigo_act`, geografía (`cve_ent`,
@@ -784,27 +785,55 @@ salen al doble, en silencio.
   miden cuánto de la identidad es observado frente a inferido.
 - **Cuántas variantes hubo, no cuáles**: `n_nombres`, `n_direcciones`,
   `cambio_municipio`, `cambio_actividad`, `tiene_telefono`... Los valores
-  salen de la vista `silver.variantes_<metodo>`, que es el mismo join sin
-  agregar. Materializarlos como arrays duplicaría ~3-4 GB para ahorrar un
-  join barato justo en el caso en que se necesita —un establecimiento, o
-  una muestra. El único array que se queda es `cortes_idx`, porque
-  reconstruirlo exige rehacer el mapeo periodo→índice.
+  se recuperan con el join a los hechos (ver abajo). Materializarlos como
+  arrays duplicaría ~3-4 GB para ahorrar un join barato justo en el caso en
+  que se necesita —un establecimiento, o una muestra. El único array que se
+  queda es `cortes_idx`, porque reconstruirlo exige rehacer el mapeo
+  periodo→índice.
 
-### Las dos vistas
+### Dos derivaciones que NO son objetos de base de datos
 
-| Vista | Grano | Para qué |
-|---|---|---|
-| `silver.estatus_<metodo>` | establecimiento | Aplica la regla de cierre (`CORTES_PARA_CIERRE = 2`) y añade `reaparecio` |
-| `silver.variantes_<metodo>` | observación | Los nombres, domicilios y contactos que tuvo, con los catálogos ya resueltos |
+Ambas vivieron como vistas (`estatus_<metodo>`, `variantes_<metodo>`) y se
+eliminaron en `b0006`: eran consultas guardadas sobre datos que ya están en
+el warehouse, sin un solo consumidor. El SQL de referencia es este, y está
+ejecutándose en `tests/unit/test_permanencia.py` (`estatus()` y
+`variantes()`), así que no se puede podrir en silencio.
+
+**La regla de cierre** — el umbral es un parámetro de la consulta, no una
+constante del esquema. El protocolo lo llama preliminar; así se mueve sin
+reconstruir nada:
 
 ```sql
--- agregado sobre los 10M: lo responde la tabla
-SELECT count(*) FROM silver.permanencia_radio WHERE n_nombres > 1;
-
--- detalle de uno: lo responde la vista
-SELECT DISTINCT nom_estab FROM silver.variantes_radio
-WHERE clee_resuelto = '14010000123456';
+SELECT clee_resuelto,
+       CASE
+           WHEN cortes_tras_ultimo = 0 THEN 'ACTIVO'      -- censura por la derecha
+           WHEN cortes_tras_ultimo >= 2 THEN 'CERRADO'    -- el umbral del protocolo
+           ELSE 'INCIERTO'                                -- una ausencia no basta
+       END AS estatus,
+       huecos > 0 AS reaparecio   -- demostró que ausencia ≠ cierre
+FROM silver.permanencia_radio;
 ```
+
+**Los valores que tuvo un establecimiento** — se parte de la identidad, se
+filtra la tabla del método y se regresa a los hechos por su PK
+`(id, period)`. Es el camino rápido porque `clee_resuelto` está indexado en
+`clee_<metodo>`, y es cara solo si se pide sin filtro, que es justo la
+consulta que el análisis no hace:
+
+```sql
+SELECT i.period, e.nom_estab, e.nom_vial, e.numero_ext, e.telefono,
+       ep.categoria AS categoria_tamano, ta.tipo_asent
+FROM silver.clee_radio i
+JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
+LEFT JOIN silver.denue_estratos_personal ep ON ep.id = e.per_ocu_id
+LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
+WHERE i.clee_resuelto = '14010000123456'
+ORDER BY i.period;
+```
+
+El reparto de trabajo sigue siendo el mismo: el **agregado sobre los 10M**
+lo responde la tabla (`SELECT count(*) FROM silver.permanencia_radio WHERE
+n_nombres > 1`), el **detalle de uno** lo responde el join.
 
 **Rebuild total siempre**: los ids sintéticos `NEW_*` no son estables
 entre corridas, así que no hay nada que preservar. Cada método va en su
