@@ -89,3 +89,56 @@ def test_cada_metodo_va_en_su_propia_transaccion(monkeypatch):
 
     main._run_permanencia(metodos=["radio", "h3"])
     assert len(transacciones) == 2
+
+
+@pytest.mark.unit
+class TestPasosDelLlenado:
+    """El llenado es una secuencia de pasos con nombre, no una sentencia opaca.
+
+    Lo que se fija aquí es el contrato del log: un `INSERT ... SELECT` de
+    horas que muere solo deja escrito que empezó, así que los pasos --y que
+    sean varios-- son la única forma de saber dónde se quedó.
+    """
+
+    def _pasos(self):
+        from datetime import date
+
+        from src.etl.loaders.permanencia import _pasos
+
+        return _pasos("radio", [date(2015, 1, 1), date(2026, 5, 1)])
+
+    def test_son_varios_y_cada_uno_se_describe(self):
+        pasos = self._pasos()
+        assert len(pasos) > 1
+        for paso in pasos:
+            assert paso.nombre and paso.descripcion and paso.sql
+
+    def test_el_ultimo_escribe_la_tabla_destino(self):
+        """El rowcount del último es lo que `construir_permanencia` devuelve."""
+        from src.etl.loaders.permanencia import tabla_destino
+
+        ultimo = self._pasos()[-1]
+        assert ultimo.nombre == tabla_destino("radio")
+        assert ultimo.sql.lstrip().startswith("INSERT INTO")
+
+    def test_las_temporales_mueren_con_la_transaccion(self):
+        """`ON COMMIT DROP`: un fallo a la mitad no deja basura en la base."""
+        for paso in self._pasos()[:-1]:
+            assert "ON COMMIT DROP" in paso.sql, paso.nombre
+
+    def test_el_insert_cuadra_columnas_con_valores(self):
+        """53 columnas y 53 expresiones: un desfase lo rechaza PostgreSQL.
+
+        Barato de verificar aquí y caro de descubrir cuatro pasos y varias
+        horas más tarde, que es cuando el `INSERT` corre.
+        """
+        sql = self._pasos()[-1].sql
+        columnas = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
+        assert len([c for c in columnas.replace("\n", "").split(",") if c.strip()]) == 53
+
+    def test_el_origen_sale_del_enum_no_de_una_cadena_suelta(self):
+        from src.shared.enums import OrigenClee
+
+        ventana = next(p for p in self._pasos() if p.nombre == "ventana")
+        assert f"'{OrigenClee.DIRECTO.value}'" in ventana.sql
+        assert f"'{OrigenClee.PROPAGADO.value}'" in ventana.sql

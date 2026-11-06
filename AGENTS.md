@@ -846,7 +846,52 @@ docker compose run --rm etl transform --only permanencia-h3
 docker compose run --rm etl transform --only permanencia      # las dos
 ```
 
-Log del stage: `data/etl_permanencia.log`.
+### Cinco pasos, para saber dónde se quedó
+
+El llenado **no** es un `INSERT ... SELECT` único: son cinco sentencias
+sobre tablas temporales `ON COMMIT DROP`, cada una registrada antes de
+empezar y al terminar con sus filas, su tiempo y su tasa.
+
+```
+▶ [1/5] obs: uniendo los hechos con clee_radio y resolviendo catalogos...
+✔ [1/5] obs: 82,896,801 filas en 14.2 min (97,296 filas/s)
+▶ [2/5] ventana: colapsando a una fila por identidad (el agregado mas caro)...
+```
+
+La razón es de operación: una sentencia de horas que muere solo deja
+escrito que empezó. No cuesta nada de más —`obs` se materializaba igual,
+porque PostgreSQL materializa un CTE referenciado más de una vez y este lo
+usaban tres— y habilita el `ANALYZE` de cada temporal, que antes no existía
+(una temporal nace sin estadísticas y el autovacuum no las toca, así que el
+planificador armaba los joins finales a ciegas).
+
+Dentro de cada paso hay además un **latido** cada
+`PERMANENCIA_LATIDO_SEGUNDOS` (default 60), emitido por un hilo que
+consulta `pg_stat_activity` con su propia conexión —la del `INSERT` está
+bloqueada:
+
+```
+⏳ [2/5] ventana: 23.0 min | estado=active | IO:BufFileWrite | temp +41.3 GiB
+```
+
+`wait_event` dice en qué fase está (leyendo hechos, derramando el agregado
+a disco, esperando un lock) y `temp` cuánto ha derramado. Lo que **no** se
+puede reportar es "filas escritas hasta ahora": el `INSERT` vive en una
+transacción sin commitear, así que desde otra conexión la tabla destino se
+ve vacía hasta el final.
+
+Y si prefieres preguntarle a la base directamente:
+
+```sql
+SELECT pid, state, wait_event_type, wait_event, now() - query_start AS corriendo
+FROM pg_stat_activity
+WHERE datname = 'mipymes' AND state <> 'idle';
+```
+
+Log del stage: `data/etl_permanencia.log`. **Los tests escriben en ese mismo
+archivo** (el logger se construye a nivel de módulo con ruta fija), así que
+las líneas de 4 cortes / 7 establecimientos son de `pytest`, no de una
+corrida real.
 
 ---
 

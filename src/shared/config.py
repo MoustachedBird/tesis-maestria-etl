@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # del servidor); bajarlo es la palanca si un ingest se queda sin RAM.
     COPY_CHUNK_ROWS: int = 500_000
 
+    # Segundos entre latidos del loader de permanencia. Su `INSERT ... SELECT`
+    # sobre 82.9M filas es UNA sentencia que corre por horas sin que Python
+    # tenga nada que reportar, asi que el latido lo emite un hilo que consulta
+    # `pg_stat_activity`. Subirlo ensucia menos el log; bajarlo da mas
+    # resolucion para ver en que fase esta. En 0 se apaga el hilo.
+    PERMANENCIA_LATIDO_SEGUNDOS: int = 60
+
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
     SQLALCHEMY_POOL_SIZE: int = 5
