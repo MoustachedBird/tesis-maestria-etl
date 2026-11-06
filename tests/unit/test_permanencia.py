@@ -26,7 +26,10 @@ from src.etl.loaders.permanencia import (
 from src.shared.db.base import get_table
 from src.shared.db.copy import copy_dataframe
 from src.shared.db.models.silver import (
+    ActividadEconomica,
+    Entidad,
     EstratoPersonal,
+    Municipio,
     TipoAsentamiento,
     TipoUnidadEconomica,
 )
@@ -389,6 +392,22 @@ OBSERVACIONES = [
 ]
 
 
+CODIGOS_ACT: list[str] = sorted({o[4] for o in OBSERVACIONES})
+"""Los SCIAN que el escenario usa, para sembrar su catálogo.
+
+Se DERIVA del escenario en vez de listarse a mano: agregar una observación
+con una actividad nueva siembra su fila sola, en vez de fallar con una
+violación de llave foránea a trescientas líneas de distancia.
+"""
+
+GEOGRAFIA: list[tuple[str, str]] = sorted({(o[5], o[6]) for o in OBSERVACIONES})
+"""Los pares (entidad, municipio) del escenario, por el mismo motivo.
+
+`C_MUDO` cambia de municipio, así que son dos, y las dos FKs --la de
+entidad y la compuesta de municipio-- exigen ambos catálogos.
+"""
+
+
 @pytest.fixture(params=sorted(METODOS), ids=sorted(METODOS))
 def metodo(request):
     """Cada método: el escenario y las aserciones son los mismos."""
@@ -399,9 +418,15 @@ def metodo(request):
 def conn(silver_engine, metodo):
     """Hechos e identidad cargados, para el método bajo prueba.
 
-    Los catálogos de estrato y tipo de unidad se siembran primero: la tabla
-    de hechos tiene FK hacia ellos, y la permanencia los resuelve a sus
-    etiquetas para `categoria_tamano` y `tipounieco`.
+    Los catálogos se siembran primero porque `establecimientos` tiene FK
+    hacia ellos y el `COPY` las hace valer: sin esto el escenario no entra.
+    Se siembra lo que el escenario usa y nada más, igual que
+    `test_ingest.py` --el catálogo SCIAN real son 1,127 filas y aquí hacen
+    falta seis.
+
+    Dos FKs no se siembran a propósito: `cve_loc` y `tipo_vial_id` quedan
+    nulos en el escenario, y una FK compuesta con cualquier columna nula se
+    satisface sola (MATCH SIMPLE).
     """
     identidad = METODOS[metodo]
     with Session(silver_engine) as sesion:
@@ -409,6 +434,22 @@ def conn(silver_engine, metodo):
             [EstratoPersonal(**r) for r in build_estrato_rows()]
             + [TipoUnidadEconomica(**r) for r in build_rows()["denue_tipos_unidad_economica"]]
             + [TipoAsentamiento(**r) for r in build_rows()["denue_tipos_asentamiento"]]
+            # Jerarquia derivada del prefijo, como `_with_scian_hierarchy`.
+            + [
+                ActividadEconomica(
+                    codigo_act=c,
+                    nombre_act=f"actividad {c}",
+                    sector=c[:2],
+                    subsector=c[:3],
+                    rama=c[:4],
+                )
+                for c in CODIGOS_ACT
+            ]
+            + [
+                Entidad(cve_ent=e, entidad=f"entidad {e}")
+                for e in sorted({e for e, _ in GEOGRAFIA})
+            ]
+            + [Municipio(cve_ent=e, cve_mun=m, municipio=f"municipio {e}{m}") for e, m in GEOGRAFIA]
         )
         sesion.commit()
 
