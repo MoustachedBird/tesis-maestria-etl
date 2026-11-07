@@ -728,29 +728,56 @@ salen al doble, en silencio.
 
 ### Qué guarda y qué no
 
-- **Ventana observada**: `primer_periodo`/`ultimo_periodo` para reportar,
-  `idx_primer`/`idx_ultimo` para calcular. Los cortes distan entre 4 y 12
-  meses, así que el tiempo se mide en PERIODOS y no en días.
-  `duracion_periodos` es la variable de tiempo del modelo.
-- **Ingredientes de censura, no el veredicto**: `cortes_tras_ultimo`,
-  `huecos`, `presente_desde_el_inicio` (censura por la izquierda). El
-  estatus de cierre no se almacena en ninguna parte, porque el protocolo
-  llama *preliminar* a la regla: se deriva en la consulta que lo necesite
-  (ver abajo), así que mover el umbral no cuesta ni una columna ni un
-  objeto de base de datos.
-- **Variables del establecimiento** que el protocolo nombra: tamaño
-  (`categoria_tamano`, `empleados_min/max`, `delta_empleados_min`),
-  `tipounieco`, `tipo_asent`, `codigo_act`, geografía (`cve_ent`,
-  `cve_mun`, `cve_loc`, `ageb`, `h3_cell_5/9`).
-- **Confianza en la identidad**: `cortes_directo`/`cortes_propagado`
-  miden cuánto de la identidad es observado frente a inferido.
-- **Cuántas variantes hubo, no cuáles**: `n_nombres`, `n_direcciones`,
-  `cambio_municipio`, `cambio_actividad`, `tiene_telefono`... Los valores
-  se recuperan con el join a los hechos (ver abajo). Materializarlos como
-  arrays duplicaría ~3-4 GB para ahorrar un join barato justo en el caso en
-  que se necesita —un establecimiento, o una muestra. El único array que se
-  queda es `cortes_idx`, porque reconstruirlo exige rehacer el mapeo
-  periodo→índice.
+La regla es una sola: **ningún valor de un corte concreto**. Lo que se
+materializa son las tres clases de columna que no se pueden recomputar sin
+barrer los 82.9M hechos.
+
+1. **Ventana observada**: `primer_periodo`/`ultimo_periodo` para reportar,
+   `idx_primer`/`idx_ultimo` para calcular. Los cortes distan entre 4 y 12
+   meses, así que el tiempo se mide en PERIODOS y no en días.
+   `duracion_periodos` es la variable de tiempo del modelo.
+2. **Ingredientes de censura, no el veredicto**: `cortes_tras_ultimo`,
+   `huecos`, `presente_desde_el_inicio` (censura por la izquierda). El
+   estatus de cierre no se almacena en ninguna parte, porque el protocolo
+   llama *preliminar* a la regla: se deriva en la consulta que lo necesite
+   (ver abajo), así que mover el umbral no cuesta ni una columna ni un
+   objeto de base de datos.
+3. **Agregados de trayectoria**: cuánto varió algo, no en qué valor quedó.
+   `n_nombres`, `n_direcciones`, `cambio_municipio`, `cambio_actividad`,
+   `cambio_tamano`, `delta_empleados_min` (último menos primero, en
+   empleados: distingue crecer de encogerse), el rectángulo envolvente
+   (`lat_min/max`, `lon_min/max`), `desplazamiento_neto_m`,
+   `dispersion_max_m`, `n_posiciones`. Más `cortes_idx` —el único array que
+   se queda, porque reconstruirlo exige rehacer el mapeo periodo→índice— y
+   `cortes_directo`/`cortes_propagado`, que miden cuánto de la identidad es
+   observado frente a inferido.
+4. **Cobertura del dato** (`tiene_*`): True si el campo vino lleno en al
+   menos un corte. `tiene_nombre`, `tiene_razon_social`, `tiene_actividad`,
+   `tiene_municipio`, `tiene_localidad`, `tiene_ageb`, `tiene_cod_postal`,
+   `tiene_tipo_asent`, `tiene_coordenadas`, `tiene_estrato_personal`,
+   `tiene_tipounieco`, `tiene_telefono`, `tiene_correo`, `tiene_sitio`,
+   `en_centro_comercial`.
+
+**Lo que NO guarda (desde `b0007`)**: el valor con que cada campo oficial
+quedó en el último corte —`nom_estab`, `codigo_act`, `cve_ent`/`cve_mun`,
+`per_ocu`/`categoria_tamano`/`empleados_min/max`, `tipounieco`,
+`tipo_asent`, `cod_postal`, `cve_loc`, `ageb`, `latitud`/`longitud`,
+`h3_cell_9`/`h3_cell_5`— ni la primera posición observada. Eran 16 columnas
+que congelaban un instante de algo que cambia entre cortes (y los catálogos
+de INEGI cambian de etiqueta: `tipo_asent` `"OTRO"` → `"OTRA
+(ESPECIFICAR)"` en 2026-05) y que de todos modos no contestaban "¿qué
+valores tuvo?". El join sí, y para **todos** los cortes.
+
+**Las banderas no sustituyen al valor, contestan otra pregunta**: "¿de este
+establecimiento se puede afirmar algo sobre este campo?". En datos de
+encuesta, donde cualquier campo puede venir vacío o faltar un periodo
+completo, eso es información de primera clase — y es el filtro que decide
+qué unidades entran a un análisis que dependa de ese campo
+(`tiene_ageb = false` ⇒ no puede cruzarse con marginación).
+
+**No hay índice geográfico ni por actividad** en estas tablas: esas
+columnas ya no viven aquí. Estratificar por municipio o por sector se hace
+en el join, contra `ix_estab_geo` e `ix_estab_activity_period`.
 
 ### Dos derivaciones que NO son objetos de base de datos
 
@@ -775,26 +802,40 @@ SELECT clee_resuelto,
 FROM silver.permanencia_radio;
 ```
 
-**Los valores que tuvo un establecimiento** — se parte de la identidad, se
-filtra la tabla del método y se regresa a los hechos por su PK
-`(id, period)`. Es el camino rápido porque `clee_resuelto` está indexado en
-`clee_<metodo>`, y es cara solo si se pide sin filtro, que es justo la
-consulta que el análisis no hace:
+**Los valores que tuvo un establecimiento** — y son TODOS, corte por corte,
+no solo el último. No hace falta tabla puente: `clee_<metodo>` lo es.
+
+```
+permanencia_<m>  ←many:1─  clee_<m>  ─1:1→  establecimientos
+  1 fila/negocio            N obs.            los 43 campos
+```
 
 ```sql
 SELECT i.period, e.nom_estab, e.nom_vial, e.numero_ext, e.telefono,
-       ep.categoria AS categoria_tamano, ta.tipo_asent
-FROM silver.clee_radio i
+       e.cve_ent, e.cve_mun, e.latitud, e.longitud,
+       ep.categoria AS categoria_tamano, ta.tipo_asent, tu.tipounieco
+FROM silver.permanencia_radio p
+JOIN silver.clee_radio i ON i.clee_resuelto = p.clee_resuelto
 JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
 LEFT JOIN silver.denue_estratos_personal ep ON ep.id = e.per_ocu_id
 LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
-WHERE i.clee_resuelto = '14010000123456'
+LEFT JOIN silver.denue_tipos_unidad_economica tu ON tu.id = e.tipounieco_id
+WHERE p.clee_resuelto = '14010000123456'
 ORDER BY i.period;
 ```
 
-El reparto de trabajo sigue siendo el mismo: el **agregado sobre los 10M**
-lo responde la tabla (`SELECT count(*) FROM silver.permanencia_radio WHERE
-n_nombres > 1`), el **detalle de uno** lo responde el join.
+Es el camino rápido porque `clee_resuelto` está indexado en `clee_<metodo>`
+(`ix_clee_radio_clee_resuelto`) y el salto a los hechos es por PK. Se puede
+arrancar también desde `clee_<metodo>` directo, omitiendo `permanencia`, si
+ya se tiene la identidad.
+
+El reparto de trabajo es el que decide qué se materializa: el **agregado
+sobre los 10M** lo responde la tabla (`SELECT count(*) FROM
+silver.permanencia_radio WHERE n_nombres > 1`), el **detalle de uno o de una
+muestra** lo responde el join. Lo que el join no puede dar barato es una
+covariable para los 10M a la vez: eso es un barrido de los 82.9M, así que si
+el modelo acaba necesitando una, el lugar correcto es materializarla como
+agregado en esta tabla —no reponer el valor del último corte.
 
 **Rebuild total siempre**: los ids sintéticos `NEW_*` no son estables
 entre corridas, así que no hay nada que preservar. Cada método va en su
@@ -1121,7 +1162,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 7 revisiones, b0000 (baseline) -> b0006
+├── alembic/versions/              # 8 revisiones, b0000 (baseline) -> b0007
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -1729,7 +1770,7 @@ base.
 ### Migraciones: un baseline y lo que cambió después
 
 **Estándar del proyecto: la base se crea desde cero.** `b0000` es el
-baseline de PostgreSQL —reemplazó la cadena histórica de DuckDB— y las seis
+baseline de PostgreSQL —reemplazó la cadena histórica de DuckDB— y las siete
 que siguen son los cambios reales de esquema desde entonces:
 
 | Revisión | Qué hace |
@@ -1741,6 +1782,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0004texto_libre_sin_tope` | Quita el tope de largo al texto libre de INEGI (el primer ingest real falló por eso) |
 | `b0005permanencia_por_metodo` | Cambia `entidades_economicas` por `permanencia_radio` / `permanencia_h3` |
 | `b0006sin_vistas_de_permanencia` | Elimina las cuatro vistas `estatus_<metodo>` / `variantes_<metodo>`: eran consultas, no esquema |
+| `b0007permanencia_sin_snapshots` | Recrea las dos tablas de permanencia sin el valor "del corte mas reciente" de ningun campo oficial: en su lugar, banderas `tiene_*` de cobertura |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2025,7 +2067,7 @@ Anti-patterns:
 
 Verify cycle (contra una base desechable, nunca la real):
 ```bash
-docker compose run --rm tools alembic upgrade head     # aplica las 7 revisiones
+docker compose run --rm tools alembic upgrade head     # aplica las 8 revisiones
 docker compose run --rm tools alembic downgrade -1     # revierte la ultima
 docker compose run --rm tools alembic upgrade head     # la vuelve a aplicar
 ```

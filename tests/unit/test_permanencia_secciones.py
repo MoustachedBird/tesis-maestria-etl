@@ -204,17 +204,25 @@ class TestTroceo:
         assert ultimo.nombre == tabla_destino("radio")
         assert ultimo.sql.lstrip().startswith("INSERT INTO")
 
-    def test_el_insert_cuadra_columnas_con_valores(self):
-        """53 columnas y 53 expresiones: un desfase lo rechaza PostgreSQL.
+    def test_el_insert_cuadra_columnas_con_el_modelo(self):
+        """Las columnas del INSERT son las del ORM menos su default.
 
-        Barato de verificar aqui y caro de descubrir veinte cortes y varias
-        horas mas tarde, que es cuando corre el primer `INSERT`.
+        Se compara contra el modelo y no contra un numero escrito a mano:
+        agregar una columna al ORM y olvidarla en el INSERT es el error que
+        esto atrapa, y sin la comparacion solo se descubre veinte cortes y
+        varias horas mas tarde, cuando corre el primer `INSERT`.
         """
-        from src.etl.loaders.permanencia import _pasos_bloque
+        from src.etl.loaders.permanencia import _pasos_bloque, tabla_destino
+        from src.shared.db.base import get_table
 
         sql = _pasos_bloque("radio", 0, 19)[-1].sql
-        columnas = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
-        assert len([c for c in columnas.replace("\n", "").split(",") if c.strip()]) == 53
+        bloque = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
+        escritas = {c.strip() for c in bloque.replace("\n", "").split(",") if c.strip()}
+
+        # `construida_en` la pone la base (server_default), asi que es la
+        # unica del modelo que el INSERT no nombra.
+        del_modelo = {c.name for c in get_table(tabla_destino("radio")).columns}
+        assert escritas == del_modelo - {"construida_en"}
 
     def test_el_origen_sale_del_enum_no_de_una_cadena_suelta(self):
         from src.etl.loaders.permanencia import _pasos_bloque

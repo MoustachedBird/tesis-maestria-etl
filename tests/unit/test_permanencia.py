@@ -1,12 +1,15 @@
-"""La tabla de permanencia: colapso por identidad, variantes y censura.
+"""La tabla de permanencia: colapso por identidad, trayectoria y censura.
 
 Fija lo que el modelo de supervivencia consume: una fila por
 establecimiento, su ventana en el directorio, y los ingredientes con que se
 aplica la regla de cierre aguas abajo.
 
-La tabla guarda CUÁNTAS variantes hubo, que es lo que responde las preguntas
-agregadas. `TestValoresRecuperables` es la mitad que prueba que no se perdió
-nada al dejar de materializarlas: el join a los hechos los devuelve.
+La tabla guarda tres clases de columna, y las tres son propiedades de la
+vida completa: la ventana, los agregados de trayectoria (cuánto varió algo)
+y las banderas de cobertura (`tiene_*`: el campo vino lleno al menos una
+vez). **Ningún valor de un corte concreto.** `TestSinValoresDeUnCorte` fija
+esa frontera y `TestValoresRecuperables` prueba que no se perdió nada: el
+join a los hechos devuelve los valores de todos los cortes.
 """
 
 from datetime import date
@@ -752,21 +755,92 @@ class TestResumenDeVariantes:
         assert mudo["lat_max"] == pytest.approx(20.65)
         assert mudo["dispersion_max_m"] > 400_000
 
-    def test_guarda_la_primera_posicion(self, db, metodo, tracker):
-        """El otro extremo real del recorrido, para calcular el neto."""
-        construir_permanencia(db, metodo, tracker)
-        mudo = permanencia(db, metodo)["C_MUDO"]
-        assert mudo["lat_primera"] == pytest.approx(20.65)
-        assert mudo["latitud"] == pytest.approx(19.43)  # el representante
+    def test_no_guarda_coordenadas_de_un_corte(self, db, metodo, tracker):
+        """Ni la primera ni la última: las dos salen del join.
+
+        Lo que persiste son las medidas sobre toda la vida, que son las que
+        no se pueden recomputar sin barrer los hechos.
+        """
+        columnas = {c.name for c in get_table(tabla_destino(metodo)).columns}
+        assert not columnas & {"latitud", "longitud", "lat_primera", "lon_primera"}
+        assert {"lat_min", "lat_max", "desplazamiento_neto_m", "dispersion_max_m"} <= columnas
 
 
 @pytest.mark.unit
-class TestRepresentante:
-    def test_los_atributos_son_del_corte_mas_reciente(self, db, metodo, tracker):
-        """El estado con que el establecimiento terminó."""
+class TestSinValoresDeUnCorte:
+    """La tabla no congela el valor de ningún campo oficial.
+
+    Guardar "el valor del corte más reciente" costaba ancho en 10M filas,
+    congelaba un instante de algo que cambia entre cortes, y de todos modos
+    no contestaba "¿qué valores tuvo?" — que es lo que el join sí contesta,
+    y para todos los cortes. `TestValoresRecuperables` es la mitad que lo
+    prueba.
+    """
+
+    def test_ninguna_columna_de_valor_oficial(self, db, metodo):
+        columnas = {c.name for c in get_table(tabla_destino(metodo)).columns}
+        assert not columnas & {
+            "nom_estab",
+            "raz_social",
+            "codigo_act",
+            "cve_ent",
+            "cve_mun",
+            "cod_postal",
+            "tipo_asent",
+            "cve_loc",
+            "ageb",
+            "per_ocu",
+            "categoria_tamano",
+            "empleados_min",
+            "empleados_max",
+            "tipounieco",
+            "h3_cell_9",
+            "h3_cell_5",
+        }
+
+    def test_una_bandera_de_cobertura_por_campo(self, db, metodo, tracker):
+        """True si el campo vino lleno en al menos un corte."""
         construir_permanencia(db, metodo, tracker)
-        hueco = permanencia(db, metodo)["C_HUECO"]
-        assert hueco["nom_estab"] == "TAQUERIA DON JUAN"
+        vive = permanencia(db, metodo)["C_VIVE"]
+        assert vive["tiene_nombre"] is True
+        assert vive["tiene_actividad"] is True
+        assert vive["tiene_municipio"] is True
+        assert vive["tiene_coordenadas"] is True
+        assert vive["tiene_estrato_personal"] is True
+        assert vive["tiene_tipounieco"] is True
+        assert vive["tiene_tipo_asent"] is True
+        assert vive["tiene_cod_postal"] is True
+
+    def test_un_campo_nunca_lleno_queda_en_falso(self, db, metodo, tracker):
+        """Es el dato que importa: de ese negocio no se puede afirmar nada.
+
+        El escenario no pone razón social a nadie, y `C_CERRO` tampoco trae
+        código postal en ninguno de sus dos cortes.
+        """
+        construir_permanencia(db, metodo, tracker)
+        p = permanencia(db, metodo)
+        assert p["C_VIVE"]["tiene_razon_social"] is False
+        assert p["C_CERRO"]["tiene_cod_postal"] is False
+
+    def test_la_bandera_es_union_no_del_ultimo_corte(self, db, metodo, tracker):
+        """`C_HUECO` trae CP solo en sus dos cortes, con valores distintos.
+
+        Lo que la bandera afirma es que el campo se llenó alguna vez, no que
+        siga lleno: para verificar un cierre sirve cualquier dato publicado.
+        """
+        construir_permanencia(db, metodo, tracker)
+        assert permanencia(db, metodo)["C_HUECO"]["tiene_cod_postal"] is True
+
+    def test_sin_coordenadas_las_medidas_geograficas_son_nulas(self, db, metodo, tracker):
+        """`tiene_coordenadas` en False explica por qué la fila viene vacía ahí."""
+        with db.begin() as conn:
+            conn.execute(text("UPDATE silver.establecimientos SET latitud = NULL, longitud = NULL"))
+        construir_permanencia(db, metodo, tracker)
+        vive = permanencia(db, metodo)["C_VIVE"]
+        assert vive["tiene_coordenadas"] is False
+        assert vive["desplazamiento_neto_m"] is None
+        assert vive["dispersion_max_m"] is None
+        assert vive["n_posiciones"] == 0
 
     def test_marca_las_identidades_sinteticas(self, db, metodo, tracker):
         construir_permanencia(db, metodo, tracker)
@@ -807,18 +881,15 @@ class TestAntiguedadYCensuraIzquierda:
 
 @pytest.mark.unit
 class TestTamanoYTipo:
-    """El tamaño es variable del protocolo, y su trayectoria es señal."""
+    """Del tamaño se materializa la TRAYECTORIA, no el nivel.
 
-    def test_trae_la_categoria_mipyme(self, db, metodo, tracker):
-        """`categoria` del catálogo es el sujeto mismo de la tesis."""
-        construir_permanencia(db, metodo, tracker)
-        vive = permanencia(db, metodo)["C_VIVE"]
-        assert vive["categoria_tamano"] == "Micro"
-        assert vive["empleados_min"] == 0
-        assert vive["empleados_max"] == 5
+    El nivel (en qué estrato está, cuántos empleados) es un valor de un
+    corte: sale del join. Lo que no se puede recomputar sin barrer los
+    hechos es cómo se movió entre el primer corte y el último.
+    """
 
     def test_el_delta_distingue_crecer_de_encogerse(self, db, metodo, tracker):
-        """Un array de estratos no tiene orden; el delta sí.
+        """Un conteo de estratos distintos no tiene orden; el delta sí.
 
         `C_CRECIO` pasa de 0-5 a 11-30 empleados: delta positivo.
         """
@@ -828,10 +899,15 @@ class TestTamanoYTipo:
         assert p["C_CRECIO"]["delta_empleados_min"] == 11  # 11 - 0
         assert p["C_VIVE"]["delta_empleados_min"] == 0
 
-    def test_trae_el_tipo_de_unidad_economica(self, db, metodo, tracker):
-        """Distingue fijo de ambulante: dinámicas y verificabilidad distintas."""
+    def test_el_nivel_se_recupera_del_join(self, db, metodo, tracker):
+        """La categoría MIPYME es el sujeto de la tesis y sigue alcanzable.
+
+        Y con más información que antes: el estrato de CADA corte, no el del
+        último. `C_CRECIO` lo demuestra — pasó de Micro a Small.
+        """
         construir_permanencia(db, metodo, tracker)
-        assert permanencia(db, metodo)["C_VIVE"]["tipounieco"] == "FIJO"
+        crecio = variantes(db, metodo, "C_CRECIO")
+        assert [v["categoria_tamano"] for v in crecio] == ["Micro", "Small"]
 
 
 @pytest.mark.unit
@@ -897,9 +973,30 @@ class TestReglaDeCierre:
 class TestValoresRecuperables:
     """Lo que la tabla no materializa, el join a los hechos lo recupera.
 
-    Es la mitad que justifica guardar solo conteos: si el join no devolviera
-    los valores, la información se habría perdido de verdad.
+    Es la mitad que justifica no guardar ningún valor de un corte: si el
+    join no devolviera los valores, la información se habría perdido de
+    verdad. Y devuelve MÁS que antes — todos los cortes, no solo el último.
     """
+
+    def test_el_camino_arranca_en_permanencia_sin_tabla_puente(self, db, metodo, tracker):
+        """`clee_<metodo>` ES la tabla puente: no hace falta otra.
+
+        La relación es many:1 (N observaciones -> 1 fila de permanencia), y
+        es la que convierte una fila de permanencia en la historia completa
+        del establecimiento.
+        """
+        construir_permanencia(db, metodo, tracker)
+        sql = text(f"""
+            SELECT i.period, e.nom_estab
+            FROM silver.{tabla_destino(metodo)} p
+            JOIN silver.{METODOS[metodo]} i ON i.clee_resuelto = p.clee_resuelto
+            JOIN silver.establecimientos e ON e.id = i.id AND e.period = i.period
+            WHERE p.clee_resuelto = 'C_HUECO'
+            ORDER BY i.period
+        """)
+        with db.connect() as conn:
+            filas = [dict(f) for f in conn.execute(sql).mappings()]
+        assert [f["nom_estab"] for f in filas] == ["TACOS DON JUAN", "TAQUERIA DON JUAN"]
 
     def test_devuelve_los_nombres_que_tuvo(self, db, metodo):
         nombres = {v["nom_estab"] for v in variantes(db, metodo, "C_HUECO")}

@@ -40,7 +40,7 @@ queda con la imagen vieja sin avisar.
 Lo que escribieron corridas anteriores quedó con dueño root. El contenedor
 de arriba también es root, así que borra sin `sudo`.
 
-Esperado (la cadena son siete revisiones; `b0000` crea y las demás ajustan):
+Esperado (la cadena son ocho revisiones; `b0000` crea y las demás ajustan):
 
 ```
    Schemas creados: silver, gold, meta
@@ -55,6 +55,8 @@ Esperado (la cadena son siete revisiones; `b0000` crea y las demás ajustan):
    silver: 2 tablas de permanencia (permanencia_radio, permanencia_h3)
    silver.entidades_economicas eliminada (estaba vacia)
    silver: 4 vistas de permanencia eliminadas
+   silver: 2 tablas de permanencia recreadas con 45 columnas, sin valores de un corte concreto (permanencia_radio, permanencia_h3)
+   hay que reconstruirlas: transform --only permanencia --force
 ```
 
 Al final: **15 tablas en `silver`** (11 del baseline + 2 de CLEE + 2 de
@@ -230,6 +232,24 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
         COUNT(*) FILTER (WHERE cortes_tras_ultimo = 0) AS activos
  FROM silver.permanencia_radio"
 ```
+
+Cobertura de cada campo oficial: qué fracción de los negocios tiene el dato
+en al menos un corte. Lo que salga bajo acota qué análisis es posible, y lo
+que salga en 100% es una bandera que se puede tirar en la siguiente
+migración:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT round(100.0 * avg(tiene_razon_social::int), 1) AS razon_social,
+        round(100.0 * avg(tiene_coordenadas::int), 1)  AS coordenadas,
+        round(100.0 * avg(tiene_estrato_personal::int), 1) AS estrato,
+        round(100.0 * avg(tiene_ageb::int), 1)         AS ageb,
+        round(100.0 * avg(tiene_telefono::int), 1)     AS telefono
+ FROM silver.permanencia_radio"
+```
+
+Los **valores** de cualquier campo, corte por corte, salen del join
+(AGENTS.md §N3): `permanencia_radio` → `clee_radio` → `establecimientos`.
 
 Cómo terminó, sin abrir el log:
 

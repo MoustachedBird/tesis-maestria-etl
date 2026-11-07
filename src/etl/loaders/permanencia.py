@@ -9,15 +9,20 @@ Existe como tabla materializada y no como vista porque el `GROUP BY` sobre
 supervivencia la lee decenas de veces --cada partición de la validación
 cruzada, cada iteración de variables, el cálculo de SHAP.
 
-**Guarda cuántas variantes hubo, no cuáles.** Los nombres, domicilios y
-teléfonos que tuvo un establecimiento ya están en los hechos, alcanzables
-por la tabla de identidad; materializarlos como arrays duplicaría ~3-4 GB
-para ahorrar un join que es barato justo en el caso en que se necesita --un
-establecimiento, o una muestra de ellos. Lo que sí se materializa son los
-escalares (`n_nombres`, `cambio_municipio`, ...), porque esos responden las
-preguntas agregadas sobre los 10M de un golpe y son lo que el modelo puede
-consumir. Los valores se recuperan uniendo `clee_resuelto` con la tabla de
-identidad y de ahí a los hechos; `AGENTS.md` §N3 trae la consulta.
+**Ningún valor de un corte concreto.** Lo que se materializa son agregados
+sobre la vida completa (`n_nombres`, `cambio_municipio`,
+`delta_empleados_min`, el rectángulo envolvente) y banderas de cobertura
+(`tiene_*`: el campo vino lleno en al menos un corte). El valor mismo de
+cualquier campo oficial --nombre, actividad, municipio, estrato, tipo de
+unidad, coordenadas-- sale de unir `clee_resuelto` con la tabla de
+identidad y de ahí a los hechos, que devuelve **todos** los cortes y no
+solo el último; `AGENTS.md` §N3 trae la consulta.
+
+Guardar "el valor del corte más reciente" era el peor de los dos mundos:
+costaba ancho en 10M filas, congelaba un instante de algo que cambia entre
+cortes, y de todas formas no contestaba "¿qué valores tuvo?". El join es
+barato justo en el caso en que se necesita --un establecimiento, o una
+muestra-- y la tabla queda angosta para el caso en que se leen los 10M.
 
 **Tampoco guarda el veredicto de cierre**, que se deriva de
 `cortes_tras_ultimo` con un `CASE` en la consulta que lo necesite. El
@@ -337,7 +342,6 @@ CREATE UNLOGGED TABLE IF NOT EXISTS {schema}.{tabla_obs(metodo)} (
     cod_postal      text,
     latitud         double precision,
     longitud        double precision,
-    h3_cell_9       bigint,
     fecha_alta_date date,
     telefono        text,
     correoelec      text,
@@ -345,13 +349,10 @@ CREATE UNLOGGED TABLE IF NOT EXISTS {schema}.{tabla_obs(metodo)} (
     tipo_asent      text,
     cve_loc         text,
     ageb            text,
-    h3_cell_5       bigint,
     nom_cencom      text,
     origen          text,
     per_ocu         text,
-    categoria_tamano text,
     empleados_min   integer,
-    empleados_max   integer,
     tipounieco      text,
     direccion       text
 )
@@ -388,10 +389,10 @@ def _sql_llenar_obs(
 INSERT INTO {schema}.{tabla_obs(metodo)} (
     clee_resuelto, bloque, idx, period, id,
     nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal,
-    latitud, longitud, h3_cell_9, fecha_alta_date,
+    latitud, longitud, fecha_alta_date,
     telefono, correoelec, www, tipo_asent,
-    cve_loc, ageb, h3_cell_5, nom_cencom, origen,
-    per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
+    cve_loc, ageb, nom_cencom, origen,
+    per_ocu, empleados_min, tipounieco,
     direccion
 )
 SELECT
@@ -401,11 +402,11 @@ SELECT
     e.period, e.id,
     e.nom_estab, e.raz_social, e.codigo_act,
     e.cve_ent, e.cve_mun, e.cod_postal,
-    e.latitud, e.longitud, e.h3_cell_9, e.fecha_alta_date,
+    e.latitud, e.longitud, e.fecha_alta_date,
     e.telefono, e.correoelec, e.www, ta.tipo_asent,
-    e.cve_loc, e.ageb, e.h3_cell_5, e.nom_cencom,
+    e.cve_loc, e.ageb, e.nom_cencom,
     i.origen,
-    ep.per_ocu, ep.categoria, ep.empleados_min, ep.empleados_max,
+    ep.per_ocu, ep.empleados_min,
     tu.tipounieco,
     -- El domicilio como UNA cadena: arrays paralelos por componente
     -- perderian que numero va con que calle.
@@ -489,12 +490,26 @@ SELECT
     -- Cuanto de la identidad es observado frente a inferido.
     COUNT(DISTINCT idx) FILTER (WHERE origen = '{directo}') AS cortes_directo,
     COUNT(DISTINCT idx) FILTER (WHERE origen = '{propagado}') AS cortes_propagado,
-    BOOL_OR(nom_cencom IS NOT NULL AND nom_cencom <> '') AS en_centro_comercial,
-    -- Contacto: UNION de todos los cortes, no el mas reciente. Para
-    -- verificar un cierre sirve cualquier telefono que haya publicado.
+    -- Cobertura del dato: UNION sobre todos los cortes, no el mas reciente.
+    -- Dice de que establecimientos se puede afirmar algo sobre cada campo;
+    -- el VALOR, corte por corte, sale del join a los hechos.
+    BOOL_OR(nom_estab IS NOT NULL AND nom_estab <> '') AS tiene_nombre,
+    BOOL_OR(raz_social IS NOT NULL AND raz_social <> '') AS tiene_razon_social,
+    BOOL_OR(codigo_act IS NOT NULL AND codigo_act <> '') AS tiene_actividad,
+    BOOL_OR(cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS tiene_municipio,
+    BOOL_OR(cve_loc IS NOT NULL AND cve_loc <> '') AS tiene_localidad,
+    BOOL_OR(ageb IS NOT NULL AND ageb <> '') AS tiene_ageb,
+    BOOL_OR(cod_postal IS NOT NULL AND cod_postal <> '') AS tiene_cod_postal,
+    BOOL_OR(tipo_asent IS NOT NULL AND tipo_asent <> '') AS tiene_tipo_asent,
+    BOOL_OR(latitud IS NOT NULL AND longitud IS NOT NULL) AS tiene_coordenadas,
+    BOOL_OR(per_ocu IS NOT NULL AND per_ocu <> '') AS tiene_estrato_personal,
+    BOOL_OR(tipounieco IS NOT NULL AND tipounieco <> '') AS tiene_tipounieco,
+    -- Para verificar un cierre sirve cualquier telefono que haya publicado,
+    -- aunque fuera en 2016.
     BOOL_OR(telefono IS NOT NULL AND telefono <> '') AS tiene_telefono,
     BOOL_OR(correoelec IS NOT NULL AND correoelec <> '') AS tiene_correo,
     BOOL_OR(www IS NOT NULL AND www <> '') AS tiene_sitio,
+    BOOL_OR(nom_cencom IS NOT NULL AND nom_cencom <> '') AS en_centro_comercial,
     -- Rectangulo envolvente: cota SUPERIOR del movimiento, ciega al
     -- orden. Se lee junto al desplazamiento neto.
     MIN(latitud) AS lat_min, MAX(latitud) AS lat_max,
@@ -508,12 +523,12 @@ GROUP BY clee_resuelto
         ),
         _Paso(
             "primera",
-            "tomando la posicion con que empezo cada identidad",
+            "tomando el estado con que empezo cada identidad",
             f"""
--- La posicion con que empezo. Es el otro extremo REAL del recorrido: el
--- desplazamiento neto se mide entre esta y la del representante, no entre
--- las esquinas del rectangulo, que pueden ser puntos donde el
--- establecimiento nunca estuvo.
+-- Los dos extremos REALES del recorrido, y solo lo que hace falta para las
+-- medidas de trayectoria: la posicion (para el desplazamiento neto) y la
+-- cota de empleados (para el delta). Ninguno de estos valores se guarda:
+-- se consumen aqui y lo que persiste es el escalar derivado.
 CREATE TEMP TABLE primera ON COMMIT DROP AS
 SELECT DISTINCT ON (clee_resuelto)
        clee_resuelto, latitud AS lat_primera, longitud AS lon_primera,
@@ -524,17 +539,14 @@ ORDER BY clee_resuelto, period ASC, id
 """,
         ),
         _Paso(
-            "representante",
+            "ultima",
             "tomando el estado con que termino cada identidad",
             f"""
--- La fila con que el establecimiento "termino": el corte mas reciente,
--- desempatado por id para que el resultado sea determinista.
-CREATE TEMP TABLE representante ON COMMIT DROP AS
+-- El otro extremo: el corte mas reciente en que se observo, desempatado
+-- por id para que el resultado sea determinista.
+CREATE TEMP TABLE ultima ON COMMIT DROP AS
 SELECT DISTINCT ON (clee_resuelto)
-       clee_resuelto, nom_estab, raz_social, codigo_act,
-       cve_ent, cve_mun, cod_postal, tipo_asent, latitud, longitud, h3_cell_9,
-       per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
-       cve_loc, ageb, h3_cell_5
+       clee_resuelto, latitud, longitud, empleados_min
 FROM {obs}
 WHERE bloque = {bloque}
 ORDER BY clee_resuelto, period DESC, id
@@ -549,17 +561,15 @@ INSERT INTO {schema}.{destino} (
     primer_periodo, ultimo_periodo, idx_primer, idx_ultimo,
     cortes_observados, huecos, cortes_tras_ultimo,
     duracion_periodos, presente_desde_el_inicio, fecha_alta_date, dias_alta_a_primera,
-    per_ocu, categoria_tamano, empleados_min, empleados_max,
     cambio_tamano, delta_empleados_min,
-    tipounieco,
-    cve_loc, ageb, h3_cell_5, en_centro_comercial,
     cortes_idx, cortes_directo, cortes_propagado,
     n_nombres, cambio_actividad, cambio_municipio, n_direcciones,
-    tiene_telefono, tiene_correo, tiene_sitio,
-    lat_primera, lon_primera, n_posiciones, desplazamiento_neto_m,
-    lat_min, lat_max, lon_min, lon_max, dispersion_max_m,
-    nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal, tipo_asent,
-    latitud, longitud, h3_cell_9
+    tiene_nombre, tiene_razon_social, tiene_actividad, tiene_municipio,
+    tiene_localidad, tiene_ageb, tiene_cod_postal, tiene_tipo_asent,
+    tiene_coordenadas, tiene_estrato_personal, tiene_tipounieco,
+    tiene_telefono, tiene_correo, tiene_sitio, en_centro_comercial,
+    n_posiciones, desplazamiento_neto_m,
+    lat_min, lat_max, lon_min, lon_max, dispersion_max_m
 )
 SELECT
     v.clee_resuelto,
@@ -575,15 +585,11 @@ SELECT
     v.fecha_alta_date,
     CASE WHEN v.fecha_alta_date IS NULL THEN NULL
          ELSE (v.primer_periodo - v.fecha_alta_date) END AS dias_alta_a_primera,
-    r.per_ocu, r.categoria_tamano, r.empleados_min, r.empleados_max,
     v.n_estratos > 1 AS cambio_tamano,
     -- Trayectoria de tamano: ultimo menos primero, en empleados. Respeta el
     -- orden, asi que distingue crecer de encogerse -- que un conteo de
     -- estratos distintos no puede.
-    r.empleados_min - p.empleados_min_primera AS delta_empleados_min,
-    r.tipounieco,
-    r.cve_loc, r.ageb, r.h3_cell_5,
-    COALESCE(v.en_centro_comercial, FALSE) AS en_centro_comercial,
+    u.empleados_min - p.empleados_min_primera AS delta_empleados_min,
     v.cortes_idx,
     COALESCE(v.cortes_directo, 0) AS cortes_directo,
     COALESCE(v.cortes_propagado, 0) AS cortes_propagado,
@@ -591,17 +597,29 @@ SELECT
     v.n_actividades > 1 AS cambio_actividad,
     v.n_municipios > 1 AS cambio_municipio,
     v.n_direcciones,
+    COALESCE(v.tiene_nombre, FALSE) AS tiene_nombre,
+    COALESCE(v.tiene_razon_social, FALSE) AS tiene_razon_social,
+    COALESCE(v.tiene_actividad, FALSE) AS tiene_actividad,
+    COALESCE(v.tiene_municipio, FALSE) AS tiene_municipio,
+    COALESCE(v.tiene_localidad, FALSE) AS tiene_localidad,
+    COALESCE(v.tiene_ageb, FALSE) AS tiene_ageb,
+    COALESCE(v.tiene_cod_postal, FALSE) AS tiene_cod_postal,
+    COALESCE(v.tiene_tipo_asent, FALSE) AS tiene_tipo_asent,
+    COALESCE(v.tiene_coordenadas, FALSE) AS tiene_coordenadas,
+    COALESCE(v.tiene_estrato_personal, FALSE) AS tiene_estrato_personal,
+    COALESCE(v.tiene_tipounieco, FALSE) AS tiene_tipounieco,
     COALESCE(v.tiene_telefono, FALSE) AS tiene_telefono,
     COALESCE(v.tiene_correo, FALSE) AS tiene_correo,
     COALESCE(v.tiene_sitio, FALSE) AS tiene_sitio,
-    p.lat_primera, p.lon_primera,
+    COALESCE(v.en_centro_comercial, FALSE) AS en_centro_comercial,
     COALESCE(v.n_posiciones, 0) AS n_posiciones,
-    -- Neto: entre dos puntos REALES, respetando el orden temporal.
-    CASE WHEN p.lat_primera IS NULL OR r.latitud IS NULL THEN NULL ELSE
+    -- Neto: entre dos puntos REALES, respetando el orden temporal. Los dos
+    -- puntos se consumen aqui; lo que persiste es esta distancia.
+    CASE WHEN p.lat_primera IS NULL OR u.latitud IS NULL THEN NULL ELSE
         2 * {_EARTH_RADIUS_M} * ASIN(SQRT(
-            POWER(SIN(RADIANS(r.latitud - p.lat_primera) / 2), 2)
-            + COS(RADIANS(p.lat_primera)) * COS(RADIANS(r.latitud))
-            * POWER(SIN(RADIANS(r.longitud - p.lon_primera) / 2), 2)
+            POWER(SIN(RADIANS(u.latitud - p.lat_primera) / 2), 2)
+            + COS(RADIANS(p.lat_primera)) * COS(RADIANS(u.latitud))
+            * POWER(SIN(RADIANS(u.longitud - p.lon_primera) / 2), 2)
         ))
     END AS desplazamiento_neto_m,
     v.lat_min, v.lat_max, v.lon_min, v.lon_max,
@@ -612,13 +630,10 @@ SELECT
             + COS(RADIANS(v.lat_min)) * COS(RADIANS(v.lat_max))
             * POWER(SIN(RADIANS(v.lon_max - v.lon_min) / 2), 2)
         ))
-    END AS dispersion_max_m,
-    r.nom_estab, r.raz_social, r.codigo_act, r.cve_ent, r.cve_mun, r.cod_postal,
-    r.tipo_asent,
-    r.latitud, r.longitud, r.h3_cell_9
+    END AS dispersion_max_m
 FROM ventana v
 JOIN primera p USING (clee_resuelto)
-JOIN representante r USING (clee_resuelto)
+JOIN ultima u USING (clee_resuelto)
 """,
         ),
     ]

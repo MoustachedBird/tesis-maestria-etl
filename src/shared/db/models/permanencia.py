@@ -25,12 +25,38 @@ Una tabla por método y no una con columna `metodo`, por el mismo motivo que
 una consulta no puede mezclarlos por descuido. Con una sola tabla, un
 `WHERE metodo = 'radio'` olvidado devuelve dos filas por establecimiento y
 los agregados salen al doble, en silencio y sin error.
+
+**Ningún valor de un corte concreto.** La tabla guarda solo tres clases de
+columna, y las tres son propiedades de la vida completa del
+establecimiento:
+
+1. **La ventana y su censura** (`idx_primer`, `cortes_tras_ultimo`, ...).
+2. **Agregados de trayectoria**: cuánto varió algo, no en qué valor quedó
+   (`n_nombres`, `cambio_municipio`, `delta_empleados_min`,
+   `desplazamiento_neto_m`, el rectángulo envolvente).
+3. **Cobertura del dato** (`tiene_*`): si el campo vino lleno en al menos
+   un corte. Los datos del DENUE son de encuesta y cualquier campo puede
+   venir vacío, o faltar en un periodo completo; estas banderas dicen de
+   qué establecimientos se puede afirmar algo y de cuáles no.
+
+Lo que **no** hay es el valor "del corte más reciente" de ningún campo
+oficial --nombre, actividad, municipio, estrato de personal, tipo de
+unidad, coordenadas, asentamiento--. Un valor así congela un instante de
+algo que cambia entre cortes, y encima es el peor de los dos mundos: ocupa
+espacio en 10M filas y de todos modos no contesta "¿qué valores tuvo?".
+Los valores, TODOS y corte por corte, salen de unir `clee_resuelto` con la
+tabla de identidad del método y de ahí a los hechos:
+
+    permanencia_<m>  ←many:1─  clee_<m>  ─1:1→  establecimientos
+
+No hace falta tabla puente: `clee_<m>` lo es, y tiene índice por
+`clee_resuelto`. La consulta está en `AGENTS.md` §N3 y ejecutable en
+`tests/unit/test_permanencia.py:variantes()`.
 """
 
 from datetime import date, datetime
 
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -139,23 +165,10 @@ class PermanenciaMixin:
         ),
     )
 
-    # ===== TAMANO =====
-    # El protocolo nombra el tamano como variable del establecimiento, y el
-    # catalogo `denue_estratos_personal` trae la cota de empleados y la
-    # categoria MIPYME, que es el sujeto mismo de la tesis.
-    per_ocu: Mapped[str | None] = mapped_column(
-        String, comment="Estrato de personal ocupado en el corte mas reciente"
-    )
-    categoria_tamano: Mapped[str | None] = mapped_column(
-        String,
-        comment="Micro / Small / Medium / Large / Unknown en el corte mas reciente",
-    )
-    empleados_min: Mapped[int | None] = mapped_column(
-        Integer, comment="Cota inferior de empleados del estrato mas reciente"
-    )
-    empleados_max: Mapped[int | None] = mapped_column(
-        Integer, comment="Cota superior de empleados del estrato mas reciente"
-    )
+    # ===== TRAYECTORIA DE TAMANO =====
+    # El protocolo nombra el tamano como variable del establecimiento, pero
+    # lo que se materializa es como CAMBIO, no en que estrato quedo: el
+    # estrato de un corte concreto se recupera por el join.
     cambio_tamano: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si cambio de estrato de personal entre cortes"
     )
@@ -166,34 +179,6 @@ class PermanenciaMixin:
             "Positivo = crecio, negativo = se encogio. Es una medida de "
             "trayectoria, no de nivel, y por eso respeta el orden temporal"
         ),
-    )
-
-    # ===== TIPO DE UNIDAD ECONOMICA =====
-    # Distingue fijo de semifijo y ambulante, que tienen dinamicas de
-    # supervivencia distintas -- y determina si el negocio es verificable
-    # con fuentes externas (un puesto ambulante no deja rastro digital).
-    tipounieco: Mapped[str | None] = mapped_column(
-        String, comment="Tipo de unidad economica en el corte mas reciente"
-    )
-
-    # ===== GEOGRAFIA FINA =====
-    cve_loc: Mapped[str | None] = mapped_column(
-        String(4), comment="Localidad en el corte mas reciente: distingue urbano de rural"
-    )
-    ageb: Mapped[str | None] = mapped_column(
-        String,
-        comment=(
-            "Area Geoestadistica Basica del corte mas reciente. Es la llave con que "
-            "se une a los indices de marginacion y a los datos censales por AGEB"
-        ),
-    )
-    h3_cell_5: Mapped[int | None] = mapped_column(
-        BigInteger, comment="Celda H3 res 5 (~8.5 km) del corte mas reciente, para agregados"
-    )
-    en_centro_comercial: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="True si en algun corte estuvo dentro de un centro comercial o mercado",
     )
 
     # ===== PATRON DE PRESENCIA Y CONFIANZA EN LA IDENTIDAD =====
@@ -246,16 +231,75 @@ class PermanenciaMixin:
         Integer, nullable=False, comment="Cuantos domicilios distintos tuvo"
     )
 
-    # ===== CONTACTO: SI LO HUBO, no cual =====
-    # Banderas y no valores, por el mismo criterio que las variantes: los
-    # numeros y correos salen de la vista cuando se necesitan, que es para
-    # una muestra y no para los 10M.
+    # ===== COBERTURA DEL DATO: SI LO HUBO, no cual =====
+    # Una bandera por campo oficial: True si vino lleno (no nulo y no cadena
+    # vacia) en AL MENOS UN corte. Son UNION sobre toda la vida, no del corte
+    # mas reciente, y eso es lo que las hace utiles: para verificar si un
+    # negocio cerro sirve cualquier telefono que haya publicado, aunque fuera
+    # en 2016.
     #
-    # Son UNION sobre todos los cortes, no del mas reciente: para verificar
-    # si un negocio cerro sirve cualquier telefono que haya publicado, aunque
-    # fuera en 2016. Y la bandera por si misma es variable del modelo
-    # --correlaciona con formalidad-- y filtro de verificabilidad para el
-    # agente que busca en fuentes externas.
+    # No son un sustituto del valor, son otra pregunta: "de este
+    # establecimiento, se puede afirmar algo sobre este campo?". Los datos
+    # del DENUE son de encuesta y cualquier campo puede venir vacio o faltar
+    # en un periodo completo, asi que la cobertura es informacion de primera
+    # clase -- y la que decide si una unidad entra o no a un analisis que
+    # dependa de ese campo.
+    tiene_nombre: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si publico nombre comercial en algun corte"
+    )
+    tiene_razon_social: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si publico razon social en algun corte. Tipicamente solo la tienen "
+            "las unidades formalmente constituidas, asi que correlaciona con formalidad"
+        ),
+    )
+    tiene_actividad: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si tuvo codigo SCIAN en algun corte"
+    )
+    tiene_municipio: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si tuvo entidad y municipio en algun corte"
+    )
+    tiene_localidad: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment="True si tuvo clave de localidad en algun corte (distingue urbano de rural)",
+    )
+    tiene_ageb: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si tuvo AGEB en algun corte. Es la llave con que se une a los "
+            "indices de marginacion y a los datos censales, asi que en False "
+            "significa que esa unidad no puede entrar a ese analisis"
+        ),
+    )
+    tiene_cod_postal: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si publico codigo postal en algun corte"
+    )
+    tiene_tipo_asent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si tuvo tipo de asentamiento en algun corte"
+    )
+    tiene_coordenadas: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si tuvo latitud Y longitud en algun corte. En False, las medidas "
+            "geograficas de esta fila son todas nulas por construccion"
+        ),
+    )
+    tiene_estrato_personal: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si tuvo estrato de personal ocupado en algun corte. En False, "
+            "`cambio_tamano` y `delta_empleados_min` no significan nada"
+        ),
+    )
+    tiene_tipounieco: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, comment="True si tuvo tipo de unidad economica en algun corte"
+    )
     tiene_telefono: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si publico telefono en algun corte"
     )
@@ -265,14 +309,18 @@ class PermanenciaMixin:
     tiene_sitio: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si publico sitio web en algun corte"
     )
+    en_centro_comercial: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment="True si en algun corte estuvo dentro de un centro comercial o mercado",
+    )
 
     # ===== GEOGRAFIA: DOS MEDIDAS, QUE RESPONDEN COSAS DISTINTAS =====
-    lat_primera: Mapped[float | None] = mapped_column(
-        Double, comment="Latitud en el PRIMER corte en que se observo"
-    )
-    lon_primera: Mapped[float | None] = mapped_column(
-        Double, comment="Longitud en el primer corte en que se observo"
-    )
+    # Las coordenadas de un corte concreto NO se guardan (ni la primera ni la
+    # ultima): salen del join. Lo que se materializa son las medidas sobre
+    # toda la vida, que es lo que no se puede recomputar sin barrer los
+    # 82.9M. El rectangulo envolvente ademas sirve de ubicacion aproximada
+    # --su centro-- cuando basta con saber donde esta.
     n_posiciones: Mapped[int] = mapped_column(
         Integer, nullable=False, comment="Pares (lat, lon) distintos que tuvo"
     )
@@ -300,41 +348,6 @@ class PermanenciaMixin:
         ),
     )
 
-    # ===== REPRESENTANTE (del corte mas reciente) =====
-    # Los atributos con que el modelo describe al establecimiento. Se toman
-    # del corte mas reciente en que se observo: es el estado con que
-    # "termino", y para un establecimiento que cerro es el ultimo conocido.
-    nom_estab: Mapped[str | None] = mapped_column(String, comment="Nombre en el corte mas reciente")
-    raz_social: Mapped[str | None] = mapped_column(
-        String, comment="Razon social en el corte mas reciente"
-    )
-    codigo_act: Mapped[str | None] = mapped_column(
-        String(10), comment="SCIAN en el corte mas reciente"
-    )
-    cve_ent: Mapped[str | None] = mapped_column(
-        String(2), comment="Entidad en el corte mas reciente"
-    )
-    cve_mun: Mapped[str | None] = mapped_column(
-        String(3), comment="Municipio en el corte mas reciente"
-    )
-    cod_postal: Mapped[str | None] = mapped_column(
-        String, comment="Codigo postal en el corte mas reciente"
-    )
-    tipo_asent: Mapped[str | None] = mapped_column(
-        String,
-        comment=(
-            "Tipo de asentamiento en el corte mas reciente (colonia, fraccionamiento, "
-            "pueblo...). El protocolo lo nombra como variable del establecimiento"
-        ),
-    )
-    latitud: Mapped[float | None] = mapped_column(Double, comment="Latitud del corte mas reciente")
-    longitud: Mapped[float | None] = mapped_column(
-        Double, comment="Longitud del corte mas reciente"
-    )
-    h3_cell_9: Mapped[int | None] = mapped_column(
-        BigInteger, comment="Celda H3 res 9 del corte mas reciente (int64, no cabe en Integer)"
-    )
-
     construida_en: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -347,15 +360,18 @@ class PermanenciaMixin:
 
         No se particiona: el grano es el establecimiento, que **cruza** los
         periodos, así que no hay clave de partición natural. Son ~10M filas
-        angostas y el acceso es por filtros de atributos, no por corte.
+        angostas y el acceso es por la ventana y la censura.
+
+        **No hay índice geográfico ni por actividad**, y no es un olvido:
+        esas columnas ya no viven aquí. Estratificar por sector o por
+        municipio se hace uniendo a `clee_<metodo>` y a los hechos, donde
+        `ix_estab_geo` e `ix_estab_activity_period` sí existen.
         """
         tabla = cls.__tablename__
         return (
             # El analisis de supervivencia filtra y estratifica por aqui.
             Index(f"ix_{tabla}_ventana", "idx_primer", "idx_ultimo"),
             Index(f"ix_{tabla}_censura", "cortes_tras_ultimo"),
-            Index(f"ix_{tabla}_geo", "cve_ent", "cve_mun"),
-            Index(f"ix_{tabla}_actividad", "codigo_act"),
             # Separa lo que INEGI identifico de lo que el pipeline infirio.
             Index(f"ix_{tabla}_sintetica", "es_sintetica"),
             {"schema": SCHEMA},
