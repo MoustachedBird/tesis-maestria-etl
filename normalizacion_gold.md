@@ -101,11 +101,12 @@ La pasada cara va **una sola vez** a una temporal; de ahí salen todas las
 preguntas sin volver a tocar los 82.9M:
 
 ```sql
--- La memoria compartida de una consulta paralela es ~ workers x work_mem, y
--- tiene que caber en PG_SHM_SIZE (4 GB). 4 x 512 MB entra con holgura; 8 x
--- 4 GB pide 32 GB y muere con "could not resize shared memory segment".
-SET max_parallel_workers_per_gather = 4;
-SET work_mem = '512MB';
+-- SIN paralelismo, a proposito: la memoria compartida de una consulta
+-- paralela es ~ workers x work_mem y tiene que caber en PG_SHM_SIZE. En 0
+-- workers, work_mem es memoria PRIVADA y no toca la shm. Ver el encabezado
+-- del .sql para la aritmetica y el incidente que lo motivo.
+SET max_parallel_workers_per_gather = 0;
+SET work_mem = '2GB';
 
 CREATE TEMP TABLE pares AS
 SELECT r.clee_resuelto AS c_radio,

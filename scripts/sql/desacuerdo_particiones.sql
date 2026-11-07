@@ -15,14 +15,24 @@
 
 \timing on
 
--- La memoria compartida que pide una consulta paralela es
--- aproximadamente `max_parallel_workers_per_gather x work_mem`, y tiene que
--- caber en el /dev/shm del contenedor (PG_SHM_SIZE, 4 GB por default). De
--- ahi estos dos valores: 4 x 512 MB = 2 GB, con holgura. Subir work_mem a
--- 4 GB con 8 workers pide 32 GB y la consulta muere con "could not resize
--- shared memory segment".
-SET max_parallel_workers_per_gather = 4;
-SET work_mem = '512MB';
+-- SIN PARALELISMO, a proposito.
+--
+-- La memoria compartida que pide una consulta paralela es aproximadamente
+-- `max_parallel_workers_per_gather x work_mem`, y tiene que caber en el
+-- /dev/shm del contenedor (`PG_SHM_SIZE`). Con 8 workers y los 256 MB que
+-- el servidor trae por default eso ya son 2 GB, y una maquina con 1 GB de
+-- shm muere con "could not resize shared memory segment ... No space left
+-- on device" -- medido en indominus el 2026-11-07.
+--
+-- En 0 workers el problema no existe: `work_mem` pasa a ser memoria PRIVADA
+-- del backend y puede ser grande sin tocar la shm. Esta consulta se corre
+-- una vez, asi que la robustez vale mas que la velocidad.
+--
+-- Si /dev/shm esta en 4 GB o mas (`docker compose exec postgres df -h
+-- /dev/shm`), subir a `max_parallel_workers_per_gather = 4` y
+-- `work_mem = '512MB'` la acelera varias veces.
+SET max_parallel_workers_per_gather = 0;
+SET work_mem = '2GB';
 
 -- ---------------------------------------------------------------------------
 -- La pasada cara, una sola vez. El join es partition-wise --las dos tablas
