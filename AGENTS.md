@@ -1446,68 +1446,109 @@ duckdb data/silver/mipymes.duckdb "CREATE INDEX ix_estab_h3_9 ON establecimiento
 
 ### ETL Pipeline Flow
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                   DENUE TRANSFORMER (Orchestrator)                    │
-│  ┌────────────────┬─────────────────┬──────────────┬──────────────┐ │
-│  │ TransformStage │ CLEEResolver    │ LoaderStage  │ Metadata     │ │
-│  │ (ZIP->Silver)  │ (Entity Resoln) │ (Silver->Gold│ Tracker      │ │
-│  └────────────────┴─────────────────┴──────────────┴──────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
+Tres comandos (`src/etl/main.py`), y dentro de cada uno secciones
+seleccionables con `--only` / `--no-*`. `pipeline` = `extract` (opt-in) +
+`transform`.
 
-Data Flow:
-  EXTRACT   -> download_tasks  (lineage: WEB -> FILE)
-  TRANSFORM -> process_tasks   (lineage: FILE -> TABLE in Silver)
-  H3_CELLS  -> process_tasks   (job denue_h3_backfill, Silver in-place UPDATE)
-  LOAD      -> process_tasks   (lineage: Silver -> Gold file copy)
-  CLEE_RESOLUTION -> clee_resolution_tasks (lineage: Silver DuckDB in-place)
+```
+extract
+  denue    DenueExtractor (Selenium)   -> data/bronze/denue/<corte>/*.zip
+  sesnsp   SesnspExtractor (CKAN)      -> data/bronze/sesnsp/*.csv
+           bronze_sync                  registra en meta lo que ya esta en disco
+
+transform  (en este orden; cada seccion lee lo que la anterior escribio)
+  ingest             ZIP           -> silver.establecimientos   (particionada por corte)
+  clee-radio         Silver        -> silver.clee_radio          (identidad, BallTree)
+  clee-h3            Silver        -> silver.clee_h3             (identidad, blocking H3)
+  permanencia-radio  Silver+clee   -> silver.permanencia_radio   (una fila por establecimiento)
+  permanencia-h3     Silver+clee   -> silver.permanencia_h3
+  sesnsp             CSV           -> silver.sesnsp_incidencia_municipal
+```
+
+Ni la fecha de alta ni las celdas H3 son secciones: el ingest las deriva
+antes del `COPY` (`transformers/enrich.py`).
+
+Qué registra cada sección en `meta`:
+
+```
+  extract            -> download_tasks         (job_type DOWNLOAD)
+  ingest             -> process_tasks          (job_type TRANSFORM, una tarea por ZIP)
+  sesnsp             -> process_tasks          (job_type TRANSFORM, job sesnsp_transform)
+  clee-radio | -h3   -> clee_resolution_tasks  (job_type CLEE_RESOLUTION)
+  permanencia-*      -> process_tasks          (job_type PERMANENCIA, una tarea por metodo)
 ```
 
 ### Metadata Layer
 
+Mismo PostgreSQL que los datos (base `mipymes`, schema `meta`), no un
+almacén aparte: que esté en la misma base es lo que permite hacer JOIN
+entre una tarea y las filas que describe.
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                 data/metadata.duckdb                         │
-│  ┌────────────┬────────────────┬──────────────┐             │
-│  │ job_runs   │ download_tasks │ data_lineage │             │
-│  │ (run-level)│ (file-level)   │ (provenance) │             │
-│  ├────────────┼────────────────┼──────────────┤             │
-│  │ process_   │ clee_          │              │             │
-│  │ tasks      │ resolution_    │              │             │
-│  │            │ tasks          │              │             │
-│  └────────────┴────────────────┴──────────────┘             │
-└─────────────────────────────────────────────────────────────┘
+schema meta  (5 tablas + alembic_version)
+
+  job_runs                  una corrida: job_name, job_type, status, duracion
+    ├─ download_tasks       un archivo descargado (reintentos, hash, velocidad)
+    ├─ process_tasks        un ZIP/CSV ingestado, o una tabla derivada completa
+    └─ clee_resolution_tasks  una pasada de resolucion de identidad
+  data_lineage              origen -> destino de cada escritura
+
+Las tres tablas de tareas cuelgan de job_runs con FK ON DELETE CASCADE.
+`data_lineage` la referencia opcional: hay linaje que no nace de una tarea
+(la siembra de un catalogo, por ejemplo).
 ```
 
 ### Storage Layer
 
+Silver, Gold y meta viven en PostgreSQL. En disco solo queda lo que entra
+al pipeline, lo regenerable y los logs.
+
 ```
-data/bronze/denue/{period}/*.zip      # Raw downloads
-data/bronze/sesnsp/*.csv              # SESNSP crime CSV (one file per monthly cut)
-data/silver/mipymes.duckdb              # Silver DuckDB warehouse (incl. clee_propagado_radio/_h3, h3_cell_9/5, sesnsp_*)
-data/silver/kb_cache/{radio|h3}/      # Per-method KB cache (parquet, regenerable)
-data/gold/mipymes.duckdb                # Gold DuckDB warehouse (production)
+data/bronze/denue/<corte>/*.zip   # descargas crudas de INEGI (484 archivos, ~9.1G)
+data/bronze/sesnsp/*.csv          # CSV consolidado del SESNSP, uno por corte publicado
+data/seeds/*.parquet              # catalogos versionados: la fuente de verdad
+data/kb_cache/{radio|h3}/         # KB de referencia por metodo (parquet, regenerable)
+data/etl_*.log                    # un log por stage (ver abajo)
 ```
+
+`gold` existe como schema desde el baseline pero todavía no tiene tablas:
+no hay nada que promover.
 
 ### Logging Layer
 
+Dos mecanismos distintos. El **log por stage** es un archivo de texto por
+etapa, que es lo que se le hace `tail -f` durante las horas que tarda:
+
+```
+data/etl_process.log                      # ingest
+data/etl_clee_resolution_{radio|h3}.log   # resolucion de identidad, uno por metodo
+data/etl_permanencia.log                  # permanencia, los dos metodos
+data/etl_sesnsp.log                        # SESNSP
+```
+
+El **log estructurado** es solo de las descargas, que son cientos de
+tareas con reintentos y necesitan algo consultable:
+
 ```
 logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
-├── structured.jsonl     (machine-readable)
-├── application.log      (human-readable)
-├── errors.log           (errors only)
-└── summary.json         (run statistics)
+├── app.log       (JSON, una linea por evento)
+└── errors.log    (solo errores)
+logs/downloads/latest -> la corrida mas reciente
 ```
 
 ---
 
 ## Database
 
-### ORM Models (11 tables)
+### ORM Models (15 tables en `silver`)
 
 | Model | Table | Primary Key | Rows |
 |-------|-------|------------|------|
-| `Establecimiento` | `establecimientos` | `id` (hash) | 100M+ |
+| `Establecimiento` | `establecimientos` | `(id, period)` | 82.9M |
+| `CleeRadio` | `clee_radio` | `(id, period)` | 82.9M |
+| `CleeH3` | `clee_h3` | `(id, period)` | 82.9M |
+| `PermanenciaRadio` | `permanencia_radio` | `clee_resuelto` | ~10M |
+| `PermanenciaH3` | `permanencia_h3` | `clee_resuelto` | ~10M |
 | `SesnspDelito` | `sesnsp_delitos` | `id` (surrogate, seed order) | 98 |
 | `SesnspIncidenciaMunicipal` | `sesnsp_incidencia_municipal` | `(cve_ent, cve_mun, delito_id, fecha)` | ~30.7M |
 | `ActividadEconomica` | `denue_actividades_economicas` | `codigo_act` | 1,127 |
@@ -1516,8 +1557,11 @@ logs/downloads/YYYY-MM-DD/run_TIMESTAMP/
 | `TipoAsentamiento` | `denue_tipos_asentamiento` | `id` (surrogate) | 45 |
 | `TipoUnidadEconomica` | `denue_tipos_unidad_economica` | `id` (surrogate) | 3 |
 | `Entidad` | `denue_entidades` | `cve_ent` | 32 |
-| `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,478 |
-| `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 39,140 |
+| `Municipio` | `denue_municipios` | `(cve_ent, cve_mun)` | 2,486 |
+| `Localidad` | `denue_localidades` | `(cve_ent, cve_mun, cve_loc)` | 40,388 |
+
+Las tres primeras están **particionadas por corte** (`period`); las cuentas
+de catálogo son las que imprime la siembra de la migración.
 
 ### Los seeds parquet son la fuente de verdad de los catálogos
 

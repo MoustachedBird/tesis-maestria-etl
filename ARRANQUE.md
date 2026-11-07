@@ -26,11 +26,11 @@ docker ps -q --filter "name=tesis-maestria-etl-etl-run" | xargs -r docker rm -f
 docker ps -q --filter "name=tesis-maestria-etl-tools-run" | xargs -r docker rm -f
 docker compose down -v
 docker run --rm --entrypoint sh -v "$PWD:/w" -w /w python:3.12-slim -c \
-  'rm -rf logs/downloads data/bronze extract.log ingest.log clee.log htmlcov coverage.xml'
+  'rm -rf logs/downloads data/bronze data/etl_*.log extract.log ingest.log clee.log permanencia.log htmlcov coverage.xml'
 git pull
 docker compose --profile manual --profile tools build
 docker compose up -d
-docker compose logs migrate --no-log-prefix | tail -20
+docker compose logs migrate --no-log-prefix | tail -25
 ```
 
 `--profile manual --profile tools` no es opcional: `docker compose build`
@@ -40,7 +40,26 @@ queda con la imagen vieja sin avisar.
 Lo que escribieron corridas anteriores quedó con dueño root. El contenedor
 de arriba también es root, así que borra sin `sudo`.
 
-Esperado: `silver: 12 tablas`, `meta: 6 tablas`, y las cuatro líneas de siembra.
+Esperado (la cadena son siete revisiones; `b0000` crea y las demás ajustan):
+
+```
+   Schemas creados: silver, gold, meta
+   silver: 11 tablas
+   meta: 5 tablas
+   Rol api_ro: SELECT en gold, meta (sin acceso a silver)
+   Geografia: {'denue_entidades': 32, 'denue_municipios': 2486, 'denue_localidades': 40388}
+   SCIAN: {'denue_actividades_economicas': 1127}
+   Dominios: {'denue_tipos_vialidad': 39, 'denue_tipos_asentamiento': 45, 'denue_tipos_unidad_economica': 3}
+   Estratos: {'denue_estratos_personal': 8}
+   silver: 2 tablas de resolucion CLEE (clee_radio, clee_h3)
+   silver: 2 tablas de permanencia (permanencia_radio, permanencia_h3)
+   silver.entidades_economicas eliminada (estaba vacia)
+   silver: 4 vistas de permanencia eliminadas
+```
+
+Al final: **15 tablas en `silver`** (11 del baseline + 2 de CLEE + 2 de
+permanencia), **5 en `meta`** (más `alembic_version`, que es de Alembic) y
+`gold` vacío: todavía no hay tabla que promover.
 
 ## 2. Descargar Bronze
 
@@ -150,7 +169,8 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
 
 ## 7. Resolución CLEE
 
-Es la etapa más larga.
+Es la etapa más larga: ~1 noche por método. Escribe `silver.clee_<metodo>`,
+no `establecimientos`.
 
 ```bash
 cd ~/tesis-maestria-etl
@@ -159,8 +179,21 @@ sleep 10
 tail -f clee.log
 ```
 
+`clee-h3` es el track de comparación y cuesta otra noche; solo si hace falta:
+
+```bash
+nohup docker compose run --rm etl transform --only clee-h3 > clee_h3.log 2>&1 &
+```
+
 ```bash
 docker compose run --rm tools python scripts/clee_propagation_stats.py
+```
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT region_group, status, entities_input, entities_matched,
+        round((duration_seconds / 3600)::numeric, 1) AS horas
+ FROM meta.clee_resolution_tasks ORDER BY created_at DESC LIMIT 10"
 ```
 
 ## 8. Evaluación del matching
@@ -173,16 +206,44 @@ docker compose run --rm tools python scripts/evaluate_masked_clee.py evaluate
 
 Esperado: 97.72% F1.
 
-## 9. Dimensión N3
+## 9. Dimensión N3: permanencia
+
+Colapsa las 82.9M observaciones a una fila por establecimiento resuelto.
+Horas, y va **después** de la resolución CLEE: lee `silver.clee_<metodo>`.
 
 ```bash
 cd ~/tesis-maestria-etl
-docker compose run --rm etl build-entidades
+nohup docker compose run --rm etl transform --only permanencia --force > permanencia.log 2>&1 &
+sleep 10
+tail -f permanencia.log
+```
+
+`--only permanencia` corre los dos métodos; `--only permanencia-radio` para
+uno solo. **Reanuda por default** (va troceada por corte y por bloque, y
+cada vuelta commitea), así que `--force` solo hace falta para rehacerla
+desde cero.
+
+```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
 "SELECT COUNT(*) AS negocios,
-        COUNT(*) FILTER (WHERE es_sintetica) AS sinteticos
- FROM silver.entidades_economicas"
+        COUNT(*) FILTER (WHERE es_sintetica) AS sinteticos,
+        COUNT(*) FILTER (WHERE cortes_tras_ultimo = 0) AS activos
+ FROM silver.permanencia_radio"
 ```
+
+Cómo terminó, sin abrir el log:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT r.job_name, t.status, t.rows_extracted, t.rows_loaded,
+        round(t.duration_seconds / 60) AS minutos, t.error_message
+ FROM meta.process_tasks t JOIN meta.job_runs r USING (run_id)
+ WHERE r.job_type = 'PERMANENCIA' ORDER BY t.created_at DESC"
+```
+
+Si una segunda corrida sale en `SKIPPED` es correcto: la tabla ya está
+construida con la identidad vigente. Si la resolución CLEE se re-corrió
+después, reconstruye sola.
 
 ## Comandos sueltos
 
