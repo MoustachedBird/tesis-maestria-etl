@@ -319,7 +319,7 @@ de herramientas que nosotros exponemos.
 
 **Hay un cuarto propuesto después:** el *reconciliador* de
 `normalizacion_gold.md`, que adjudica los clusters donde radio y H3 no
-coinciden y produce los valores canónicos de `gold.establecimientos`. Tiene
+coinciden y produce los valores canónicos de `gold.negocios_clee_oficial`. Tiene
 la misma forma que el 1 (un paso, sin tools, determinismo requerido) y
 reusa esta arquitectura completa, pero opera aguas abajo —sobre clusters ya
 formados, no sobre candidatos— y no escribe en Silver. Su construcción está

@@ -76,7 +76,7 @@ de ingest. No se puede desplegar el API sin desplegar el ETL.
 |---|---:|
 | `establecimientos` | **82,896,801 filas** × 43 columnas |
 | `sesnsp_incidencia_municipal` | 30,755,928 filas |
-| `entidades_economicas` | **0 filas** — declarada, pendiente de construir; será `gold.establecimientos` (§2.3.1) |
+| `entidades_economicas` | **0 filas** — eliminada en la migración `b0005`; la reemplazaron `silver.permanencia_<metodo>` y, en gold, `gold.negocios_clee_oficial` (§2.3.1) |
 | Periodos (cortes DENUE) | 20 |
 | Datos reales en bloques DuckDB | 28.7 GiB |
 | Archivo Silver | 49.6 GiB |
@@ -202,8 +202,15 @@ cambia**. No es la misma tabla más limpia, es otra unidad de análisis.
 
 | | Filas | Una fila es | N del estudio |
 |---|---:|---|---|
-| `silver.establecimientos` | 82,896,801 | una **observación**: (negocio, periodo) | — |
-| `gold.establecimientos` | 10,450,524 | un **negocio** con su ventana de vida | ✅ |
+| `silver.establecimientos` | 82,896,807 | una **observación**: (negocio, periodo) | — |
+| identidades resueltas (20 cortes) | 15,643,923 | un **negocio**, incluida identidad propagada y sintética | — |
+| `gold.negocios_clee_oficial` | por medir | un **negocio** de la cohorte con CLEE oficial, con su ventana de vida | ✅ |
+
+Las dos primeras cifras están medidas el 2026-11-07 (`SELECT count(*)` y
+`scripts/sql/desacuerdo_particiones.sql`); la de gold depende de cuántos
+cortes resulten oficiales, y se mide con la consulta de
+`gold_cohorte_2021.md` §1.1. El 10,450,524 que decía antes aquí venía de
+`entidades_economicas`, que nunca se pobló.
 
 El riesgo concreto: con `search_path = gold, silver`, la consulta
 `SELECT count(*) FROM establecimientos` devuelve 10.45M o 82.9M según el
@@ -215,7 +222,7 @@ Tres salvaguardas, en orden de fuerza:
 
 1. **Nunca un `search_path` con más de un schema de datos.** El default del
    rol `etl_rw` es `search_path = ''` (vacío): obliga a calificar
-   `silver.establecimientos` / `gold.establecimientos` en todo el código del
+   `silver.establecimientos` / `gold.negocios_clee_oficial` en todo el código del
    ETL. Un nombre sin calificar deja de compilar en vez de resolver mal.
 2. **El rol `api_ro` solo tiene `GRANT` en `gold` y `meta`.** Para el API la
    ambigüedad no existe: `establecimientos` solo puede ser una cosa. Esta
@@ -228,6 +235,25 @@ Alternativa descartada: nombrar la de gold por su grano (`gold.negocios`,
 `gold.establecimientos_resueltos`). Hace imposible la confusión sin
 depender de salvaguardas, a cambio de romper la simetría entre capas. Queda
 anotada por si la salvaguarda 1 resulta incómoda en la práctica.
+
+> **REVERTIDO el 2026-11-07: se adopta la alternativa.** La tabla de
+> consumo se llama **`gold.negocios_clee_oficial`**, no
+> `gold.establecimientos`. Dos razones:
+>
+> 1. **El grano tiene que estar en el nombre.** Las tres salvaguardas de
+>    arriba son correctas pero dos de ellas son disciplina (el
+>    `search_path` y el `COMMENT`); con nombres distintos la confusión entre
+>    los 82.9M de observaciones y los negocios deja de ser posible, sin
+>    depender de nadie. Es el argumento que ya estaba escrito aquí.
+> 2. **La cohorte también va en el nombre.** `gold_cohorte_2021.md`
+>    restringe la capa a los cortes con CLEE oficial, donde la identidad es
+>    observada y no inferida. Si algún día se construye la extensión de
+>    robustez sobre la ventana completa, se llama
+>    `gold.negocios_clee_propagado` y la diferencia es imposible de pasar
+>    por alto en una consulta.
+>
+> La simetría entre capas se pierde, y se acepta: el grano cambia, así que
+> la simetría estaba afirmando algo falso.
 
 ### 2.3.2 Presupuesto de CPU y RAM
 
@@ -988,16 +1014,16 @@ de este documento.
 
 El contrato ya está escrito: `docs/cruce_denue_sesnsp.md` define la unidad
 de análisis como **el negocio resuelto** (ahí todavía llamado
-`entidades_economicas`; en este esquema es `gold.establecimientos`,
-identidad `clee_propagado_radio`) con su ventana de vida
+`entidades_economicas`; en este esquema es `gold.negocios_clee_oficial`,
+identidad `silver.clee_radio.clee_resuelto`) con su ventana de vida
 `primer_periodo..ultimo_periodo`, cruzado contra incidencia delictiva
 municipal. Eso es exactamente el esquema de Gold.
 
-#### Por qué `gold.establecimientos` y no solo `silver.establecimientos`
+#### Por qué una tabla de gold y no solo `silver.establecimientos`
 
 Cuestionado y resuelto el 2026-10-07. La tabla de gold **no contiene
 información nueva**: es derivable al 100% con un `GROUP BY
-clee_propagado_radio` sobre la de silver, y el docstring del modelo actual
+clee_resuelto` sobre la de silver, y el docstring del modelo actual
 lo dice ("Fully DERIVED artifact"). La razón para materializarla no es
 informacional, es que la unidad de análisis de la tesis no es la que tiene
 la tabla de hechos.
@@ -1042,7 +1068,7 @@ excluirlas o tratarlas aparte sin un `LIKE 'NEW_%'` en cada consulta.
 - [ ] **Paso de diseño primero**: traducir `docs/cruce_denue_sesnsp.md` a un
       esquema concreto de `gold.*` — tablas, granularidad, llaves. Entregable
       revisable antes de escribir código.
-- [ ] `gold.establecimientos` como **vista materializada**, no como tabla
+- [ ] `gold.negocios_clee_oficial` como **vista materializada**, no como tabla
       construida a mano. Hoy `loaders/entidades.py` (223 líneas) hace
       `DROP + CREATE + INSERT` en cada corrida porque los ids `NEW_*` no son
       estables entre re-resoluciones. `REFRESH MATERIALIZED VIEW
@@ -1248,8 +1274,11 @@ Para delimitar el alcance:
   para cortes nuevos de INEGI.
 - **`plan.md`.** La agenda algorítmica avanza en paralelo y este documento no
   la altera. Con una salvedad: la **Fase 5 depende de ella** — Gold no se
-  puede poblar hasta que la re-resolución CLEE produzca
-  `gold.establecimientos`. Es el único acoplamiento entre los dos documentos.
+  puede poblar hasta que la resolución CLEE produzca la identidad que
+  `gold.negocios_clee_oficial` agrega. Es el único acoplamiento entre los
+  dos documentos, y `gold_cohorte_2021.md` lo acota: basta con la fase 1
+  determinística (los cortes con CLEE oficial), no con la propagación
+  completa.
 
 ---
 

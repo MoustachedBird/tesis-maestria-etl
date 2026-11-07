@@ -6,21 +6,31 @@ está vacío a propósito, para que el schema exista en las migraciones y la
 estructura de `models/` no cambie cuando se llene.
 
 Las reglas de normalización —qué valor canónico toma cada campo a partir de
-las ~20 observaciones del negocio, y dónde interviene un LLM— están en
+las observaciones del negocio, y dónde interviene un LLM— están en
 `normalizacion_gold.md`. Es ahí, y no en Silver, donde SÍ se materializa un
 valor por campo: Gold es la capa citable y tiene que ser estable aunque la
 identidad se re-resuelva después (ver `normalizacion_gold.md` §0.1).
 
-Lo que vendrá aquí, con el contrato ya escrito en
-`docs/cruce_denue_sesnsp.md`:
+El alcance lo fija `gold_cohorte_2021.md`: **solo los cortes en que INEGI
+publica el CLEE**, donde la identidad es observada y no inferida.
 
-- `Establecimiento` — una fila por negocio resuelto, con la **regla de
-  cierre aplicada** sobre `silver.permanencia_<metodo>` del método elegido.
-  Esa tabla ya trae la ventana observada y los ingredientes de censura
-  (`huecos`, `cortes_tras_ultimo`); lo que Gold agrega es el veredicto, y
-  por eso espera a que la regla esté validada. **Mismo nombre que
-  `silver.Establecimiento` y grano distinto**: ~10M negocios frente a 82.9M
-  observaciones.
+Lo que vendrá aquí:
+
+- `NegocioCleeOficial` → `gold.negocios_clee_oficial`. Una fila por negocio
+  de la cohorte, con su ventana de vida calculada **solo** sobre los cortes
+  oficiales. No se copia de `silver.permanencia_<metodo>`: esa tabla agrega
+  sobre los 20 cortes y una fila suya mezcla identidad observada con
+  identidad propagada (`gold_cohorte_2021.md` §4).
+- `VarianteNegocio` → `gold.variantes_negocio`. Los alias de cada negocio,
+  con índice trigram para búsqueda difusa (`normalizacion_gold.md` §6).
 - Los agregados del análisis: panel negocio×periodo e incidencia municipal
-  alineada temporalmente.
+  alineada temporalmente, con el contrato de `docs/cruce_denue_sesnsp.md`.
+
+**No se llama `gold.establecimientos`.** `arquitectura.md` §2.3.1 eligió ese
+nombre y dejó anotada la alternativa; se adopta la alternativa (decidido
+2026-11-07) porque el grano es distinto —un negocio, no una observación— y
+el nombre tiene que decirlo. El beneficio es estructural y no estético: con
+nombres distintos, confundir la N de 82.9M observaciones con la de los
+negocios deja de ser posible, y las tres salvaguardas de §2.3.1 dejan de
+depender de la disciplina de quien escribe la consulta.
 """

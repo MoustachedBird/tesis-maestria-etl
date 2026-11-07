@@ -324,10 +324,12 @@ método nuevo puede tocar. Si hubiera que elegir una sola cosa, es esa.
    método individual? Si no, el consenso no entra a Gold y el mejor método
    individual se publica solo.
 
-Y la regla que gobierna todo el orden: **`gold.establecimientos` se
-construye primero con un solo método** (`normalizacion_gold.md` §11), sin
-esperar nada de esto. El consenso es una mejora posterior sobre una capa
-que ya funciona, no un prerrequisito.
+Y la regla que gobierna todo el orden: **`gold.negocios_clee_oficial` se
+construye primero y sin nada de esto** (`gold_cohorte_2021.md`). Sobre los
+cortes con CLEE oficial no hay identidades propagadas que reconciliar, así
+que el consenso es una mejora posterior sobre una capa que ya funciona — y
+su valor real es **extender la ventana a 2015-2020**, no unificar
+identidades.
 
 ---
 

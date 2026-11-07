@@ -165,7 +165,7 @@ def _grant_read_only_role(conn, settings) -> None:
 
     Es la salvaguarda estructural de §2.3.1: sin GRANT en `silver`, el API
     no puede leer la tabla de observaciones ni, por tanto, confundir sus
-    82.9M filas con los 10.45M negocios de `gold.establecimientos`. Que la
+    82.9M filas con los negocios que agrega la capa de consumo. Que la
     proteccion sea un permiso y no una convencion es justamente el punto.
 
     `DEFAULT PRIVILEGES` cubre las tablas que se creen despues -- de otro

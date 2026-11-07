@@ -1,4 +1,4 @@
-# `gold.establecimientos` — la cohorte con CLEE oficial (2021+)
+# `gold.negocios_clee_oficial` — la cohorte con CLEE oficial (2021+)
 
 **Estado:** propuesto, nada implementado. Escrito el 2026-11-07.
 
@@ -86,7 +86,7 @@ arregla aquí: Gold no depende de esa clasificación, calcula la suya.
 
 ## 2. Qué entra en la cohorte
 
-> Un negocio entra a `gold.establecimientos` si tiene **al menos una
+> Un negocio entra a `gold.negocios_clee_oficial` si tiene **al menos una
 > observación en un corte oficial**, y su ventana de vida se calcula usando
 > **solo** los cortes oficiales.
 
@@ -160,8 +160,8 @@ destino, en vez de escribir un segundo agregado.
 
 ```
 construir_permanencia(engine, metodo, tracker)                    -> silver.permanencia_<metodo>   (20 cortes)
-construir_permanencia(engine, metodo, tracker, cortes=oficiales,  -> gold.establecimientos
-                      destino="gold.establecimientos")
+construir_permanencia(engine, metodo, tracker, cortes=oficiales,  -> gold.negocios_clee_oficial
+                      destino="gold.negocios_clee_oficial")
 ```
 
 `_cortes_ordenados()` ya devuelve la lista y `_sql_llenar_obs()` ya recibe
@@ -199,7 +199,7 @@ Lo que sí se agrega, propio de Gold (`normalizacion_gold.md` §8):
 | `version_reglas` | Versión del conjunto de reglas de §5 |
 | `construida_en` | Fecha de construcción |
 
-Y `gold.variantes` para los alias, con su índice trigram
+Y `gold.variantes_negocio` para los alias, con su índice trigram
 (`normalizacion_gold.md` §6).
 
 ### 5.1 Invariantes que fallan la corrida
@@ -264,7 +264,7 @@ un resultado — dice cuánto del hallazgo depende del matching.
    la distribución de `n_nombres` (§6).
 3. **Parametrizar el agregado** por lista de cortes y destino (§4.1), con la
    renumeración de `idx` y sus tests.
-4. **`gold.establecimientos` determinista** + `gold.variantes`, con los
+4. **`gold.negocios_clee_oficial` determinista** + `gold.variantes_negocio`, con los
    invariantes de §5.1. **Entregable usable: la tesis ya tiene su unidad de
    análisis.**
 5. **Reportar la N** y la distribución de `duracion_periodos`.

@@ -1,12 +1,12 @@
-# TODO — Normalización de datos para `gold.establecimientos`
+# TODO — Normalización de datos para `gold.negocios_clee_oficial`
 
 **Estado:** propuesto, nada implementado. Escrito el 2026-11-06 antes de
 tocar código, igual que `crear_agentes.md`.
 
-**Qué entrega:** las reglas con que una fila de `gold.establecimientos`
+**Qué entrega:** las reglas con que una fila de `gold.negocios_clee_oficial`
 —un negocio, su ventana de vida y sus atributos canónicos— se construye a
 partir de `silver.permanencia_<metodo>`, `silver.clee_<metodo>` y los
-hechos; la tabla `gold.variantes` con los alias de cada negocio (§6); y el
+hechos; la tabla `gold.variantes_negocio` con los alias de cada negocio (§6); y el
 diseño de un reconciliador LLM que adjudica **solo** donde los métodos
 radio y H3 no coinciden.
 
@@ -28,7 +28,7 @@ No se re-litiga aquí; se cita.
 
 | Decisión | Dónde |
 |---|---|
-| `gold.establecimientos` = una fila por **negocio** (~10.45M) frente a 82.9M observaciones en `silver`. Mismo nombre, grano distinto, con tres salvaguardas contra confundir la N | `arquitectura.md` §2.3.1 |
+| `gold.negocios_clee_oficial` = una fila por **negocio** (~10.45M) frente a 82.9M observaciones en `silver`. Mismo nombre, grano distinto, con tres salvaguardas contra confundir la N | `arquitectura.md` §2.3.1 |
 | `silver.permanencia_<m>` no guarda el valor de ningún corte: agregados de trayectoria + banderas `tiene_*`, y el valor sale del join | `AGENTS.md` §N3, migración `b0007` |
 | El contrato de todo agente (`Decision`, `Evidencia`, `meta.agent_decisions` como caché/auditoría/reproducibilidad) y la estructura `src/agents/` | `crear_agentes.md` §9 |
 | La regla de cierre es **preliminar** y se aplica en la consulta, no en el esquema de Silver | `AGENTS.md` §N3 |
@@ -41,7 +41,7 @@ son **derivadas y reconstruibles**: cualquier valor congelado ahí es ancho
 desperdiciado que el join entrega mejor.
 
 Gold es lo contrario por definición: es la **capa citable**. Una fila de
-`gold.establecimientos` es el artefacto que la tesis reporta, y tiene que
+`gold.negocios_clee_oficial` es el artefacto que la tesis reporta, y tiene que
 ser estable aunque la identidad se re-resuelva después. Por eso aquí sí se
 materializa un valor por campo —y por eso cada fila lleva fecha, versión de
 reglas y de qué método salió.
@@ -321,8 +321,8 @@ El **corte de referencia** es el último en que se observó al negocio (el que
 | Campo en `gold` | Regla | Por qué | ¿LLM? |
 |---|---|---|---|
 | `clee` | La identidad del método base; si hubo reconciliación, la del cluster ganador | Es la llave del negocio | — |
-| `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.variantes` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
-| `razon_social` | La más reciente no vacía; las anteriores a `gold.variantes` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
+| `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.variantes_negocio` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
+| `razon_social` | La más reciente no vacía; las anteriores a `gold.variantes_negocio` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
 | `codigo_act` | **Ancestro común más específico** en la jerarquía SCIAN; si eso cae por encima de `rama`, el LLM elige | `denue_actividades_economicas` ya trae `sector`/`subsector`/`rama`: dos actividades de la misma rama tienen una respuesta determinista y correcta. El LLM solo hace falta cuando la discrepancia cruza ramas, que es justo cuando hay que juzgar | Solo si cruza rama |
 | `per_ocu`, `categoria_tamano`, `empleados_min/max` | Del corte de referencia | Pedido explícito: el último dato. Es el tamaño con que el negocio terminó, que es lo que el protocolo mide | — |
 | `fecha_alta` | `MIN` sobre todos los cortes | Pedido explícito. Ya está en `permanencia.fecha_alta_date` | — |
@@ -389,8 +389,8 @@ concretas:
 **Pero no como columna `text[]`, sino como tabla de búsqueda:**
 
 ```sql
-CREATE TABLE gold.variantes (
-    clee            text  NOT NULL,   -- FK logica a gold.establecimientos
+CREATE TABLE gold.variantes_negocio (
+    clee            text  NOT NULL,   -- FK logica a gold.negocios_clee_oficial
     campo           text  NOT NULL,   -- 'nom_estab' | 'raz_social' | ...
     valor           text  NOT NULL,
     primer_periodo  date  NOT NULL,   -- desde cuando uso este valor
@@ -398,7 +398,7 @@ CREATE TABLE gold.variantes (
     cortes          integer NOT NULL, -- en cuantos cortes aparecio
     PRIMARY KEY (clee, campo, valor)
 );
-CREATE INDEX ix_variantes_valor ON gold.variantes USING gin (valor gin_trgm_ops);
+CREATE INDEX ix_variantes_valor ON gold.variantes_negocio USING gin (valor gin_trgm_ops);
 ```
 
 Tres cosas que un array no da:
@@ -421,7 +421,7 @@ capa citable, con índice.
 
 ### 6.1 Qué campos entran y cuáles no
 
-> **Una variante entra a `gold.variantes` si es la evidencia de una decisión
+> **Una variante entra a `gold.variantes_negocio` si es la evidencia de una decisión
 > que Gold tomó, o el insumo de un consumidor que trabaja negocio por
 > negocio. Lo demás se queda en el join.**
 
@@ -438,7 +438,7 @@ capa citable, con índice.
 
 ### 6.2 El tamaño se mide, no se estima
 
-El número de filas de `gold.variantes` para los nombres es exactamente
+El número de filas de `gold.variantes_negocio` para los nombres es exactamente
 `SUM(n_nombres)` sobre la tabla de permanencia, que ya está calculado:
 
 ```sql
@@ -589,11 +589,11 @@ descubrirlo a las 14 horas.
 ## 11. Orden de construcción
 
 1. **Medir** (§1). El número decide si los pasos 5 y 6 existen.
-2. **`gold.establecimientos` determinista**, método base `radio`, valores
+2. **`gold.negocios_clee_oficial` determinista**, método base `radio`, valores
    canónicos por las reglas de §4 y §5, invariantes de §9.1. Sin una línea
    de LLM. **Entregable usable por sí solo**: con esto la tesis ya tiene su
    unidad de análisis.
-   2b. **`gold.variantes`** (§6) en la misma pasada: sale del mismo
+   2b. **`gold.variantes_negocio`** (§6) en la misma pasada: sale del mismo
    `GROUP BY` que los canónicos, y es lo que hace auditable el paso 2.
 3. **Reportar la N** y la distribución de `origen_identidad` (va a ser
    `ACUERDO` casi todo si §1 sale bajo).
@@ -643,7 +643,7 @@ produce resultados convincentes y equivocados.
 ## 13. Lo que este TODO no hace
 
 - **No diseña el panel negocio×periodo ni el cruce con SESNSP**: eso es
-  `docs/cruce_denue_sesnsp.md`, y consume `gold.establecimientos` cuando
+  `docs/cruce_denue_sesnsp.md`, y consume `gold.negocios_clee_oficial` cuando
   exista.
 - **No decide la regla de cierre.** Sigue preliminar y sigue aplicándose en
   la consulta; Gold materializará el veredicto cuando esté validada.
