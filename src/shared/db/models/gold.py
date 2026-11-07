@@ -21,8 +21,14 @@ Lo que vendrá aquí:
   oficiales. No se copia de `silver.permanencia_<metodo>`: esa tabla agrega
   sobre los 20 cortes y una fila suya mezcla identidad observada con
   identidad propagada (`gold_cohorte_2021.md` §4).
-- `VarianteNegocio` → `gold.variantes_negocio`. Los alias de cada negocio,
-  con índice trigram para búsqueda difusa (`normalizacion_gold.md` §6).
+- `VarianteNegocio` → `gold.variantes_negocio`. Los alias de cada negocio
+  —todos los valores distintos que tuvo en cada campo, con la ventana en
+  que usó cada uno— con índice trigram para búsqueda difusa
+  (`normalizacion_gold.md` §6). **Acotada a la misma cohorte**: sin
+  identidades propagadas ni sintéticas `NEW_*`. La extensión de robustez
+  tendría las suyas en `gold.variantes_negocio_propagado`, porque aquí se
+  aplica la misma regla que a `clee_radio`/`clee_h3`: una tabla por
+  régimen, nunca una columna discriminadora.
 - Los agregados del análisis: panel negocio×periodo e incidencia municipal
   alineada temporalmente, con el contrato de `docs/cruce_denue_sesnsp.md`.
 

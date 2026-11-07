@@ -389,8 +389,9 @@ concretas:
 **Pero no como columna `text[]`, sino como tabla de búsqueda:**
 
 ```sql
+-- SOLO la cohorte con CLEE oficial. Ver 6.0.1.
 CREATE TABLE gold.variantes_negocio (
-    clee            text  NOT NULL,   -- FK logica a gold.negocios_clee_oficial
+    clee            text  NOT NULL,   -- FK logica a gold.negocios_clee_oficial.clee
     campo           text  NOT NULL,   -- 'nom_estab' | 'raz_social' | ...
     valor           text  NOT NULL,
     primer_periodo  date  NOT NULL,   -- desde cuando uso este valor
@@ -399,7 +400,47 @@ CREATE TABLE gold.variantes_negocio (
     PRIMARY KEY (clee, campo, valor)
 );
 CREATE INDEX ix_variantes_valor ON gold.variantes_negocio USING gin (valor gin_trgm_ops);
+
+COMMENT ON TABLE gold.variantes_negocio IS
+  'Variantes de los negocios con CLEE OFICIAL de INEGI. No contiene '
+  'identidades propagadas ni sinteticas NEW_*; esas irian en una tabla '
+  'aparte (ver normalizacion_gold.md 6.0.1)';
 ```
+
+### 6.0.1 Solo identidades oficiales, y en su propia tabla
+
+La tabla cubre **únicamente** la cohorte de `gold.negocios_clee_oficial`:
+negocios cuya identidad asignó INEGI. **No entra ninguna identidad
+propagada ni sintética `NEW_*`.**
+
+Si algún día se construye la extensión de robustez sobre la ventana
+completa (`gold_cohorte_2021.md` §7), sus variantes van en **otra tabla**,
+no en esta con una columna `cohorte`:
+
+```
+gold.negocios_clee_oficial     ←→  gold.variantes_negocio
+gold.negocios_clee_propagado   ←→  gold.variantes_negocio_propagado
+```
+
+El motivo es el mismo que ya decidió el proyecto para `clee_radio` /
+`clee_h3` y para `permanencia_radio` / `permanencia_h3`: **una tabla por
+régimen, nunca una columna discriminadora.** Con un `cohorte text`, un
+`WHERE` olvidado mezcla identidades observadas con identidades inferidas y
+los agregados salen contaminados **en silencio y sin error** — que es
+exactamente el fallo que esta capa existe para evitar. Con dos tablas, el
+régimen va en el `FROM` y una consulta no puede equivocarse.
+
+Dos detalles que refuerzan la separación:
+
+- **La columna se llama `clee`, no `clee_resuelto`.** En esta cohorte no se
+  resolvió nada: es el identificador que publicó INEGI. La tabla de la
+  cohorte propagada sí llevaría `clee_resuelto`, y esa diferencia de nombre
+  es documentación: si ves `clee_resuelto`, estás en terreno inferido.
+- **Invariantes que fallan la construcción** (no avisos):
+  - Todo `clee` de `variantes_negocio` existe en `negocios_clee_oficial`.
+  - Ningún `clee` empieza con `NEW_`. Es redundante por construcción —la
+    fase 2 es la única que crea sintéticos— y justamente por eso es la
+    aserción que atrapa un error de alcance futuro.
 
 Tres cosas que un array no da:
 

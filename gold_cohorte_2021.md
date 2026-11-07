@@ -200,14 +200,43 @@ Lo que sí se agrega, propio de Gold (`normalizacion_gold.md` §8):
 | `construida_en` | Fecha de construcción |
 
 Y `gold.variantes_negocio` para los alias, con su índice trigram
-(`normalizacion_gold.md` §6).
+(`normalizacion_gold.md` §6). **También acotada a esta cohorte**: no
+contiene identidades propagadas ni sintéticas, y si algún día existe la
+extensión de robustez sus variantes van en `gold.variantes_negocio_propagado`
+— una tabla por régimen, nunca una columna `cohorte`, por el mismo motivo
+que `clee_radio`/`clee_h3` son dos tablas (§5.2).
 
 ### 5.1 Invariantes que fallan la corrida
 
 - Todo `clee` de la tabla aparece con `clee` no vacío en ≥1 corte oficial.
+- **Ningún `clee` empieza con `NEW_`.** Redundante por construcción —solo la
+  fase 2 crea sintéticos— y por eso mismo es la aserción que atrapa un error
+  de alcance futuro.
 - Ninguna observación `(id, period)` contribuye a dos filas.
 - `cortes_observados <= len(ventana_cortes)`.
 - `idx_primer = 0` ⟺ el negocio aparece en el primer corte oficial.
+- Todo `clee` de `gold.variantes_negocio` existe en esta tabla.
+
+### 5.2 Una tabla por régimen, nunca una columna `cohorte`
+
+La identidad **observada** y la **inferida** no se mezclan en la misma
+tabla. Si se construye la extensión de robustez (§7), va en tablas propias:
+
+```
+gold.negocios_clee_oficial     ←→  gold.variantes_negocio
+gold.negocios_clee_propagado   ←→  gold.variantes_negocio_propagado
+```
+
+Es el criterio que el proyecto ya aplicó a `clee_radio`/`clee_h3` y a
+`permanencia_radio`/`permanencia_h3`: con una columna discriminadora, un
+`WHERE` olvidado mezcla los dos regímenes y los agregados salen
+contaminados **en silencio y sin error**. Con dos tablas el régimen va en el
+`FROM` y la consulta no puede equivocarse.
+
+Y la columna de identidad se llama **`clee`**, no `clee_resuelto`: en esta
+cohorte no se resolvió nada, es el identificador que publicó INEGI. La
+tabla propagada sí llevaría `clee_resuelto`, y esa diferencia de nombre es
+documentación — si ves `clee_resuelto`, estás en terreno inferido.
 
 ---
 
