@@ -74,32 +74,97 @@ del conjunto de observaciones coinciden.
 
 ### 1.1 La consulta que falta
 
+**Precondición:** las dos tablas tienen que estar resueltas. `clee_h3` es el
+track de comparación y cuesta otra noche; si solo se corrió `clee-radio`, no
+hay nada que comparar y esto no aplica todavía.
+
 ```sql
--- Cómo se corresponden los clusters de los dos métodos.
--- Un cluster de radio que mapea a >1 de h3 = radio unió lo que h3 separó.
-WITH pares AS (
-    SELECT r.clee_resuelto AS c_radio,
-           h.clee_resuelto AS c_h3,
-           count(*)        AS obs
-    FROM silver.clee_radio r
-    JOIN silver.clee_h3 h USING (id, period)
-    GROUP BY 1, 2
-),
-grados AS (
+-- 0 particiones en una de las dos = ese metodo no se ha resuelto
+SELECT parent.relname AS tabla, count(*) AS particiones
+FROM pg_inherits i
+JOIN pg_class child  ON child.oid  = i.inhrelid
+JOIN pg_class parent ON parent.oid = i.inhparent
+WHERE parent.relname IN ('clee_radio', 'clee_h3')
+GROUP BY 1;
+```
+
+La pasada cara va **una sola vez** a una temporal; de ahí salen todas las
+preguntas sin volver a tocar los 82.9M:
+
+```sql
+SET work_mem = '4GB';   -- el GROUP BY produce ~10M grupos
+
+CREATE TEMP TABLE pares AS
+SELECT r.clee_resuelto AS c_radio,
+       h.clee_resuelto AS c_h3,
+       count(*)        AS obs
+FROM silver.clee_radio r
+JOIN silver.clee_h3 h USING (id, period)
+GROUP BY 1, 2;
+
+CREATE INDEX ON pares (c_radio);
+CREATE INDEX ON pares (c_h3);
+ANALYZE pares;
+```
+
+El join es **partition-wise** —las dos tablas están particionadas por
+`period` y `period` está en las dos PK— así que son 20 joins de ~4M y no uno
+de 82.9M × 82.9M (`docs/separacion_ingest_clee.md` §3).
+
+```sql
+-- El veredicto. Un cluster de radio que mapea a >1 de h3 = radio unio lo
+-- que h3 separo, y al reves.
+WITH grados AS (
     SELECT c_radio, c_h3, obs,
            count(*) OVER (PARTITION BY c_radio) AS h3_por_radio,
            count(*) OVER (PARTITION BY c_h3)    AS radio_por_h3
     FROM pares
 )
 SELECT
-    count(*) FILTER (WHERE h3_por_radio = 1 AND radio_por_h3 = 1) AS biyectivos,
-    count(*) FILTER (WHERE h3_por_radio > 1)                      AS radio_unio_mas,
-    count(*) FILTER (WHERE radio_por_h3 > 1)                      AS h3_unio_mas,
-    sum(obs) FILTER (WHERE h3_por_radio > 1 OR radio_por_h3 > 1)  AS obs_en_disputa
+    sum(obs)                                                 AS obs_comparadas,
+    count(DISTINCT c_radio)                                  AS clusters_radio,
+    count(DISTINCT c_h3)                                     AS clusters_h3,
+    count(DISTINCT c_radio) FILTER (WHERE h3_por_radio > 1)  AS radio_unio_mas,
+    count(DISTINCT c_h3)    FILTER (WHERE radio_por_h3 > 1)  AS h3_unio_mas,
+    sum(obs) FILTER (WHERE h3_por_radio > 1
+                        OR radio_por_h3 > 1)                 AS obs_en_disputa,
+    round(100.0 * sum(obs) FILTER (WHERE h3_por_radio > 1
+                                      OR radio_por_h3 > 1)
+          / nullif(sum(obs), 0), 4)                          AS pct_disputa
 FROM grados;
 ```
 
-Va a `scripts/` como subcomando nuevo (`clee_propagation_stats.py
+`count(DISTINCT c_radio)` y no `count(*)`: un cluster de radio partido en
+tres de h3 aporta tres filas a `pares`, y contar filas lo contaría tres
+veces.
+
+**Ojo con el `JOIN` interno**: una observación que está en una tabla y no en
+la otra desaparece sin aviso, y eso también es desacuerdo. `obs_comparadas`
+tiene que dar 82,896,801; si da menos, falta resolver algún corte en uno de
+los dos métodos y hay que arreglar eso antes de interpretar el resto.
+
+Y los casos concretos, que es lo que vuelve el número inspeccionable:
+
+```sql
+-- Los clusters en disputa mas grandes, con los nombres que contienen
+WITH disputados AS (
+    SELECT c_radio FROM pares GROUP BY 1 HAVING count(*) > 1
+    ORDER BY sum(obs) DESC LIMIT 10
+)
+SELECT r.clee_resuelto AS c_radio, h.clee_resuelto AS c_h3,
+       e.period, e.nom_estab, e.codigo_act, e.latitud, e.longitud
+FROM silver.clee_radio r
+JOIN silver.clee_h3 h USING (id, period)
+JOIN silver.establecimientos e ON e.id = r.id AND e.period = r.period
+WHERE r.clee_resuelto IN (SELECT c_radio FROM disputados)
+ORDER BY r.clee_resuelto, e.period;
+```
+
+Si eso devuelve el patrón del ejemplo —una taquería con tres nombres y una
+farmacia colada— el reconciliador tiene caso. Si devuelve 0 filas, no lo
+tiene.
+
+Todo esto va a `scripts/` como subcomando (`clee_propagation_stats.py
 particiones`), no como consulta suelta: es una métrica que hay que poder
 repetir después de cada re-resolución.
 
