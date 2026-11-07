@@ -6,8 +6,9 @@ tocar código, igual que `crear_agentes.md`.
 **Qué entrega:** las reglas con que una fila de `gold.establecimientos`
 —un negocio, su ventana de vida y sus atributos canónicos— se construye a
 partir de `silver.permanencia_<metodo>`, `silver.clee_<metodo>` y los
-hechos; y el diseño de un reconciliador LLM que adjudica **solo** donde los
-métodos radio y H3 no coinciden.
+hechos; la tabla `gold.variantes` con los alias de cada negocio (§6); y el
+diseño de un reconciliador LLM que adjudica **solo** donde los métodos
+radio y H3 no coinciden.
 
 **La tesis del documento, en una línea:** el 95% de esto son reglas
 deterministas, el agente adjudica una franja que **todavía no está medida**,
@@ -200,8 +201,8 @@ El **corte de referencia** es el último en que se observó al negocio (el que
 | Campo en `gold` | Regla | Por qué | ¿LLM? |
 |---|---|---|---|
 | `clee` | La identidad del método base; si hubo reconciliación, la del cluster ganador | Es la llave del negocio | — |
-| `nombre` | Canónico a partir de todas las variantes | Ninguna variante suelta representa al negocio; ver §6 | **Sí**, con baseline obligatorio |
-| `razon_social` | La más reciente no vacía | Dato legal: no se promedia ni se inventa. Si cambió, cambió | — |
+| `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.variantes` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
+| `razon_social` | La más reciente no vacía; las anteriores a `gold.variantes` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
 | `codigo_act` | **Ancestro común más específico** en la jerarquía SCIAN; si eso cae por encima de `rama`, el LLM elige | `denue_actividades_economicas` ya trae `sector`/`subsector`/`rama`: dos actividades de la misma rama tienen una respuesta determinista y correcta. El LLM solo hace falta cuando la discrepancia cruza ramas, que es justo cuando hay que juzgar | Solo si cruza rama |
 | `per_ocu`, `categoria_tamano`, `empleados_min/max` | Del corte de referencia | Pedido explícito: el último dato. Es el tamaño con que el negocio terminó, que es lo que el protocolo mide | — |
 | `fecha_alta` | `MIN` sobre todos los cortes | Pedido explícito. Ya está en `permanencia.fecha_alta_date` | — |
@@ -241,7 +242,107 @@ describiendo un lugar, se está acumulando una vía de verificación.
 
 ---
 
-## 6. El nombre canónico tiene que vencer a un baseline
+## 6. El nombre canónico y la lista de alias
+
+### 6.0 Sí: los alias se listan, y en una tabla aparte
+
+Una lista de alias **no contradice `b0007`**: es un agregado sobre la vida
+completa (`ARRAY_AGG(DISTINCT nom_estab)`), no el valor de un corte. Y es
+justo el tipo de dato que Gold debe materializar, por tres razones
+concretas:
+
+1. **Es la evidencia del nombre canónico.** Si Gold dice que el negocio se
+   llama `TACOS DON PACO`, quien lea la fila tiene que poder ver de qué
+   variantes salió sin irse al join. Lo mismo que `meta.agent_decisions`
+   hace con las decisiones del agente, pero para el 99% de las filas que
+   ningún agente tocó.
+2. **Es el mejor diagnóstico de un mal cluster que existe.** Un lector que
+   ve `[TACOS PACO, FARMACIA PACO]` sospecha la fusión indebida al
+   instante. `n_nombres = 2` no dice nada; los dos nombres lo dicen todo.
+   Para una tesis cuyo riesgo principal es la calidad de la resolución de
+   identidad, esa columna vale más que varias métricas.
+3. **El verificador de supervivencia los necesita todos.** Buscar en Google
+   Places si un negocio cerró funciona con `TAQUERIA DON PACO` y falla con
+   `TACOS PACO`; la cascada de `crear_agentes.md` §11.6 debe probar cada
+   alias, no solo el canónico.
+
+**Pero no como columna `text[]`, sino como tabla de búsqueda:**
+
+```sql
+CREATE TABLE gold.variantes (
+    clee            text  NOT NULL,   -- FK logica a gold.establecimientos
+    campo           text  NOT NULL,   -- 'nom_estab' | 'raz_social' | ...
+    valor           text  NOT NULL,
+    primer_periodo  date  NOT NULL,   -- desde cuando uso este valor
+    ultimo_periodo  date  NOT NULL,   -- hasta cuando
+    cortes          integer NOT NULL, -- en cuantos cortes aparecio
+    PRIMARY KEY (clee, campo, valor)
+);
+CREATE INDEX ix_variantes_valor ON gold.variantes USING gin (valor gin_trgm_ops);
+```
+
+Tres cosas que un array no da:
+
+- **Búsqueda difusa.** Con el índice trigram, "¿qué negocio es *tacos
+  paco*?" es una consulta. Es la pregunta que se hace al verificar un caso
+  a mano o al cruzar con una fuente externa, y con `text[]` no tiene
+  respuesta razonable.
+- **La cronología del rebranding.** `primer_periodo`/`ultimo_periodo` por
+  variante da la secuencia: `TACOS PACO (2019–2020) → TAQUERIA DON PACO
+  (2021–)`. Sale del mismo `GROUP BY`, así que es gratis, y el rebranding
+  como señal de supervivencia es una pregunta que la tesis puede hacerse.
+- **Un solo lugar para todos los campos de variante**, con el discriminador
+  `campo`, en vez de una columna de array por campo.
+
+Es, materializada y buscable, la sucesora de las vistas
+`variantes_<metodo>` que `b0006` eliminó: aquéllas eran una consulta
+guardada sobre Silver sin consumidor; ésta es un artefacto congelado de la
+capa citable, con índice.
+
+### 6.1 Qué campos entran y cuáles no
+
+> **Una variante entra a `gold.variantes` si es la evidencia de una decisión
+> que Gold tomó, o el insumo de un consumidor que trabaja negocio por
+> negocio. Lo demás se queda en el join.**
+
+| Campo | ¿Entra? | Por qué |
+|---|---|---|
+| `nom_estab` | **Sí** | Evidencia del nombre canónico + lo que busca el verificador |
+| `raz_social` | **Sí** | Identifica al negocio en fuentes oficiales (RFC, actas), y es otra cosa que el nombre comercial |
+| `codigo_act` | **Sí** | Evidencia de la elección de SCIAN (§4). Son 1–2 variantes por negocio: barato |
+| `telefono`, `correoelec`, `www` | **Sí** | La cascada de verificación prueba todos. `tiene_telefono` solo dice que existió alguno |
+| domicilio por componentes | No | Ya hay `n_direcciones`; y el domicilio canónico sale del corte de referencia (§5) |
+| coordenadas | No | El rectángulo envolvente, el neto y la dispersión ya responden lo que se pregunta de ellas |
+| `per_ocu` / estrato | No | `cambio_tamano` y `delta_empleados_min` ya dan la trayectoria, que es la pregunta |
+| `tipo_asent`, `cod_postal`, `cve_loc`, `ageb` | No | Variantes sin consumidor; es el crecimiento de GB que `b0007` evitó |
+
+### 6.2 El tamaño se mide, no se estima
+
+El número de filas de `gold.variantes` para los nombres es exactamente
+`SUM(n_nombres)` sobre la tabla de permanencia, que ya está calculado:
+
+```sql
+SELECT sum(n_nombres)                        AS filas_nom_estab,
+       round(avg(n_nombres), 2)              AS nombres_por_negocio,
+       count(*) FILTER (WHERE n_nombres = 1) AS con_un_solo_nombre
+FROM silver.permanencia_radio;
+```
+
+Si la mayoría de negocios tiene un solo nombre —lo esperable—, la tabla es
+del orden de 12–16M filas angostas para los cuatro campos de §6.1, y la
+decisión es trivial. Si `nombres_por_negocio` sale alto, es señal de otra
+cosa: clusters demasiado grandes, y eso hay que mirarlo antes de
+materializar nada.
+
+### 6.3 Dependencia nueva: `pg_trgm`
+
+El índice difuso necesita `CREATE EXTENSION IF NOT EXISTS pg_trgm`, que hoy
+el proyecto no usa (no hay una sola extensión instalada). Viene en el
+contrib de la imagen oficial `postgres:17`, así que es una línea en la
+migración de Gold y ningún cambio de infraestructura — pero queda anotado
+como la primera extensión del esquema.
+
+### 6.4 El nombre canónico tiene que vencer a un baseline
 
 "Un promedio de todos los nombres" es la parte más atractiva del agente y la
 más fácil de no justificar. Hay dos baselines deterministas:
@@ -372,6 +473,8 @@ descubrirlo a las 14 horas.
    canónicos por las reglas de §4 y §5, invariantes de §9.1. Sin una línea
    de LLM. **Entregable usable por sí solo**: con esto la tesis ya tiene su
    unidad de análisis.
+   2b. **`gold.variantes`** (§6) en la misma pasada: sale del mismo
+   `GROUP BY` que los canónicos, y es lo que hace auditable el paso 2.
 3. **Reportar la N** y la distribución de `origen_identidad` (va a ser
    `ACUERDO` casi todo si §1 sale bajo).
 4. **Cascada determinista de desacuerdo** (§2, contención y empate). Vuelve
