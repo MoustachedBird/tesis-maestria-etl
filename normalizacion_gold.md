@@ -88,11 +88,24 @@ WHERE parent.relname IN ('clee_radio', 'clee_h3')
 GROUP BY 1;
 ```
 
+La consulta completa vive en **`scripts/sql/desacuerdo_particiones.sql`**
+y se corre redirigiendo desde el host (no pegándola: SQL largo en terminal
+se corrompe):
+
+```bash
+docker compose exec -T postgres psql -U etl_rw -d mipymes \
+  < scripts/sql/desacuerdo_particiones.sql 2>&1 | tee desacuerdo.log
+```
+
 La pasada cara va **una sola vez** a una temporal; de ahí salen todas las
 preguntas sin volver a tocar los 82.9M:
 
 ```sql
-SET work_mem = '4GB';   -- el GROUP BY produce ~10M grupos
+-- La memoria compartida de una consulta paralela es ~ workers x work_mem, y
+-- tiene que caber en PG_SHM_SIZE (4 GB). 4 x 512 MB entra con holgura; 8 x
+-- 4 GB pide 32 GB y muere con "could not resize shared memory segment".
+SET max_parallel_workers_per_gather = 4;
+SET work_mem = '512MB';
 
 CREATE TEMP TABLE pares AS
 SELECT r.clee_resuelto AS c_radio,
