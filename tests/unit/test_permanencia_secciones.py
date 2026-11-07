@@ -53,7 +53,7 @@ def test_solo_construye_los_metodos_pedidos(monkeypatch):
     monkeypatch.setattr(
         loader,
         "construir_permanencia",
-        lambda engine, metodo, force=False: (construidos.append(metodo), 1)[1],
+        lambda engine, metodo, tracker, force=False: (construidos.append(metodo), 1)[1],
     )
 
     main._run_permanencia(metodos=["h3"])
@@ -78,7 +78,7 @@ def test_el_loader_recibe_el_engine_no_una_conexion(monkeypatch):
     monkeypatch.setattr(
         loader,
         "construir_permanencia",
-        lambda engine, metodo, force=False: (recibidos.append((engine, metodo)), 1)[1],
+        lambda engine, metodo, tracker, force=False: (recibidos.append((engine, metodo)), 1)[1],
     )
 
     main._run_permanencia(metodos=["radio", "h3"])
@@ -96,11 +96,36 @@ def test_force_llega_hasta_el_loader(monkeypatch):
     monkeypatch.setattr(
         loader,
         "construir_permanencia",
-        lambda engine, metodo, force=False: (vistos.append(force), 1)[1],
+        lambda engine, metodo, tracker, force=False: (vistos.append(force), 1)[1],
     )
 
     main._run_permanencia(metodos=["radio"], force=True)
     assert vistos == [True]
+
+
+@pytest.mark.unit
+def test_los_dos_metodos_comparten_el_tracker(monkeypatch):
+    """La construccion se registra en `meta`, no solo en el log del stage.
+
+    Un tracker para los dos metodos, pero `construir_permanencia` abre una
+    corrida por metodo: lo que se consulta despues es "como termino
+    permanencia_h3", no un agregado de las dos.
+    """
+    import src.etl.main as main
+    from src.etl.loaders import permanencia as loader
+    from src.meta.tracker import MetadataTracker
+
+    trackers = []
+    monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
+    monkeypatch.setattr(
+        loader,
+        "construir_permanencia",
+        lambda engine, metodo, tracker, force=False: (trackers.append(tracker), 1)[1],
+    )
+
+    main._run_permanencia(metodos=["radio", "h3"])
+    assert all(isinstance(t, MetadataTracker) for t in trackers)
+    assert trackers[0] is trackers[1]
 
 
 @pytest.mark.unit

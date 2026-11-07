@@ -120,6 +120,10 @@ def _run_permanencia(*, metodos: list[str], force: bool = False) -> bool:
     tirar lo que radio ya construyo, que es la misma razon por la que son
     tablas separadas.
 
+    El tracker es uno solo para los dos metodos, pero cada construccion abre
+    su propia corrida en `meta.job_runs`: lo que se quiere poder consultar es
+    "como termino permanencia_h3", no un agregado de las dos.
+
     Args:
         metodos: claves de `METODOS` a construir.
         force: descartar el avance previo y reconstruir entero.
@@ -128,13 +132,15 @@ def _run_permanencia(*, metodos: list[str], force: bool = False) -> bool:
         bool: True si la tabla quedo con al menos una fila.
     """
     from src.etl.loaders.permanencia import construir_permanencia
+    from src.meta.tracker import MetadataTracker
     from src.shared.db.session import get_engine
 
     console.print(f"[bold magenta]   Running: permanencia ({', '.join(metodos)})[/bold magenta]")
     total = 0
     engine = get_engine()
+    tracker = MetadataTracker()
     for metodo in metodos:
-        total += construir_permanencia(engine, metodo, force=force)
+        total += construir_permanencia(engine, metodo, tracker, force=force)
     console.print(f"   {total:,} fila(s) de permanencia en {len(metodos)} metodo(s)")
     return total > 0
 

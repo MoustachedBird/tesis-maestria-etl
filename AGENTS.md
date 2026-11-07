@@ -891,6 +891,49 @@ estables), así que se niega y pide `--force`. Lo detecta comparando
 `max(resuelto_en)` de `clee_<metodo>` contra la marca que deja en el
 `COMMENT` de la tabla de trabajo.
 
+### Registro en `meta` y decisión de reconstruir
+
+Cada construcción abre una corrida en `meta.job_runs`
+(`job_name = denue_permanencia_<metodo>`, `job_type = PERMANENCIA`) y una
+tarea en `meta.process_tasks` (`task_name = target_table =
+permanencia_<metodo>`, `source_path` = las dos tablas de Silver que la
+alimentan). Ahí quedan `rows_extracted` (observaciones leídas),
+`rows_loaded` (establecimientos escritos), `duration_seconds`, `status` y
+`error_message`: lo mismo que ya registran el ingest y la resolución CLEE, y
+lo que hace que "cuánto tardó" y "terminó bien" se contesten con SQL en vez
+de leyendo `data/etl_permanencia.log`.
+
+```sql
+SELECT r.job_name, t.status, t.rows_extracted, t.rows_loaded,
+       round(t.duration_seconds / 60) AS minutos, t.error_message
+FROM meta.process_tasks t
+JOIN meta.job_runs r USING (run_id)
+WHERE r.job_type = 'PERMANENCIA'
+ORDER BY t.created_at DESC;
+```
+
+El `end_time` de la última tarea `SUCCESS` es además el **reloj con que se
+decide si hay algo que hacer**, comparado contra `max(resuelto_en)` de
+`clee_<metodo>`:
+
+| estado previo | qué hace |
+|---|---|
+| nunca construida, o la corrida anterior murió a la mitad | reanuda (cortes y bloques pendientes) |
+| construida y la identidad no cambió | `SKIPPED`, no toca nada |
+| construida pero la identidad se re-resolvió después | **reconstruye desde cero** |
+
+El último renglón es el que importa en el pipeline semanal: la tabla
+vigente quedó stale —sus agregados son de otro conjunto de identidades— y
+esperar a que alguien se acordara de `--force` habría servido la
+permanencia del corte anterior en silencio. El `SKIPPED` del renglón de
+en medio también es trabajo ahorrado de verdad: la tabla de trabajo se
+borra al terminar, así que sin él una segunda corrida rellenaría los 20
+cortes (horas) para descubrir al final que todos los bloques ya estaban
+escritos.
+
+`/ops/health/pipeline` reporta `permanencia` como etapa propia, al lado de
+`extract`, `transform` y `clee_resolution`.
+
 Lo que se **pierde** con el troceo: el reemplazo todo-o-nada. Mientras
 corre, la tabla destino está parcialmente llena. Se acepta porque es
 derivada, no tiene consumidor hasta Gold, y rehacerla no cuesta datos.

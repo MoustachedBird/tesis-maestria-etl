@@ -702,6 +702,38 @@ class MetadataTracker:
                 for path, period, task_id in filas
             ]
 
+    def get_last_successful_process_task(
+        self, task_name: str, target_table: str
+    ) -> dict[str, Any] | None:
+        """
+        El ultimo procesamiento exitoso de una tarea hacia una tabla.
+
+        Es el reloj con que una etapa decide si su salida esta al dia:
+        `end_time` dice cuando se termino de escribir la tabla, y comparar
+        eso contra la fecha de los insumos responde "hay que reconstruir?"
+        sin mirar la tabla misma.
+
+        Args:
+            task_name: nombre de la tarea (el del archivo de origen, o el de
+                la tabla cuando la unidad de trabajo es la tabla entera).
+            target_table: tabla destino.
+
+        Returns:
+            dict | None: la tarea SUCCESS mas reciente, o None si no hay.
+        """
+        with self._session() as session:
+            task = session.scalars(
+                select(ProcessTask)
+                .where(
+                    ProcessTask.task_name == task_name,
+                    ProcessTask.target_table == target_table,
+                    ProcessTask.status == TaskStatus.SUCCESS.value,
+                )
+                .order_by(ProcessTask.end_time.desc())
+                .limit(1)
+            ).first()
+            return _as_dict(task) if task is not None else None
+
     def has_successful_process_task(self, task_name: str, target_table: str) -> bool:
         """
         Si un archivo ya se proceso con exito hacia una tabla.
@@ -713,19 +745,7 @@ class MetadataTracker:
         Returns:
             bool: True si existe al menos un SUCCESS.
         """
-        with self._session() as session:
-            return (
-                session.scalar(
-                    select(ProcessTask.task_id)
-                    .where(
-                        ProcessTask.task_name == task_name,
-                        ProcessTask.target_table == target_table,
-                        ProcessTask.status == TaskStatus.SUCCESS.value,
-                    )
-                    .limit(1)
-                )
-                is not None
-            )
+        return self.get_last_successful_process_task(task_name, target_table) is not None
 
     def get_latest_run_by_type(self, *job_types: str) -> dict[str, Any] | None:
         """

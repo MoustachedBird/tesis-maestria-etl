@@ -16,9 +16,11 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from src.etl.loaders import permanencia as loader
 from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.permanencia import (
+    JOB_TYPE,
     METODOS,
     construir_permanencia,
     tabla_destino,
@@ -34,7 +36,7 @@ from src.shared.db.models.silver import (
     TipoUnidadEconomica,
 )
 from src.shared.db.partitions import create_partition
-from src.shared.enums import OrigenClee
+from src.shared.enums import JobStatus, OrigenClee, TaskStatus
 
 pytestmark = pytest.mark.postgres
 
@@ -530,9 +532,9 @@ def permanencia(db, metodo: str) -> dict[str, dict]:
 
 @pytest.mark.unit
 class TestColapso:
-    def test_una_fila_por_identidad(self, db, metodo):
+    def test_una_fila_por_identidad(self, db, metodo, tracker):
         """Dieciséis observaciones de siete establecimientos -> siete filas."""
-        assert construir_permanencia(db, metodo) == 7
+        assert construir_permanencia(db, metodo, tracker) == 7
         assert set(permanencia(db, metodo)) == {
             "C_VIVE",
             "C_HUECO",
@@ -543,15 +545,15 @@ class TestColapso:
             "NEW_REG_1234-abcdef",
         }
 
-    def test_reconstruir_no_duplica(self, db, metodo):
+    def test_reconstruir_no_duplica(self, db, metodo, tracker):
         """Es reconstrucción total: los NEW_* no son estables entre corridas."""
-        construir_permanencia(db, metodo)
-        assert construir_permanencia(db, metodo) == 7
+        construir_permanencia(db, metodo, tracker)
+        assert construir_permanencia(db, metodo, tracker, force=True) == 7
 
-    def test_el_metodo_escribe_solo_su_tabla(self, db, metodo):
+    def test_el_metodo_escribe_solo_su_tabla(self, db, metodo, tracker):
         """La razón de que sea una tabla por método y no una columna."""
         otro = next(m for m in METODOS if m != metodo)
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         with db.connect() as conn:
             vacia = conn.execute(
                 select(func.count()).select_from(get_table(tabla_destino(otro)))
@@ -561,16 +563,16 @@ class TestColapso:
 
 @pytest.mark.unit
 class TestVentana:
-    def test_primer_y_ultimo_corte(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_primer_y_ultimo_corte(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         vive = permanencia(db, metodo)["C_VIVE"]
         assert vive["primer_periodo"] == CORTES[0]
         assert vive["ultimo_periodo"] == CORTES[3]
         assert vive["cortes_observados"] == 4
 
-    def test_los_indices_son_posiciones_en_la_secuencia(self, db, metodo):
+    def test_los_indices_son_posiciones_en_la_secuencia(self, db, metodo, tracker):
         """Los cortes distan 4-12 meses: el tiempo se mide en periodos."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert (p["C_VIVE"]["idx_primer"], p["C_VIVE"]["idx_ultimo"]) == (0, 3)
         assert (p["C_CERRO"]["idx_primer"], p["C_CERRO"]["idx_ultimo"]) == (0, 1)
@@ -579,27 +581,27 @@ class TestVentana:
 
 @pytest.mark.unit
 class TestCensura:
-    def test_sin_huecos_cuando_aparece_en_todos(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_sin_huecos_cuando_aparece_en_todos(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_VIVE"]["huecos"] == 0
 
-    def test_detecta_el_hueco_de_quien_desaparecio_y_volvio(self, db, metodo):
+    def test_detecta_el_hueco_de_quien_desaparecio_y_volvio(self, db, metodo, tracker):
         """Es la señal de que una ausencia no implica cierre."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         hueco = permanencia(db, metodo)["C_HUECO"]
         assert hueco["idx_primer"] == 0
         assert hueco["idx_ultimo"] == 2
         assert hueco["cortes_observados"] == 2
         assert hueco["huecos"] == 1
 
-    def test_presente_en_el_ultimo_corte_no_tiene_cortes_despues(self, db, metodo):
+    def test_presente_en_el_ultimo_corte_no_tiene_cortes_despues(self, db, metodo, tracker):
         """`cortes_tras_ultimo = 0` es censura por la derecha."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_VIVE"]["cortes_tras_ultimo"] == 0
 
-    def test_cuenta_los_cortes_posteriores_al_ultimo(self, db, metodo):
+    def test_cuenta_los_cortes_posteriores_al_ultimo(self, db, metodo, tracker):
         """Es el campo sobre el que se aplica la regla de cierre."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["C_CERRO"]["cortes_tras_ultimo"] == 2
         assert p["C_HUECO"]["cortes_tras_ultimo"] == 1
@@ -663,39 +665,39 @@ def estatus(db, metodo: str, cortes_para_cierre: int = 2) -> dict[str, dict]:
 class TestResumenDeVariantes:
     """La tabla guarda CUÁNTAS variantes hubo, no cuáles."""
 
-    def test_cuenta_los_nombres_distintos(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_cuenta_los_nombres_distintos(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_HUECO"]["n_nombres"] == 2
 
-    def test_un_solo_nombre_no_es_variante(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_un_solo_nombre_no_es_variante(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_VIVE"]["n_nombres"] == 1
 
-    def test_marca_el_cambio_de_municipio_y_actividad(self, db, metodo):
+    def test_marca_el_cambio_de_municipio_y_actividad(self, db, metodo, tracker):
         """Las dos juntas son la firma de una fusión indebida."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         mudo = permanencia(db, metodo)["C_MUDO"]
         assert mudo["cambio_municipio"] is True
         assert mudo["cambio_actividad"] is True
 
-    def test_cuenta_los_domicilios_distintos(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_cuenta_los_domicilios_distintos(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_HUECO"]["n_direcciones"] == 2
 
-    def test_el_contacto_es_la_union_no_el_mas_reciente(self, db, metodo):
+    def test_el_contacto_es_la_union_no_el_mas_reciente(self, db, metodo, tracker):
         """Para verificar un cierre sirve cualquier teléfono que publicó.
 
         `C_HUECO` trae teléfono solo en el primer corte; si la bandera se
         tomara del representante quedaría en falso.
         """
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         hueco = permanencia(db, metodo)["C_HUECO"]
         assert hueco["tiene_telefono"] is True
         assert hueco["tiene_correo"] is True
 
-    def test_sin_contacto_la_bandera_es_falsa_no_nula(self, db, metodo):
+    def test_sin_contacto_la_bandera_es_falsa_no_nula(self, db, metodo, tracker):
         """Una cadena vacía no es un contacto, es un dato ausente."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_VIVE"]["tiene_telefono"] is False
 
     def test_no_guarda_los_valores_solo_los_conteos(self, db, metodo):
@@ -716,43 +718,43 @@ class TestResumenDeVariantes:
             "cod_postales",
         }
 
-    def test_no_marca_cambio_cuando_no_se_movio(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_no_marca_cambio_cuando_no_se_movio(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         vive = permanencia(db, metodo)["C_VIVE"]
         assert vive["cambio_municipio"] is False
         assert vive["cambio_actividad"] is False
 
-    def test_el_neto_detecta_la_mudanza_real(self, db, metodo):
+    def test_el_neto_detecta_la_mudanza_real(self, db, metodo, tracker):
         """Guadalajara a CDMX son ~460 km entre dos puntos REALES."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["C_MUDO"]["desplazamiento_neto_m"] > 400_000
         assert p["C_VIVE"]["desplazamiento_neto_m"] == pytest.approx(0, abs=1)
 
-    def test_el_neto_distingue_jitter_de_mudanza(self, db, metodo):
+    def test_el_neto_distingue_jitter_de_mudanza(self, db, metodo, tracker):
         """El par neto/dispersión es lo que el rectángulo solo no puede.
 
         `C_JITTER` oscila ~80 m y vuelve al origen: neto ~0 pero dispersión
         grande. Con solo la diagonal del rectángulo se leería como si se
         hubiera movido.
         """
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         jitter = permanencia(db, metodo)["C_JITTER"]
         assert jitter["desplazamiento_neto_m"] == pytest.approx(0, abs=1)
         assert jitter["dispersion_max_m"] > 50
         assert jitter["n_posiciones"] == 2
 
-    def test_la_dispersion_expone_el_rectangulo(self, db, metodo):
+    def test_la_dispersion_expone_el_rectangulo(self, db, metodo, tracker):
         """Las cuatro esquinas quedan accesibles, no solo su diagonal."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         mudo = permanencia(db, metodo)["C_MUDO"]
         assert mudo["lat_min"] == pytest.approx(19.43)
         assert mudo["lat_max"] == pytest.approx(20.65)
         assert mudo["dispersion_max_m"] > 400_000
 
-    def test_guarda_la_primera_posicion(self, db, metodo):
+    def test_guarda_la_primera_posicion(self, db, metodo, tracker):
         """El otro extremo real del recorrido, para calcular el neto."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         mudo = permanencia(db, metodo)["C_MUDO"]
         assert mudo["lat_primera"] == pytest.approx(20.65)
         assert mudo["latitud"] == pytest.approx(19.43)  # el representante
@@ -760,14 +762,14 @@ class TestResumenDeVariantes:
 
 @pytest.mark.unit
 class TestRepresentante:
-    def test_los_atributos_son_del_corte_mas_reciente(self, db, metodo):
+    def test_los_atributos_son_del_corte_mas_reciente(self, db, metodo, tracker):
         """El estado con que el establecimiento terminó."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         hueco = permanencia(db, metodo)["C_HUECO"]
         assert hueco["nom_estab"] == "TAQUERIA DON JUAN"
 
-    def test_marca_las_identidades_sinteticas(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_marca_las_identidades_sinteticas(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["NEW_REG_1234-abcdef"]["es_sintetica"] is True
         assert p["C_VIVE"]["es_sintetica"] is False
@@ -777,29 +779,29 @@ class TestRepresentante:
 class TestAntiguedadYCensuraIzquierda:
     """Lo que el protocolo exige para tratar la censura por la izquierda."""
 
-    def test_duracion_es_el_span_no_los_observados(self, db, metodo):
+    def test_duracion_es_el_span_no_los_observados(self, db, metodo, tracker):
         """Difieren cuando hubo huecos, y la duración es la variable de tiempo."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         hueco = permanencia(db, metodo)["C_HUECO"]
         assert hueco["duracion_periodos"] == 2  # del corte 0 al 2
         assert hueco["cortes_observados"] == 2  # pero solo se vio dos veces
 
-    def test_marca_a_los_presentes_en_la_primera_edicion(self, db, metodo):
+    def test_marca_a_los_presentes_en_la_primera_edicion(self, db, metodo, tracker):
         """Su antigüedad real es DESCONOCIDA: el protocolo exige el indicador."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["C_VIVE"]["presente_desde_el_inicio"] is True
         assert p["NEW_REG_1234-abcdef"]["presente_desde_el_inicio"] is False
 
-    def test_dias_entre_el_alta_y_la_primera_aparicion(self, db, metodo):
+    def test_dias_entre_el_alta_y_la_primera_aparicion(self, db, metodo, tracker):
         """Diagnóstico de la fecha de alta, que es de registro y no de operación."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         vive = permanencia(db, metodo)["C_VIVE"]
         # alta 2010-07-01, primera aparición 2019-11-01
         assert vive["dias_alta_a_primera"] > 3000
 
-    def test_sin_fecha_de_alta_el_diagnostico_queda_nulo(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_sin_fecha_de_alta_el_diagnostico_queda_nulo(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_HUECO"]["dias_alta_a_primera"] is None
 
 
@@ -807,43 +809,43 @@ class TestAntiguedadYCensuraIzquierda:
 class TestTamanoYTipo:
     """El tamaño es variable del protocolo, y su trayectoria es señal."""
 
-    def test_trae_la_categoria_mipyme(self, db, metodo):
+    def test_trae_la_categoria_mipyme(self, db, metodo, tracker):
         """`categoria` del catálogo es el sujeto mismo de la tesis."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         vive = permanencia(db, metodo)["C_VIVE"]
         assert vive["categoria_tamano"] == "Micro"
         assert vive["empleados_min"] == 0
         assert vive["empleados_max"] == 5
 
-    def test_el_delta_distingue_crecer_de_encogerse(self, db, metodo):
+    def test_el_delta_distingue_crecer_de_encogerse(self, db, metodo, tracker):
         """Un array de estratos no tiene orden; el delta sí.
 
         `C_CRECIO` pasa de 0-5 a 11-30 empleados: delta positivo.
         """
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["C_CRECIO"]["cambio_tamano"] is True
         assert p["C_CRECIO"]["delta_empleados_min"] == 11  # 11 - 0
         assert p["C_VIVE"]["delta_empleados_min"] == 0
 
-    def test_trae_el_tipo_de_unidad_economica(self, db, metodo):
+    def test_trae_el_tipo_de_unidad_economica(self, db, metodo, tracker):
         """Distingue fijo de ambulante: dinámicas y verificabilidad distintas."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert permanencia(db, metodo)["C_VIVE"]["tipounieco"] == "FIJO"
 
 
 @pytest.mark.unit
 class TestPatronDePresencia:
-    def test_guarda_los_indices_exactos(self, db, metodo):
+    def test_guarda_los_indices_exactos(self, db, metodo, tracker):
         """De aquí se deriva cualquier patrón de ausencia sin volver a los hechos."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         assert p["C_VIVE"]["cortes_idx"] == [0, 1, 2, 3]
         assert p["C_HUECO"]["cortes_idx"] == [0, 2]  # el hueco es visible
 
-    def test_mide_cuanto_de_la_identidad_es_observado(self, db, metodo):
+    def test_mide_cuanto_de_la_identidad_es_observado(self, db, metodo, tracker):
         """10 cortes DIRECTO son más confiables que 1 directo y 9 propagados."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         p = permanencia(db, metodo)
         # el escenario los marca todos PROPAGADO salvo los sintéticos
         assert p["C_VIVE"]["cortes_propagado"] == 4
@@ -854,32 +856,32 @@ class TestPatronDePresencia:
 class TestReglaDeCierre:
     """La regla se aplica en la consulta: la tabla da los ingredientes."""
 
-    def test_presente_en_el_ultimo_corte_es_activo(self, db, metodo):
+    def test_presente_en_el_ultimo_corte_es_activo(self, db, metodo, tracker):
         """ACTIVO no es "sigue abierto": es censura por la derecha."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert estatus(db, metodo)["C_VIVE"]["estatus"] == "ACTIVO"
 
-    def test_dos_ausencias_son_cierre(self, db, metodo):
-        construir_permanencia(db, metodo)
+    def test_dos_ausencias_son_cierre(self, db, metodo, tracker):
+        construir_permanencia(db, metodo, tracker)
         assert estatus(db, metodo)["C_CERRO"]["estatus"] == "CERRADO"
 
-    def test_una_sola_ausencia_es_incierto(self, db, metodo):
+    def test_una_sola_ausencia_es_incierto(self, db, metodo, tracker):
         """Una ausencia no distingue un cierre de una omisión del directorio."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert estatus(db, metodo)["C_HUECO"]["estatus"] == "INCIERTO"
 
-    def test_mover_el_umbral_no_toca_la_tabla(self, db, metodo):
+    def test_mover_el_umbral_no_toca_la_tabla(self, db, metodo, tracker):
         """El protocolo llama preliminar a la regla: cambiarla es gratis.
 
         Con umbral 1, la ausencia única de `C_HUECO` ya cuenta como cierre
         sin reconstruir una sola fila.
         """
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         assert estatus(db, metodo, cortes_para_cierre=1)["C_HUECO"]["estatus"] == "CERRADO"
 
-    def test_marca_a_quien_ya_reaparecio(self, db, metodo):
+    def test_marca_a_quien_ya_reaparecio(self, db, metodo, tracker):
         """Demostró, para sí mismo, que una ausencia no implica cierre."""
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         e = estatus(db, metodo)
         assert e["C_HUECO"]["reaparecio"] is True
         assert e["C_VIVE"]["reaparecio"] is False
@@ -921,13 +923,13 @@ class TestValoresRecuperables:
         telefonos = {v["telefono"] for v in variantes(db, metodo, "C_HUECO")}
         assert "3312345678" in telefonos
 
-    def test_una_fila_por_corte_observado(self, db, metodo):
+    def test_una_fila_por_corte_observado(self, db, metodo, tracker):
         """El grano del join es la observación, no el establecimiento.
 
         Y coincide con el conteo que la tabla guarda: `cortes_observados`
         es el número de filas que el join devuelve.
         """
-        construir_permanencia(db, metodo)
+        construir_permanencia(db, metodo, tracker)
         observados = permanencia(db, metodo)["C_HUECO"]["cortes_observados"]
         assert len(variantes(db, metodo, "C_HUECO")) == observados
 
@@ -946,12 +948,118 @@ class TestValoresRecuperables:
 
 @pytest.mark.unit
 class TestSinIdentidad:
-    def test_sin_filas_de_identidad_la_tabla_queda_vacia(self, db, metodo):
+    def test_sin_filas_de_identidad_la_tabla_queda_vacia(self, db, metodo, tracker):
         """Correr permanencia antes de la resolución no inventa nada."""
         with db.begin() as conn:
             conn.execute(text(f"DELETE FROM silver.{METODOS[metodo]}"))
-        assert construir_permanencia(db, metodo) == 0
+        assert construir_permanencia(db, metodo, tracker) == 0
 
-    def test_metodo_desconocido_falla_explicito(self, db):
+    def test_metodo_desconocido_falla_explicito(self, db, tracker):
+        """Antes de abrir corrida en `meta`: no deja basura por un typo."""
         with pytest.raises(ValueError, match="Metodo desconocido"):
-            construir_permanencia(db, "inexistente")
+            construir_permanencia(db, "inexistente", tracker)
+        assert tracker.get_recent_runs(limit=1) == []
+
+
+@pytest.mark.unit
+class TestRegistroEnMeta:
+    """Cada construcción deja su corrida y su tarea en `meta`.
+
+    Es lo que hace consultable con SQL --sin abrir
+    `data/etl_permanencia.log`-- cuánto tardó la última corrida, cuántas
+    filas escribió y si terminó bien, igual que el ingest y la resolución
+    CLEE.
+    """
+
+    def tarea(self, db, metodo: str) -> dict:
+        """La última tarea de `meta.process_tasks` para la tabla del método.
+
+        Se lee con SQL y no con el tracker porque `get_tasks_by_run` solo
+        devuelve descargas, y lo que aquí importa son las tareas de proceso.
+        """
+        with db.connect() as conn:
+            fila = (
+                conn.execute(
+                    text("""
+                    SELECT * FROM meta.process_tasks
+                    WHERE target_table = :tabla
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """),
+                    {"tabla": tabla_destino(metodo)},
+                )
+                .mappings()
+                .first()
+            )
+        assert fila is not None, f"sin tarea en meta para {tabla_destino(metodo)}"
+        return dict(fila)
+
+    def test_la_corrida_queda_en_job_runs(self, db, metodo, tracker):
+        """Con su propio `job_type`: `/ops/health/pipeline` reporta por tipo."""
+        construir_permanencia(db, metodo, tracker)
+        run = tracker.get_recent_runs(limit=1)[0]
+        assert run["job_type"] == JOB_TYPE
+        assert run["job_name"] == f"denue_permanencia_{metodo}"
+        assert run["status"] == JobStatus.SUCCESS.value
+        assert run["duration_seconds"] is not None
+
+    def test_la_tarea_guarda_filas_leidas_y_escritas(self, db, metodo, tracker):
+        """16 observaciones leídas -> 7 establecimientos escritos."""
+        construir_permanencia(db, metodo, tracker)
+        tarea = self.tarea(db, metodo)
+        assert tarea["status"] == TaskStatus.SUCCESS.value
+        assert tarea["target_table"] == tabla_destino(metodo)
+        assert tarea["rows_extracted"] == len(OBSERVACIONES)
+        assert tarea["rows_loaded"] == 7
+
+    def test_el_origen_son_las_dos_tablas_de_silver(self, db, metodo, tracker):
+        """No hay archivo que registrar: el linaje son los hechos y la identidad."""
+        construir_permanencia(db, metodo, tracker)
+        origen = self.tarea(db, metodo)["source_path"]
+        assert "silver.establecimientos" in origen
+        assert f"silver.{METODOS[metodo]}" in origen
+
+    def test_la_segunda_corrida_se_salta(self, db, metodo, tracker):
+        """Sin esto, volver a pedirla recarga los 20 cortes para nada.
+
+        La tabla de trabajo se borra al terminar, así que una segunda
+        corrida la rellenaría entera --horas-- solo para descubrir al final
+        que todos los bloques ya estaban escritos.
+        """
+        construir_permanencia(db, metodo, tracker)
+        assert construir_permanencia(db, metodo, tracker) == 7
+
+        tarea = self.tarea(db, metodo)
+        assert tarea["status"] == TaskStatus.SKIPPED.value
+        assert tarea["rows_extracted"] is None  # no leyó ni una observación
+        assert tarea["rows_loaded"] == 7
+
+    def test_si_la_identidad_se_re_resolvio_reconstruye(self, db, metodo, tracker):
+        """La tabla vigente quedó stale: sus agregados son de otras identidades.
+
+        El reloj es `end_time` de la última tarea exitosa contra
+        `max(resuelto_en)`. Sin esto, el pipeline semanal serviría la
+        permanencia del corte anterior hasta que alguien se acordara de
+        `--force`.
+        """
+        construir_permanencia(db, metodo, tracker)
+        with db.begin() as conn:
+            conn.execute(text(f"UPDATE silver.{METODOS[metodo]} SET resuelto_en = now()"))
+
+        assert construir_permanencia(db, metodo, tracker) == 7
+        tarea = self.tarea(db, metodo)
+        assert tarea["status"] == TaskStatus.SUCCESS.value
+        assert tarea["rows_extracted"] == len(OBSERVACIONES)  # releyó los cortes
+
+    def test_un_fallo_queda_registrado_y_se_propaga(self, db, metodo, tracker, monkeypatch):
+        """La corrida fallida es justo la que se quiere poder consultar."""
+        monkeypatch.setattr(loader, "SET_WORK_MEM", "SET LOCAL work_mem = 'no_es_memoria'")
+
+        with pytest.raises(Exception, match="work_mem"):
+            construir_permanencia(db, metodo, tracker)
+
+        run = tracker.get_recent_runs(limit=1)[0]
+        assert run["status"] == JobStatus.FAILED.value
+        tarea = self.tarea(db, metodo)
+        assert tarea["status"] == TaskStatus.FAILED.value
+        assert "work_mem" in tarea["error_message"]

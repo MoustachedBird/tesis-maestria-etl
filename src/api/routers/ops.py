@@ -127,6 +127,7 @@ def pipeline_health(tracker: Tracker) -> dict[str, Any]:
         "extract": ("DOWNLOAD",),
         "transform": ("TRANSFORM",),
         "clee_resolution": ("CLEE_RESOLUTION",),
+        "permanencia": ("PERMANENCIA",),
     }
 
     detalle: dict[str, Any] = {}

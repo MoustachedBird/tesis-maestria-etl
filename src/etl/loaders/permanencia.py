@@ -24,6 +24,13 @@ identidad y de ahí a los hechos; `AGENTS.md` §N3 trae la consulta.
 protocolo llama preliminar a la regla, así que el umbral vive donde se
 pregunta y no en el esquema: cambiarlo no debe costar 10M de filas ni un
 `CREATE OR REPLACE`.
+
+**Cada construcción queda registrada en `meta`**: una corrida en
+`meta.job_runs` y una tarea en `meta.process_tasks` por método, con filas
+leídas, filas escritas, duración y error. Eso es lo que hace consultable
+--sin abrir `data/etl_permanencia.log`-- cuánto tardó la última corrida y
+si terminó bien, y es también el reloj con que se decide reconstruir: ver
+`construir_permanencia`.
 """
 
 from __future__ import annotations
@@ -39,10 +46,11 @@ from typing import NamedTuple
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from src.meta.tracker import MetadataTracker
 from src.shared.config import get_settings
 from src.shared.db.base import DEFAULT_SCHEMA
 from src.shared.db.partitions import existing_partitions
-from src.shared.enums import OrigenClee
+from src.shared.enums import JobStatus, OrigenClee, TaskStatus, TriggerType
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_permanencia.log"))
@@ -55,6 +63,22 @@ METODOS: dict[str, str] = {
 
 El destino es `permanencia_<metodo>`. Agregar un método es una entrada aquí
 más su tabla, sin tocar el SQL.
+"""
+
+JOB_NAME = "denue_permanencia_{metodo}"
+"""Plantilla del nombre de la corrida en `meta.job_runs`, una por método.
+
+El método va en el nombre --igual que `denue_clee_resolver_<metodo>`-- para
+que `job_name` distinga las dos tablas sin tener que abrir el `config` de
+la corrida.
+"""
+
+JOB_TYPE = "PERMANENCIA"
+"""Etapa a la que pertenece la corrida en `meta.job_runs.job_type`.
+
+Es su propia etapa y no `TRANSFORM`: `/ops/health/pipeline` reporta la
+última corrida POR TIPO, así que mezclarla con el ingest haría que un
+ingest exitoso tapara una permanencia fallida.
 """
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -630,6 +654,27 @@ def _marcar_obs(conn: Connection, metodo: str, schema: str) -> None:
     )
 
 
+def _identidad_resuelta_en(conn: Connection, metodo: str, schema: str) -> datetime | None:
+    """Cuándo se resolvió por última vez la identidad del método.
+
+    `resuelto_en` es la columna que la resolución CLEE escribe justamente
+    para poder fechar un resultado, y es el insumo de los dos chequeos de
+    frescura: el de la tabla de trabajo a medio llenar
+    (`_identidad_mas_nueva_que_obs`) y el de la tabla ya construida
+    (`construir_permanencia`).
+
+    Args:
+        conn: conexión de lectura.
+        metodo: clave de `METODOS`.
+        schema: schema de las tablas.
+
+    Returns:
+        datetime | None: el instante más reciente, o None si la tabla de
+        identidad está vacía.
+    """
+    return conn.execute(text(f"SELECT max(resuelto_en) FROM {schema}.{METODOS[metodo]}")).scalar()
+
+
 def _identidad_mas_nueva_que_obs(conn: Connection, metodo: str, schema: str) -> bool:
     """Si la resolución CLEE se re-corrió después de armar la tabla de trabajo.
 
@@ -639,8 +684,10 @@ def _identidad_mas_nueva_que_obs(conn: Connection, metodo: str, schema: str) -> 
     delate. Las `NEW_*` ni siquiera son estables entre corridas, así que la
     misma fila puede aparecer con dos identidades distintas.
 
-    Compara la marca que dejó `_marcar_obs` contra `resuelto_en`, la columna
-    que la resolución escribe justamente para poder fechar un resultado.
+    El reloj de este lado es el `COMMENT` que dejó `_marcar_obs` y no
+    `meta.process_tasks`: lo que hay que fechar es la tabla de trabajo, un
+    estado a medio construir que puede sobrevivir a varias corridas y que
+    muere cuando ella se borra. Lo que `meta` fecha es la tabla terminada.
 
     Args:
         conn: conexión de lectura.
@@ -658,11 +705,9 @@ def _identidad_mas_nueva_que_obs(conn: Connection, metodo: str, schema: str) -> 
         # misma, y el riesgo de mezclarlas no se corre a la ligera.
         return True
 
-    return bool(
-        conn.execute(
-            text(f"SELECT max(resuelto_en) > :armado FROM {schema}.{METODOS[metodo]}"),
-            {"armado": marca.removeprefix("armado_en=")},
-        ).scalar()
+    resuelta = _identidad_resuelta_en(conn, metodo, schema)
+    return resuelta is not None and resuelta > datetime.fromisoformat(
+        marca.removeprefix("armado_en=")
     )
 
 
@@ -739,10 +784,86 @@ def _ejecutar(conn: Connection, paso: _Paso, etiqueta: str) -> int:
     return resultado.rowcount
 
 
-def construir_permanencia(
-    engine: Engine, metodo: str, schema: str = DEFAULT_SCHEMA, force: bool = False
-) -> int:
-    """Construye la tabla de permanencia de un método, por partes y reanudable.
+def _filas(conn: Connection, tabla: str, schema: str) -> int:
+    """Cuántas filas tiene una tabla del schema.
+
+    Args:
+        conn: conexión de lectura.
+        tabla: nombre sin calificar.
+        schema: schema de la tabla.
+
+    Returns:
+        int: conteo exacto.
+    """
+    return conn.execute(text(f"SELECT count(*) FROM {schema}.{tabla}")).scalar_one()
+
+
+def _ultimo_exito(tracker: MetadataTracker, destino: str) -> datetime | None:
+    """Cuándo terminó la última construcción exitosa de una tabla destino.
+
+    Sale de `meta.process_tasks` y no de la tabla misma: con el troceo, una
+    tabla con filas puede estar a medio llenar, así que "tiene filas" no
+    equivale a "está completa". Una tarea en `SUCCESS` sí: se escribe una
+    sola vez y al final.
+
+    Args:
+        tracker: registro de `meta`.
+        destino: tabla de permanencia del método.
+
+    Returns:
+        datetime | None: `end_time` de la última tarea exitosa, o None si
+        nunca terminó una.
+    """
+    # La unidad de trabajo ES la tabla entera --no hay archivo por corte que
+    # nombrar-- asi que el nombre de la tarea y el de la tabla coinciden.
+    tarea = tracker.get_last_successful_process_task(task_name=destino, target_table=destino)
+    return tarea["end_time"] if tarea is not None else None
+
+
+def _cerrar(
+    tracker: MetadataTracker,
+    run_id: str,
+    task_id: str,
+    status: TaskStatus,
+    *,
+    rows_extracted: int | None = None,
+    rows_loaded: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Cierra la tarea y su corrida con el mismo veredicto.
+
+    Van juntas porque la corrida existe solo para colgar esta tarea --una
+    construcción por método-- así que dos estados distintos no significarían
+    nada. `SKIPPED` cierra la corrida en `SUCCESS`: saltarse trabajo que ya
+    estaba hecho es un resultado bueno, no un fallo.
+
+    Args:
+        tracker: registro de `meta`.
+        run_id: corrida a cerrar.
+        task_id: tarea a cerrar.
+        status: veredicto de la tarea.
+        rows_extracted: observaciones leídas hacia la tabla de trabajo.
+        rows_loaded: establecimientos escritos en la tabla destino.
+        error: detalle del error, si falló.
+    """
+    tracker.complete_process_task(
+        task_id,
+        status,
+        rows_extracted=rows_extracted,
+        rows_loaded=rows_loaded,
+        error_message=error,
+    )
+    tracker.complete_run(
+        run_id,
+        JobStatus.FAILED if status is TaskStatus.FAILED else JobStatus.SUCCESS,
+        error_summary=error,
+    )
+
+
+def _construir(
+    engine: Engine, metodo: str, bloques: int, schema: str, rehacer: bool
+) -> tuple[int, int]:
+    """Llena la tabla de permanencia, por partes y reanudable.
 
     El trabajo se parte en dos fases, cada una con la llave de troceo que su
     grano admite:
@@ -751,10 +872,10 @@ def construir_permanencia(
        une los hechos con la identidad. Aquí el grano es la observación, así
        que partir por corte no parte nada, y cada vuelta lee una sola
        partición de los hechos.
-    2. **Por bloque de identidad** (`PERMANENCIA_BLOQUES` vueltas) se
-       agregan y se escriben. Aquí el grano es el establecimiento, que
-       **cruza** los cortes: trocear por año daría agregados calculados
-       sobre un fragmento de su vida. La llave es `_expr_bloque`.
+    2. **Por bloque de identidad** (`bloques` vueltas) se agregan y se
+       escriben. Aquí el grano es el establecimiento, que **cruza** los
+       cortes: trocear por año daría agregados calculados sobre un fragmento
+       de su vida. La llave es `_expr_bloque`.
 
     **Cada vuelta es su propia transacción y commitea.** Eso es el punto: un
     fallo en la vuelta 14 no se lleva las 13 anteriores. El precio es que se
@@ -762,31 +883,25 @@ def construir_permanencia(
     parcialmente llena-- y se acepta porque es una tabla derivada que solo
     lee el análisis entre corridas, y rehacerla no cuesta datos.
 
-    **Por default reanuda**, misma convención que la resolución CLEE, que
-    salta los cortes que ya resolvió: el avance se deriva de las tablas, sin
-    registro aparte. `force=True` tira la tabla de trabajo y la destino y
-    empieza de cero. Si la resolución CLEE se re-corrió desde la última vez,
-    se niega a reanudar: ver `_identidad_mas_nueva_que_obs`.
+    Lo único que borra es lo suyo: la tabla de trabajo y la destino del
+    método. Los hechos, la identidad y `meta` no se tocan.
 
     Args:
         engine: engine con permisos de escritura; esta función controla sus
             transacciones, una por vuelta.
-        metodo: clave de `METODOS` (`radio` o `h3`).
+        metodo: clave de `METODOS`.
+        bloques: en cuántos bloques de identidad trocear la segunda fase.
         schema: schema de origen y destino.
-        force: si True, descarta lo que haya y reconstruye entero.
+        rehacer: descartar el avance previo y reconstruir entero.
 
     Returns:
-        int: filas en la tabla destino al terminar.
+        tuple[int, int]: filas en la tabla destino al terminar, y
+        observaciones que la tabla de trabajo llegó a tener (0 si no había
+        nada que construir).
 
     Raises:
-        ValueError: si el método no está registrado.
-        RuntimeError: si hay avance previo pero la identidad cambió y no se
-            pidió `force`.
+        RuntimeError: si hay avance previo pero la identidad cambió.
     """
-    if metodo not in METODOS:
-        raise ValueError(f"Metodo desconocido '{metodo}'. Opciones: {list(METODOS)}")
-
-    bloques = max(get_settings().PERMANENCIA_BLOQUES, 1)
     destino = tabla_destino(metodo)
     obs = tabla_obs(metodo)
 
@@ -796,10 +911,9 @@ def construir_permanencia(
             logger.warning(
                 f"   {metodo}: no hay cortes en {schema}.establecimientos, nada que construir"
             )
-            return 0
+            return 0, 0
 
-        if force:
-            logger.info(f"   {metodo}: --force, se descarta el avance previo")
+        if rehacer:
             conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
             conn.execute(text(f"TRUNCATE {schema}.{destino}"))
         elif _obs_existe(conn, metodo, schema) and _identidad_mas_nueva_que_obs(
@@ -838,14 +952,14 @@ def construir_permanencia(
         logger.info(f"   ✔ {etiqueta}: {corte} -> {filas:,} observaciones")
 
     with engine.begin() as conn:
-        total_obs = conn.execute(text(f"SELECT count(*) FROM {schema}.{obs}")).scalar_one()
+        total_obs = _filas(conn, obs, schema)
         if total_obs == 0:
             logger.warning(
                 f"   ⚠️ {destino} vacia: {schema}.{METODOS[metodo]} sin poblar. "
                 f"Corre primero `transform --only clee-{metodo}`."
             )
             conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
-            return 0
+            return 0, 0
         # Indice y estadisticas DESPUES de llenar: construirlo antes
         # costaria mantenerlo en los 20 INSERT, y una tabla sin ANALYZE deja
         # al planificador armando los bloques a ciegas (el autovacuum no
@@ -874,9 +988,127 @@ def construir_permanencia(
         )
 
     with engine.begin() as conn:
-        total = conn.execute(text(f"SELECT count(*) FROM {schema}.{destino}")).scalar_one()
+        total = _filas(conn, destino, schema)
         conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
 
     minutos = (time.monotonic() - inicio) / 60
     logger.info(f"   ✅ {destino}: {total:,} establecimientos en {minutos:.1f} min")
+    return total, total_obs
+
+
+def construir_permanencia(
+    engine: Engine,
+    metodo: str,
+    tracker: MetadataTracker,
+    schema: str = DEFAULT_SCHEMA,
+    force: bool = False,
+) -> int:
+    """Construye la tabla de permanencia de un método y lo registra en `meta`.
+
+    Deja una corrida en `meta.job_runs` y una tarea en `meta.process_tasks`
+    --filas leídas, filas escritas, duración, error-- de modo que "cuánto
+    tardó" y "terminó bien" se contesten con SQL y no leyendo
+    `data/etl_permanencia.log`. El trabajo en sí lo hace `_construir`.
+
+    **Decide sola si hay algo que hacer**, comparando el `end_time` de la
+    última tarea exitosa contra `max(resuelto_en)` de la identidad:
+
+    - **Nunca se construyó, o la última corrida murió a la mitad**: reanuda,
+      misma convención que la resolución CLEE. El avance se deriva de las
+      propias tablas --una vuelta que falló hizo rollback y no dejó filas--
+      y no del registro en `meta`, que es más grueso que una vuelta.
+    - **Construida y la identidad no cambió**: `SKIPPED`. Sin esto, volver a
+      pedirla rellenaría la tabla de trabajo entera (20 cortes, horas) para
+      acabar descubriendo que todos los bloques ya estaban escritos.
+    - **Construida pero la identidad se re-resolvió después**: reconstruye
+      desde cero. La tabla vigente quedó stale --sus agregados son de otro
+      conjunto de identidades, y las `NEW_*` no son estables entre
+      corridas-- y pedir `--force` a mano haría que el pipeline semanal
+      sirviera datos viejos en silencio hasta que alguien se acordara.
+
+    `force=True` reconstruye sin preguntar.
+
+    Lo que descarta al reconstruir es solo lo suyo: la tabla de trabajo y la
+    destino del método. Los hechos, `clee_<metodo>` y `meta` quedan intactos.
+
+    Args:
+        engine: engine con permisos de escritura; `_construir` controla sus
+            transacciones, una por vuelta.
+        metodo: clave de `METODOS` (`radio` o `h3`).
+        tracker: registro de `meta` donde queda la corrida.
+        schema: schema de origen y destino.
+        force: si True, descarta lo que haya y reconstruye entero.
+
+    Returns:
+        int: filas en la tabla destino al terminar.
+
+    Raises:
+        ValueError: si el método no está registrado.
+        RuntimeError: si hay avance previo a medio construir pero la
+            identidad cambió; ahí sí hace falta `--force`, porque lo que se
+            descartaría son horas de trabajo de esta corrida.
+    """
+    if metodo not in METODOS:
+        raise ValueError(f"Metodo desconocido '{metodo}'. Opciones: {list(METODOS)}")
+
+    bloques = max(get_settings().PERMANENCIA_BLOQUES, 1)
+    destino = tabla_destino(metodo)
+
+    run_id = tracker.create_run(
+        job_name=JOB_NAME.format(metodo=metodo),
+        job_type=JOB_TYPE,
+        trigger_type=TriggerType.MANUAL.value,
+        config={"metodo": metodo, "bloques": bloques, "force": force},
+    )
+    task_id = tracker.create_process_task(
+        run_id=run_id,
+        task_name=destino,
+        # El origen no es un archivo sino dos tablas de Silver, y es lo que
+        # `source_path` tiene que decir para que la fila valga como linaje.
+        source_path=f"{schema}.establecimientos + {schema}.{METODOS[metodo]}",
+        target_table=destino,
+    )
+    tracker.start_process_task(task_id)
+
+    try:
+        with engine.connect() as conn:
+            construida_en = _ultimo_exito(tracker, destino)
+            resuelta_en = _identidad_resuelta_en(conn, metodo, schema)
+            desactualizada = (
+                construida_en is not None
+                and resuelta_en is not None
+                and resuelta_en > construida_en
+            )
+            if construida_en is not None and not desactualizada and not force:
+                total = _filas(conn, destino, schema)
+                logger.info(
+                    f"   ✨ {destino}: ya construida con la identidad vigente "
+                    f"({total:,} establecimientos). Nada que hacer; --force la rehace."
+                )
+                _cerrar(tracker, run_id, task_id, TaskStatus.SKIPPED, rows_loaded=total)
+                return total
+
+        if force:
+            logger.info(f"   {metodo}: --force, se descarta el avance previo")
+        elif desactualizada:
+            logger.info(
+                f"   {metodo}: {schema}.{METODOS[metodo]} se re-resolvio despues de construir "
+                f"{destino}; se reconstruye desde cero"
+            )
+
+        total, observaciones = _construir(
+            engine, metodo, bloques, schema, rehacer=force or desactualizada
+        )
+    except Exception as e:
+        _cerrar(tracker, run_id, task_id, TaskStatus.FAILED, error=str(e))
+        raise
+
+    _cerrar(
+        tracker,
+        run_id,
+        task_id,
+        TaskStatus.SUCCESS if observaciones else TaskStatus.SKIPPED,
+        rows_extracted=observaciones,
+        rows_loaded=total,
+    )
     return total
