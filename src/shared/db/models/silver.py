@@ -179,6 +179,14 @@ class Establecimiento(Base):
         BigInteger,
         comment="H3 cell index at resolution 9 (~174m edge) for spatial blocking",
     )
+    h3_cell_7: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment=(
+            "Celda H3 res 7 (~1.5km), derivada como padre de h3_cell_9. "
+            "Es el CRITERIO espacial del metodo `celda_h3_7` (silver.clee_celda_h3_7), "
+            "no un indice: ver CELL_MATCH_RES"
+        ),
+    )
     h3_cell_5: Mapped[int | None] = mapped_column(
         BigInteger,
         comment="H3 cell index at resolution 5 (~8.5km edge) for spatial partitioning",

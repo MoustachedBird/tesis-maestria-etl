@@ -36,6 +36,7 @@ from src.etl.utils.entity_resolution import (
     assign_new_clees,
     build_single_period_kb,
     get_region_prefix,
+    propagate_clees_celda_h3_7,
     propagate_clees_h3,
     propagate_clees_radio,
     set_matching_logger,
@@ -111,6 +112,16 @@ class CLEEResolver:
             "ceiling": None,
             "prefix_suffix": "H3",
         },
+        # Primer metodo con otra REGLA y no otro indice: la celda de
+        # CELL_MATCH_RES es el criterio y el radio no se aplica. Comparte la
+        # cascada, asi que `scorer` sigue siendo el default.
+        "celda_h3_7": {
+            "table": "clee_celda_h3_7",
+            "propagate": propagate_clees_celda_h3_7,
+            "scorer": None,
+            "ceiling": None,
+            "prefix_suffix": "C7",
+        },
     }
 
     def __init__(
@@ -125,10 +136,11 @@ class CLEEResolver:
 
         Args:
             tracker: MetadataTracker instance for job/task tracking
-            method: "radio" (BallTree, tabla silver.clee_radio) o "h3"
-                (blocking H3, tabla silver.clee_h3). Ambos metodos comparten
-                TODO el motor de ventana deslizante; solo cambian la tabla
-                destino y el generador de candidatos.
+            method: clave de `METHODS`. "radio" (BallTree) y "h3"
+                (blocking H3) comparten criterio --el circulo de 500 m-- y
+                por eso dan la misma particion; "celda" usa la igualdad de
+                celda H3 como criterio y da otra. Todos comparten el motor
+                de ventana deslizante y la cascada.
             engine: conexion a la base; por default la del proyecto.
             kb_cache_dir: donde cachear las KB de referencia; por default,
                 `data/kb_cache/<metodo>`.

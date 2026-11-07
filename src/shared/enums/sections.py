@@ -23,11 +23,12 @@ class Section(StrEnum):
     ingest = "ingest"
     clee_radio = "clee-radio"
     clee_h3 = "clee-h3"
+    clee_celda_h3_7 = "clee-celda-h3-7"
     permanencia_radio = "permanencia-radio"
     permanencia_h3 = "permanencia-h3"
     sesnsp = "sesnsp"
     denue = "denue"  # group -> all DENUE sub-steps
-    clee = "clee"  # group -> clee-radio + clee-h3
+    clee = "clee"  # group -> clee-radio + clee-h3 + clee-celda
     permanencia = "permanencia"  # group -> permanencia-radio + permanencia-h3
 
 
@@ -35,6 +36,7 @@ DENUE_ATOMIC: tuple[Section, ...] = (
     Section.ingest,
     Section.clee_radio,
     Section.clee_h3,
+    Section.clee_celda_h3_7,
     Section.permanencia_radio,
     Section.permanencia_h3,
 )
@@ -46,7 +48,7 @@ poder aislar una sin la otra.
 
 SECTION_GROUPS: dict[Section, tuple[Section, ...]] = {
     Section.denue: DENUE_ATOMIC,
-    Section.clee: (Section.clee_radio, Section.clee_h3),
+    Section.clee: (Section.clee_radio, Section.clee_h3, Section.clee_celda_h3_7),
     Section.permanencia: (Section.permanencia_radio, Section.permanencia_h3),
 }
 """Mapa de alias de grupo -> secciones atómicas que representa.

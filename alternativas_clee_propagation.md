@@ -108,7 +108,7 @@ candidatos produce `h3`, que es el caso que ya sabemos que no diversifica.
 | **A** | `clee_prob` — Fellegi-Sunter (EM, `splink`) | Modelo de decisión | Propuesto, recomendado | `todo.md` Fase 7 Opción A |
 | **B** | `clee_ml` — LightGBM/logística supervisada | Modelo de decisión | Propuesto | `todo.md` Fase 7 Opción B |
 | **C** | `clee_nombre` — blocking por MinHash/LSH de nombre | Qué se usa para bloquear | Propuesto | `todo.md` Fase 7 Opción C |
-| **D** | `clee_celda` — la celda H3 **es** el criterio | Criterio espacial | **Nuevo**, ver §5 | este documento |
+| **D** | `clee_celda_h3_7` — la celda H3 **es** el criterio | Criterio espacial | **Nuevo**, ver §5 | este documento |
 | **E** | `clee_llm` — adjudicador LLM por candidato | Modelo de decisión | Propuesto, **ya previsto en la arquitectura** | `crear_agentes.md` §§1–8; `arquitectura.md`:15 lo nombra "tercer método de resolución"; la tabla está reservada en `docs/separacion_ingest_clee.md` |
 | — | `clee_h3` | Generador de candidatos | **Implementado, 0% diverso** | §0 |
 
@@ -305,7 +305,7 @@ método nuevo puede tocar. Si hubiera que elegir una sola cosa, es esa.
    desacuerdo contra `radio` (§2.1) y su F1 (§2.2). **Si el desacuerdo sale
    <1%, el plan de ensemble se detiene aquí** — significaría que el criterio
    espacial no era el factor limitante.
-3. **Un segundo método diverso**: A (`clee_prob`) o D (`clee_celda`). D es
+3. **Un segundo método diverso**: A (`clee_prob`) o D (`clee_celda_h3_7`). D es
    mucho más barato de implementar; A es más citable.
 4. **Medir la matriz de desacuerdos** entre los tres y reportarla. Es un
    resultado publicable por sí mismo, independientemente del consenso.

@@ -32,7 +32,7 @@ class DenuePipelineOrchestrator:
 
         # Run individual stages
         transformer.run_transform_stage(force=False)
-        transformer.run_clee_resolution_stage(force=False)
+        transformer.run_clee_resolution_stage("radio", force=False)
 
         # Or run complete pipeline
         transformer.run_full_pipeline(force=False)
@@ -61,9 +61,10 @@ class DenuePipelineOrchestrator:
             tracker=self.tracker,
         )
 
-        # Un resolver por metodo (misma maquinaria, distinta columna destino).
-        self.clee_resolver = CLEEResolver(tracker=self.tracker, method="radio")
-        self.clee_resolver_h3 = CLEEResolver(tracker=self.tracker, method="h3")
+        # Un resolver por metodo, construido bajo demanda: cada uno abre su
+        # archivo de log al nacer, y una corrida de `--only clee-radio` no
+        # tiene por que crear los logs de los otros metodos.
+        self._resolvers: dict[str, CLEEResolver] = {}
 
         logger.info("DenuePipelineOrchestrator initialized")
 
@@ -100,67 +101,52 @@ class DenuePipelineOrchestrator:
             logger.error(f"TRANSFORM stage failed: {e}")
             raise
 
-    def run_clee_resolution_stage(self, force: bool = False) -> bool:
-        """
-        Run CLEE resolution stage: Entity Resolution.
-
-        Matches establishments across time periods and generates
-        master identifiers (CLEEs) for entity tracking. Results are
-        written to `silver.clee_radio`.
+    def _resolver(self, metodo: str) -> CLEEResolver:
+        """El resolver de un metodo, creado la primera vez que se pide.
 
         Args:
-            force: If True, rebuild silver.clee_radio from scratch.
+            metodo: clave de `CLEEResolver.METHODS`.
 
         Returns:
-            True if successful, False otherwise
+            CLEEResolver: el del metodo, reusado en llamadas siguientes.
         """
-        logger.info("Starting CLEE RESOLUTION stage (RADIO / BallTree -> silver.clee_radio)")
+        if metodo not in self._resolvers:
+            self._resolvers[metodo] = CLEEResolver(tracker=self.tracker, method=metodo)
+        return self._resolvers[metodo]
+
+    def run_clee_resolution_stage(self, metodo: str, force: bool = False) -> bool:
+        """
+        Corre la resolucion de identidad de UN metodo.
+
+        Los metodos comparten el motor de ventana deslizante y la cascada;
+        lo que cambia es como se generan los candidatos y, en los que la
+        declaren, la regla de decision. Cada uno escribe su propia tabla
+        (`silver.clee_<metodo>`), asi que una falla en uno no daña a los
+        otros ni a la tabla de hechos.
+
+        Es generica a proposito: agregar un metodo es una entrada en
+        `CLEEResolver.METHODS` mas su seccion en el CLI, sin tocar esto.
+
+        Args:
+            metodo: clave de `CLEEResolver.METHODS` (radio, h3, celda_h3_7...).
+            force: si True, reconstruye la tabla del metodo desde cero.
+
+        Returns:
+            True si termino sin errores.
+        """
+        resolver = self._resolver(metodo)
+        logger.info(f"Starting CLEE RESOLUTION stage ({metodo} -> silver.{resolver.clee_table})")
         logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
 
         try:
-            success = self.clee_resolver.run(force=force)
-
+            success = resolver.run(force=force)
             if success:
-                logger.info("CLEE RESOLUTION (radio) stage completed successfully")
+                logger.info(f"CLEE RESOLUTION ({metodo}) stage completed successfully")
             else:
-                logger.warning("CLEE RESOLUTION (radio) stage completed with errors")
-
+                logger.warning(f"CLEE RESOLUTION ({metodo}) stage completed with errors")
             return success
-
         except Exception as e:
-            logger.error(f"CLEE RESOLUTION (radio) stage failed: {e}")
-            raise
-
-    def run_clee_resolution_h3_stage(self, force: bool = False) -> bool:
-        """
-        Run CLEE resolution stage with H3 cell blocking.
-
-        Same sliding-window entity resolution as the radio method, but
-        candidates come from H3 cell blocking (grid_disk + exact haversine
-        post-filter). Results are written to `silver.clee_h3`, independent
-        from `silver.clee_radio` (side-by-side comparison).
-
-        Args:
-            force: If True, rebuild silver.clee_h3 from scratch.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        logger.info("Starting CLEE RESOLUTION stage (H3 blocking -> silver.clee_h3)")
-        logger.info(f"   Mode: {'FORCE (reset and re-resolve all)' if force else 'INCREMENTAL'}")
-
-        try:
-            success = self.clee_resolver_h3.run(force=force)
-
-            if success:
-                logger.info("CLEE RESOLUTION (h3) stage completed successfully")
-            else:
-                logger.warning("CLEE RESOLUTION (h3) stage completed with errors")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"CLEE RESOLUTION (h3) stage failed: {e}")
+            logger.error(f"CLEE RESOLUTION ({metodo}) stage failed: {e}")
             raise
 
     def run_full_pipeline(self, force: bool = False) -> bool:

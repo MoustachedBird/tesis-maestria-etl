@@ -24,7 +24,7 @@ Establecimiento`). Ese re-export se retira cuando `gold` tenga su propia
 """
 
 from src.shared.db.models import clee, gold, meta, permanencia, silver
-from src.shared.db.models.clee import CleeH3, CleeRadio
+from src.shared.db.models.clee import CleeCeldaH37, CleeH3, CleeRadio
 from src.shared.db.models.permanencia import PermanenciaH3, PermanenciaRadio
 from src.shared.db.models.silver import (
     ActividadEconomica,
@@ -49,6 +49,7 @@ __all__ = [
     "silver",
     # Re-export plano de silver (compatibilidad; se retira en la Fase 5)
     "ActividadEconomica",
+    "CleeCeldaH37",
     "CleeH3",
     "CleeRadio",
     "PermanenciaH3",

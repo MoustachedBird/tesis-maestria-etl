@@ -80,6 +80,7 @@ def _run_denue_transform(
     ingest: bool,
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
+    clee_resolution_celda_h3_7: bool,
     permanencia_radio: bool,
     permanencia_h3: bool,
     force: bool,
@@ -94,12 +95,22 @@ def _run_denue_transform(
     if ingest:
         console.print("[bold blue]   Running: ingest[/bold blue]")
         success = transformer.run_transform_stage(force=force, periods=periods)
-    if clee_resolution_radio and success:
-        console.print("[bold magenta]   Running: clee-resolution (radio)[/bold magenta]")
-        success = transformer.run_clee_resolution_stage(force=force)
-    if clee_resolution_h3 and success:
-        console.print("[bold magenta]   Running: clee-resolution (h3)[/bold magenta]")
-        success = transformer.run_clee_resolution_h3_stage(force=force)
+    # Un solo despacho para todos los metodos: agregar uno es una entrada
+    # en `CLEEResolver.METHODS` mas su flag, sin un `if` nuevo aqui.
+    metodos_clee = [
+        m
+        for m, activo in (
+            ("radio", clee_resolution_radio),
+            ("h3", clee_resolution_h3),
+            ("celda_h3_7", clee_resolution_celda_h3_7),
+        )
+        if activo
+    ]
+    for metodo in metodos_clee:
+        if not success:
+            break
+        console.print(f"[bold magenta]   Running: clee-resolution ({metodo})[/bold magenta]")
+        success = transformer.run_clee_resolution_stage(metodo, force=force)
     # Va al final porque colapsa lo que las resoluciones acaban de escribir.
     metodos = [m for m, activo in (("radio", permanencia_radio), ("h3", permanencia_h3)) if activo]
     if metodos and success:
@@ -286,6 +297,11 @@ def transform(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking -> silver.clee_h3), comparison track",
     ),
+    clee_resolution_celda_h3_7: bool = typer.Option(
+        True,
+        "--clee-resolution-celda-h3-7/--no-clee-resolution-celda-h3-7",
+        help="Run CLEE resolution (la celda h3_cell_7 ES el criterio -> silver.clee_celda_h3_7)",
+    ),
     permanencia_radio: bool = typer.Option(
         True,
         "--permanencia-radio/--no-permanencia-radio",
@@ -328,8 +344,8 @@ def transform(
     to be passed for the full run.
 
     DENUE sub-steps (ordered): ingest -> clee-resolution-radio ->
-    clee-resolution-h3, each gated by its flag (--no-denue skips the whole
-    DENUE block). El ingest deriva la fecha y las celdas H3 en vuelo, asi
+    clee-resolution-h3 -> clee-resolution-celda-h3-7 -> permanencia, each gated
+    by its flag (--no-denue skips the whole DENUE block). El ingest deriva la fecha y las celdas H3 en vuelo, asi
     que no hay pasos sueltos para eso.
     SESNSP: CSV consolidado -> sesnsp_incidencia_municipal (--no-sesnsp skips).
     """
@@ -338,11 +354,19 @@ def transform(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
+        clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
         permanencia_radio = Section.permanencia_radio in selected
         permanencia_h3 = Section.permanencia_h3 in selected
         sesnsp = Section.sesnsp in selected
         denue = any(
-            (ingest, clee_resolution_radio, clee_resolution_h3, permanencia_radio, permanencia_h3)
+            (
+                ingest,
+                clee_resolution_radio,
+                clee_resolution_h3,
+                clee_resolution_celda_h3_7,
+                permanencia_radio,
+                permanencia_h3,
+            )
         )
 
     if force:
@@ -358,6 +382,7 @@ def transform(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
+                    clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,
                     permanencia_radio=permanencia_radio,
                     permanencia_h3=permanencia_h3,
                     force=force,
@@ -408,6 +433,11 @@ def pipeline(
         "--clee-resolution-h3/--no-clee-resolution-h3",
         help="Run CLEE resolution (H3 blocking), comparison track",
     ),
+    clee_resolution_celda_h3_7: bool = typer.Option(
+        True,
+        "--clee-resolution-celda-h3-7/--no-clee-resolution-celda-h3-7",
+        help="Run CLEE resolution (la celda h3_cell_7 ES el criterio -> silver.clee_celda_h3_7)",
+    ),
     permanencia_radio: bool = typer.Option(
         True,
         "--permanencia-radio/--no-permanencia-radio",
@@ -444,11 +474,19 @@ def pipeline(
         ingest = Section.ingest in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
+        clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
         permanencia_radio = Section.permanencia_radio in selected
         permanencia_h3 = Section.permanencia_h3 in selected
         sesnsp = Section.sesnsp in selected
         denue = any(
-            (ingest, clee_resolution_radio, clee_resolution_h3, permanencia_radio, permanencia_h3)
+            (
+                ingest,
+                clee_resolution_radio,
+                clee_resolution_h3,
+                clee_resolution_celda_h3_7,
+                permanencia_radio,
+                permanencia_h3,
+            )
         )
 
     console.print("[bold cyan]Starting Full Pipeline[/bold cyan]")
@@ -475,6 +513,7 @@ def pipeline(
                     ingest=ingest,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
+                    clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,
                     permanencia_radio=permanencia_radio,
                     permanencia_h3=permanencia_h3,
                     force=force,

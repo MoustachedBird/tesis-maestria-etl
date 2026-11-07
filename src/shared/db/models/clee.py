@@ -128,9 +128,42 @@ class CleeH3(ResolucionCleeMixin, Base):
     celda H3 en vez de un radio métrico. Existe para medir si el blocking
     compra tiempo sin perder calidad, así que convive con la otra y nunca la
     sustituye.
+
+    **Medido el 2026-11-07: da la MISMA partición que `clee_radio`** —
+    15,643,923 identidades en las dos, 0 de 82.9M observaciones en disputa.
+    Era lo esperado (mismo radio, misma cascada; solo cambia cómo se buscan
+    los candidatos) y es el resultado que valida el blocking: una
+    optimización que cambiara el resultado sería un bug. Consecuencia: como
+    *voto* en un ensemble no aporta nada. Ver
+    `alternativas_clee_propagation.md` §0.
     """
 
     __tablename__ = "clee_h3"
 
     def __repr__(self) -> str:
         return f"<CleeH3({self.id}, {self.period}, {self.origen})>"
+
+
+class CleeCeldaH37(ResolucionCleeMixin, Base):
+    """Resolución donde la celda H3 **es** el criterio, no el índice.
+
+    Es el primer método genuinamente distinto de `clee_radio`: dos
+    observaciones son candidatas si y solo si caen en la misma celda de
+    `CELL_MATCH_RES` (res 7 por default), y el radio de 500 m **no se
+    aplica**. La cascada de matching posterior es la misma.
+
+    Su valor en el conjunto no es la precisión sino el **perfil de error**:
+    depende de dónde cae la retícula de H3 y no de la distancia, así que se
+    equivoca en casos donde los métodos por radio aciertan y al revés. Eso
+    es lo que lo vuelve un voto con información propia.
+
+    El precio, medido en Guadalajara con res 7: la tolerancia efectiva varía
+    entre 0 y ~2.9 km según la posición en la retícula (mediana 972 m, p90
+    1.74 km), y pierde 6.5% de las parejas que están a ≤500 m porque caen a
+    los dos lados de una frontera. Ver `alternativas_clee_propagation.md` §5.
+    """
+
+    __tablename__ = "clee_celda_h3_7"
+
+    def __repr__(self) -> str:
+        return f"<CleeCeldaH37({self.id}, {self.period}, {self.origen})>"

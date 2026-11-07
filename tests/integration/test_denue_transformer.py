@@ -36,11 +36,33 @@ def temp_transformer(tmp_path, tracker):
 
 
 def test_transformer_initialization(temp_transformer):
-    """El orquestador arma sus etapas: ingest y las dos resoluciones."""
+    """El orquestador arma el ingest; los resolvers van bajo demanda.
+
+    Cada resolver abre su archivo de log al nacer, así que construirlos
+    todos en el `__init__` dejaba los logs de métodos que esa corrida no
+    iba a usar.
+    """
     assert temp_transformer.tracker is not None
     assert temp_transformer.transformer is not None
-    assert temp_transformer.clee_resolver is not None
-    assert temp_transformer.clee_resolver_h3 is not None
+    assert temp_transformer._resolvers == {}
+
+
+def test_el_resolver_se_crea_una_sola_vez_por_metodo(temp_transformer):
+    """Pedirlo dos veces devuelve el mismo objeto, no uno nuevo."""
+    primero = temp_transformer._resolver("radio")
+    assert temp_transformer._resolver("radio") is primero
+    assert temp_transformer._resolver("h3") is not primero
+    assert set(temp_transformer._resolvers) == {"radio", "h3"}
+
+
+def test_todo_metodo_del_registro_se_puede_construir(temp_transformer):
+    """Agregar una entrada a METHODS no puede dejar el orquestador roto."""
+    from src.etl.transformers.clee_resolver import CLEEResolver
+
+    for metodo in CLEEResolver.METHODS:
+        resolver = temp_transformer._resolver(metodo)
+        assert resolver.method == metodo
+        assert resolver.clee_table == CLEEResolver.METHODS[metodo]["table"]
 
 
 @pytest.mark.postgres

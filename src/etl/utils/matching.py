@@ -276,7 +276,6 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
     # es lo que agota la memoria del contenedor. Trocear acota el pico sin
     # cambiar el resultado: la agregacion es por `tgt_idx` y cada fila del
     # target cae completa en un solo lote.
-    rad = np.pi / 180.0
     disk_lazy = disk.lazy()
     kb_lazy = kb.lazy()
 
@@ -286,22 +285,7 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
             lote.lazy()
             .join(disk_lazy, on="tgt_cell", how="inner")
             .join(kb_lazy, left_on="nb_cell", right_on="kb_cell", how="inner")
-            .with_columns(
-                (
-                    2
-                    * _EARTH_RADIUS_M
-                    * (
-                        (
-                            ((pl.col("kb_lat") - pl.col("tgt_lat")) * rad / 2).sin() ** 2
-                            + (pl.col("tgt_lat") * rad).cos()
-                            * (pl.col("kb_lat") * rad).cos()
-                            * ((pl.col("kb_lon") - pl.col("tgt_lon")) * rad / 2).sin() ** 2
-                        )
-                        .sqrt()
-                        .arcsin()
-                    )
-                ).alias("dist_m")
-            )
+            .with_columns(_haversine_expr("tgt_lat", "tgt_lon", "kb_lat", "kb_lon").alias("dist_m"))
             .filter(pl.col("dist_m") <= radius_meters)
             .select("tgt_idx", "kb_idx", "dist_m")
             # kb_idx como llave terciaria: tie-break determinista en empates
@@ -325,6 +309,147 @@ def find_h3_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_mete
         del pairs
 
     return indices, distances
+
+
+def _haversine_expr(lat_a: str, lon_a: str, lat_b: str, lon_b: str) -> pl.Expr:
+    """Distancia haversine en metros entre dos pares de columnas, en Polars.
+
+    Existe para que los generadores de candidatos columnares no lleven cada
+    uno su copia de la formula: dos copias que deben coincidir y que nadie
+    verifica es como se cuela una discrepancia entre metodos.
+
+    Args:
+        lat_a, lon_a: nombres de las columnas del primer punto, en grados.
+        lat_b, lon_b: nombres de las columnas del segundo punto.
+
+    Returns:
+        pl.Expr: distancia en metros, sin alias.
+    """
+    rad = np.pi / 180.0
+    return (
+        2
+        * _EARTH_RADIUS_M
+        * (
+            (
+                ((pl.col(lat_b) - pl.col(lat_a)) * rad / 2).sin() ** 2
+                + (pl.col(lat_a) * rad).cos()
+                * (pl.col(lat_b) * rad).cos()
+                * ((pl.col(lon_b) - pl.col(lon_a)) * rad / 2).sin() ** 2
+            )
+            .sqrt()
+            .arcsin()
+        )
+    )
+
+
+def find_cell_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
+    """Genera candidatos por IGUALDAD de celda H3: la celda es el criterio.
+
+    Es el generador del metodo `celda_h3_7` (tabla `silver.clee_celda_h3_7`), y la
+    diferencia con `find_h3_neighbors` es de fondo y no de implementacion:
+
+        find_h3_neighbors   la celda ACELERA la busqueda; el criterio sigue
+                            siendo el circulo de SPATIAL_RADIUS_M, que se
+                            aplica como post-filtro exacto
+        find_cell_neighbors la celda ES el criterio; no hay post-filtro
+
+    **`radius_meters` se ignora a proposito.** Se acepta para respetar la
+    interfaz de los generadores (`_propagate_single_kb` la invoca igual para
+    todos), pero este metodo no tiene radio: su tolerancia la fija
+    `CELL_MATCH_RES` y varia entre 0 y ~2.9 km segun donde caiga el negocio
+    en la reticula (ver el docstring de esa constante).
+
+La celda la trae **precalculada** la columna `h3_cell_7`, derivada en el
+    ingest como padre de `h3_cell_9` y nunca del punto: ~6.5% de los puntos
+    cerca de fronteras caen en una celda gruesa que no es la ancestra de su
+    celda res 9, y lo que el metodo necesita es que la jerarquia sea
+    consistente. Aqui no se llama a h3: es un equi-join por entero.
+
+    La distancia SI se calcula, aunque no filtre: `_best_candidate` resuelve
+    los empates de score por cercania y para eso necesita los vecinos
+    ordenados. Sin el orden, un empate se resolveria por el orden del join.
+
+    Args:
+        ref_df: KB de referencia; requiere `h3_cell_7`, `latitud`, `longitud`.
+        target_df: filas a resolver; mismas columnas.
+        radius_meters: ignorado (ver arriba).
+
+    Returns:
+        (indices, distances) -- np.ndarray(object) de longitud
+        target_df.height, mismo formato que los otros generadores: por fila,
+        los indices posicionales de KB ordenados por cercania.
+    """
+    from src.etl.utils.clee_resolution_config import H3_TARGET_CHUNK_ROWS
+
+    n_target = target_df.height
+    indices = np.empty(n_target, dtype=object)
+    distances = np.empty(n_target, dtype=object)
+    for i in range(n_target):
+        indices[i] = np.array([], dtype=np.int64)
+        distances[i] = np.array([], dtype=np.float64)
+
+    if ref_df.height == 0 or n_target == 0:
+        return indices, distances
+
+    # `h3_cell_7` viene PRECALCULADA en los hechos (enrich.py, derivada como
+    # padre de h3_cell_9). No se deriva aqui: hacerlo costaria una llamada a
+    # h3 por celda distinta en cada periodo y en cada corrida, y la columna
+    # se paga una sola vez en el ingest.
+    kb = ref_df.select(
+        pl.int_range(pl.len(), dtype=pl.Int64).alias("kb_idx"),
+        pl.col("h3_cell_7").alias("celda"),
+        pl.col("latitud").alias("kb_lat"),
+        pl.col("longitud").alias("kb_lon"),
+    ).drop_nulls("celda")
+
+    tg = target_df.select(
+        pl.int_range(pl.len(), dtype=pl.Int64).alias("tgt_idx"),
+        pl.col("h3_cell_7").alias("celda"),
+        pl.col("latitud").alias("tgt_lat"),
+        pl.col("longitud").alias("tgt_lon"),
+    ).drop_nulls("celda")
+
+    if kb.height == 0 or tg.height == 0:
+        return indices, distances
+
+    # Equi-join por celda, troceado por lote de target. El troceo es por lo
+    # mismo que en find_h3_neighbors: los pares se materializan antes de
+    # agrupar y una celda res 7 densa puede traer miles de referencias.
+    kb_lazy = kb.lazy()
+    for offset in range(0, tg.height, H3_TARGET_CHUNK_ROWS):
+        pares = (
+            tg.slice(offset, H3_TARGET_CHUNK_ROWS)
+            .lazy()
+            .join(kb_lazy, on="celda", how="inner")
+            .with_columns(_haversine_expr("tgt_lat", "tgt_lon", "kb_lat", "kb_lon").alias("dist_m"))
+            .select("tgt_idx", "kb_idx", "dist_m")
+            # kb_idx como llave terciaria: empates exactos de distancia
+            # (coordenadas identicas) se rompen igual que en los otros
+            # generadores, para que el argmax sea determinista.
+            .sort(["tgt_idx", "dist_m", "kb_idx"])
+            .group_by("tgt_idx", maintain_order=True)
+            .agg(pl.col("kb_idx"), pl.col("dist_m"))
+            .collect(engine="streaming")
+        )
+
+        for tgt_idx, kb_idx_list, dist_list in zip(
+            pares.get_column("tgt_idx").to_list(),
+            pares.get_column("kb_idx").to_list(),
+            pares.get_column("dist_m").to_list(),
+        ):
+            indices[tgt_idx] = np.asarray(kb_idx_list, dtype=np.int64)
+            distances[tgt_idx] = np.asarray(dist_list, dtype=np.float64)
+
+        del pares
+
+    return indices, distances
+
+
+#: Este generador NO usa el radio: su criterio es la igualdad de celda. Lo
+#: lee `_propagate_single_kb` para no escribir "radio=500m" en el log de un
+#: metodo que lo ignora, que seria la peor forma de documentar la
+#: diferencia entre los metodos.
+find_cell_neighbors.usa_radio = False
 
 
 @cache

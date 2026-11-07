@@ -72,6 +72,38 @@ optimizacion se descarta, la columna se puede borrar sin perder nada).
 Constante estructural, NO .env.
 """
 
+CELL_MATCH_RES = 7
+"""Resolucion H3 cuya celda ES el criterio espacial del metodo `celda_h3_7`.
+
+A diferencia de `H3_BLOCKING_RES`, que solo acelera la busqueda y termina
+en el filtro haversine de `SPATIAL_RADIUS_M`, aqui la celda es la REGLA:
+dos observaciones son candidatas si y solo si caen en la misma celda de
+esta resolucion. `SPATIAL_RADIUS_M` no se aplica.
+
+**No es `.env` por la misma razon que `H3_PARTITION_RES`**: esta
+materializada en la columna `h3_cell_7` de los 82.9M hechos, derivada como
+padre de `h3_cell_9` en el ingest. Cambiarla exige migracion + re-backfill,
+asi que no puede quedar a merced de una variable de entorno -- un cambio
+silencioso dejaria la columna y el criterio desalineados sin un solo error.
+
+**No es un radio, y conviene no leerlo como tal.** Medido en Guadalajara:
+
+    res   area        arista    dist MAX dentro   pierde de las parejas <=500m
+     6    42.91 km2   4.06 km       8.15 km                  2.2%
+     7     6.13 km2   1.54 km       3.08 km                  6.5%
+     8     0.88 km2   0.58 km       1.16 km                 20.2%
+
+Con res 7 dos negocios en la misma celda estan a una mediana de 972 m, p90
+de 1.74 km y hasta 2.86 km; y dos negocios a 10 m separados por una
+frontera de hexagono NO son candidatos. Es decir: la tolerancia varia entre
+0 y ~2.9 km segun donde caiga el negocio en la reticula.
+
+Esa anisotropia es el precio del metodo y su razon de ser como voto
+distinto: su error depende de la geometria de la grilla y no de la
+distancia, asi que falla en casos donde los metodos por radio aciertan y
+viceversa. Ver `alternativas_clee_propagation.md` §5.
+"""
+
 H3_GRID_DISK_K = 3
 """Anillos de grid_disk alrededor de la celda del target (candidatos H3).
 
@@ -204,6 +236,7 @@ COLS_NEEDED_FOR_MATCHING = [
     "clee_resuelto",
     "origen",
     "h3_cell_9",
+    "h3_cell_7",
     "h3_cell_5",
     "nom_estab",
     "raz_social",

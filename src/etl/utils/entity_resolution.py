@@ -39,6 +39,7 @@ from src.etl.utils.matching import (
     PERFECT_NAME_SCORE,
     PERFECT_RAZON_SCORE,
     calculate_match_score,
+    find_cell_neighbors,
     find_h3_neighbors,
     find_spatial_neighbors,
     generate_temp_clee,
@@ -166,6 +167,7 @@ KB_COLUMNS = [
     "latitud",
     "longitud",
     "h3_cell_9",
+    "h3_cell_7",
     "nom_estab",
     "raz_social",
     "nombre_act",
@@ -181,8 +183,9 @@ estas columnas. `clee_id` es la identidad a propagar, NEUTRAL respecto al
 metodo: `build_single_period_kb(df_ref, master_column)` copia ahi el valor
 de la columna de identidad (`clee_resuelto`). `latitud`/`longitud`
 alimentan el post-filtro exacto y
-`h3_cell_9` el blocking H3 (ignorada por el generador BallTree). Las de
-texto ausentes en el periodo se crean como "".
+`h3_cell_9` el blocking H3 y `h3_cell_7` el criterio del metodo `celda_h3_7`
+(cada generador ignora las que no usa). Las de texto ausentes en el periodo
+se crean como "".
 """
 
 PROGRESS_LOG_INTERVAL = 100_000
@@ -670,10 +673,17 @@ def _propagate_single_kb(
     if df_pending.height == 0 or kb_partition.height == 0:
         return df_pending
 
-    # 1. Pre-filtro espacial (BallTree o blocking H3, segun neighbor_finder)
+    # 1. Generacion de candidatos (BallTree, blocking H3 o igualdad de
+    # celda, segun neighbor_finder). El criterio se nombra en el log: un
+    # metodo que ignora el radio no debe reportar "radio=500m".
+    criterio = (
+        f"radio={spatial_tol}m"
+        if getattr(neighbor_finder, "usa_radio", True)
+        else "sin radio: la celda es el criterio"
+    )
     logger.info(
         f"{prefix}Candidatos ({neighbor_finder.__name__}): {kb_partition.height:,} refs, "
-        f"{df_pending.height:,} target, radio={spatial_tol}m..."
+        f"{df_pending.height:,} target, {criterio}..."
     )
     t0 = time.perf_counter()
     indices, _ = neighbor_finder(kb_partition, df_pending, spatial_tol)
@@ -866,6 +876,35 @@ def propagate_clees_h3(
     conserva la misma semantica de radio (SPATIAL_RADIUS_M).
     """
     return _propagate_clees(df_target, ref_kb, spatial_tol, RESOLVED_COLUMN, find_h3_neighbors)
+
+
+def propagate_clees_celda_h3_7(
+    df_target: pl.DataFrame,
+    ref_kb: pl.DataFrame,
+    spatial_tol: int,
+) -> pl.DataFrame:
+    """
+    Propagacion por IGUALDAD DE CELDA H3: la celda es el criterio espacial.
+
+    Su resultado va a `silver.clee_celda_h3_7`. A diferencia de `radio` y `h3`
+    --que terminan los dos en el circulo de SPATIAL_RADIUS_M y por eso dan
+    la misma particion-- aqui el criterio es caer en la misma celda de
+    `CELL_MATCH_RES`, y `spatial_tol` **no se aplica**.
+
+    Es el unico de los tres cuyo error depende de la geometria de la grilla
+    y no de la distancia, que es lo que lo vuelve un voto distinto en el
+    ensemble. La cascada de matching (gate de actividad + nombre + senales)
+    es la misma: lo que cambia es quien llega a ser candidato.
+
+    Args:
+        df_target: periodo a resolver (incluye RESOLVED_COLUMN).
+        ref_kb: KB de un periodo de referencia.
+        spatial_tol: ignorado; se acepta por la interfaz comun.
+
+    Returns:
+        df_target con RESOLVED_COLUMN poblado donde hubo match.
+    """
+    return _propagate_clees(df_target, ref_kb, spatial_tol, RESOLVED_COLUMN, find_cell_neighbors)
 
 
 def assign_new_clees(

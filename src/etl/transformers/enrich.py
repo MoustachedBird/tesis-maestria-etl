@@ -16,7 +16,11 @@ from __future__ import annotations
 import h3
 import polars as pl
 
-from src.etl.utils.clee_resolution_config import H3_BLOCKING_RES, H3_PARTITION_RES
+from src.etl.utils.clee_resolution_config import (
+    CELL_MATCH_RES,
+    H3_BLOCKING_RES,
+    H3_PARTITION_RES,
+)
 
 #: Meses en espanol como los escribe INEGI, a su numero.
 SPANISH_MONTHS: dict[str, str] = {
@@ -112,30 +116,39 @@ def normalize_fecha_alta(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
-    """Deriva `h3_cell_9` y `h3_cell_5` desde las coordenadas.
+    """Deriva `h3_cell_9`, `h3_cell_7` y `h3_cell_5` desde las coordenadas.
 
-    `h3_cell_9` es la clave de blocking de la resolucion CLEE (arista ~174m)
-    y `h3_cell_5` la de particionado espacial (~8.5km).
+    Las tres se precalculan aqui, con los datos en memoria y antes del
+    `COPY`, porque cada una tiene un consumidor que las lee sobre los 82.9M:
 
-    **`h3_cell_5` se deriva como PADRE de `h3_cell_9`, no del punto.**
-    Calcular ambas desde las coordenadas daria casi siempre lo mismo, pero
-    no siempre: en los bordes, el padre de la celda res 9 y la celda res 5
-    del mismo punto pueden diferir. Lo que la resolucion necesita es que la
-    jerarquia sea consistente --que toda res 9 este dentro de su res 5--, no
+        h3_cell_9   blocking de la resolucion CLEE (arista ~174m)
+        h3_cell_7   criterio espacial del metodo `celda` (~1.5km)
+        h3_cell_5   particionado espacial (~8.5km), sin consumidor aun
+
+    Derivarlas al vuelo en cada corrida costaria una llamada a h3 por celda
+    distinta en cada periodo y en cada metodo; materializarlas cuesta 8
+    bytes por fila y se pagan una vez.
+
+    **Las dos gruesas se derivan como PADRE de `h3_cell_9`, no del punto.**
+    Calcularlas desde las coordenadas daria casi siempre lo mismo, pero no
+    siempre: en los bordes, el padre de la celda res 9 y la celda gruesa del
+    mismo punto pueden diferir. Lo que la resolucion necesita es que la
+    jerarquia sea consistente --que toda res 9 este dentro de su padre--, no
     que cada una sea la mas cercana al punto.
 
     Las filas sin coordenadas, o con coordenadas fuera de rango, quedan en
-    NULL en ambas columnas: no son un error de datos sino un
+    NULL en las tres columnas: no son un error de datos sino un
     establecimiento que INEGI publico sin geolocalizar.
 
     Args:
         df: DataFrame con `latitud` y `longitud`.
 
     Returns:
-        pl.DataFrame: el mismo, con `h3_cell_9` y `h3_cell_5` agregadas.
+        pl.DataFrame: el mismo, con las tres columnas de celda agregadas.
     """
     vacio = {
         "h3_cell_9": pl.lit(None, dtype=pl.Int64),
+        "h3_cell_7": pl.lit(None, dtype=pl.Int64),
         "h3_cell_5": pl.lit(None, dtype=pl.Int64),
     }
     if not {"latitud", "longitud"} <= set(df.columns):
@@ -149,20 +162,22 @@ def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     def celdas(fila: dict) -> dict[str, int | None]:
-        """Par (res 9, res 5) de un punto, o (None, None) si no aplica.
+        """Las tres celdas de un punto, o None en las tres si no aplica.
 
         Args:
             fila: con `latitud` y `longitud`.
 
         Returns:
-            dict: `h3_cell_9` y `h3_cell_5` como entero de 64 bits.
+            dict: `h3_cell_9`, `h3_cell_7` y `h3_cell_5` como entero de 64
+            bits.
         """
         lat, lon = fila["latitud"], fila["longitud"]
         if lat is None or lon is None:
-            return {"h3_cell_9": None, "h3_cell_5": None}
+            return {"h3_cell_9": None, "h3_cell_7": None, "h3_cell_5": None}
         cell9 = h3.latlng_to_cell(lat, lon, H3_BLOCKING_RES)
         return {
             "h3_cell_9": h3.str_to_int(cell9),
+            "h3_cell_7": h3.str_to_int(h3.cell_to_parent(cell9, CELL_MATCH_RES)),
             "h3_cell_5": h3.str_to_int(h3.cell_to_parent(cell9, H3_PARTITION_RES)),
         }
 
@@ -174,7 +189,13 @@ def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
             .then(
                 pl.struct("latitud", "longitud").map_elements(
                     celdas,
-                    return_dtype=pl.Struct({"h3_cell_9": pl.Int64, "h3_cell_5": pl.Int64}),
+                    return_dtype=pl.Struct(
+                        {
+                            "h3_cell_9": pl.Int64,
+                            "h3_cell_7": pl.Int64,
+                            "h3_cell_5": pl.Int64,
+                        }
+                    ),
                 )
             )
             .otherwise(None)
@@ -182,6 +203,7 @@ def add_h3_cells(df: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             h3_cell_9=pl.col("_h3").struct.field("h3_cell_9"),
+            h3_cell_7=pl.col("_h3").struct.field("h3_cell_7"),
             h3_cell_5=pl.col("_h3").struct.field("h3_cell_5"),
         )
         .drop("_h3")
