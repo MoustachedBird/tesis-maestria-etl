@@ -5,6 +5,12 @@ capa de consumo nunca se diseñó (ver `arquitectura.md` §1.1). Este módulo
 está vacío a propósito, para que el schema exista en las migraciones y la
 estructura de `models/` no cambie cuando se llene.
 
+Las reglas de normalización —qué valor canónico toma cada campo a partir de
+las ~20 observaciones del negocio, y dónde interviene un LLM— están en
+`normalizacion_gold.md`. Es ahí, y no en Silver, donde SÍ se materializa un
+valor por campo: Gold es la capa citable y tiene que ser estable aunque la
+identidad se re-resuelva después (ver `normalizacion_gold.md` §0.1).
+
 Lo que vendrá aquí, con el contrato ya escrito en
 `docs/cruce_denue_sesnsp.md`:
 

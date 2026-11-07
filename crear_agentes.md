@@ -317,6 +317,15 @@ El 1 es un **clasificador**. El 2 es un **agente de verdad**: no sabe qué va
 a encontrar y tiene que decidir qué buscar después. El 3 es un **cliente**
 de herramientas que nosotros exponemos.
 
+**Hay un cuarto propuesto después:** el *reconciliador* de
+`normalizacion_gold.md`, que adjudica los clusters donde radio y H3 no
+coinciden y produce los valores canónicos de `gold.establecimientos`. Tiene
+la misma forma que el 1 (un paso, sin tools, determinismo requerido) y
+reusa esta arquitectura completa, pero opera aguas abajo —sobre clusters ya
+formados, no sobre candidatos— y no escribe en Silver. Su construcción está
+condicionada a medir primero cuánto desacuerdo existe de verdad; ver
+`normalizacion_gold.md` §1.
+
 Mi recomendación anterior de "nada de frameworks" era correcta para el 1 y
 **no** se extiende al 2.
 
