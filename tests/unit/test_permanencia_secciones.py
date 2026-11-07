@@ -5,8 +5,6 @@ Aparte de `test_permanencia.py` porque ese archivo está marcado
 tabla de secciones del CLI.
 """
 
-from contextlib import contextmanager
-
 import pytest
 
 
@@ -45,25 +43,17 @@ def test_solo_construye_los_metodos_pedidos(monkeypatch):
     """La seleccion tiene que llegar hasta el loader, no solo al enum.
 
     Es la diferencia entre `--no-permanencia-h3` y reconstruir las dos
-    tablas: la segunda cuesta un GROUP BY sobre 82.9M filas.
+    tablas: la segunda cuesta recorrer los 82.9M hechos otra vez.
     """
     import src.etl.main as main
     from src.etl.loaders import permanencia as loader
 
     construidos: list[str] = []
-
-    class _EngineFalso:
-        """Entrega una conexion inerte: aqui se prueba el despacho, no el SQL."""
-
-        @contextmanager
-        def begin(self):
-            yield None
-
-    monkeypatch.setattr("src.shared.db.session.get_engine", _EngineFalso)
+    monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
     monkeypatch.setattr(
         loader,
         "construir_permanencia",
-        lambda conn, metodo: (construidos.append(metodo), 1)[1],
+        lambda engine, metodo, force=False: (construidos.append(metodo), 1)[1],
     )
 
     main._run_permanencia(metodos=["h3"])
@@ -71,74 +61,146 @@ def test_solo_construye_los_metodos_pedidos(monkeypatch):
 
 
 @pytest.mark.unit
-def test_cada_metodo_va_en_su_propia_transaccion(monkeypatch):
-    """Si h3 falla, lo que radio escribio no se revierte."""
+def test_el_loader_recibe_el_engine_no_una_conexion(monkeypatch):
+    """Cada metodo controla sus propias transacciones, una por vuelta.
+
+    Antes el CLI abria UNA transaccion por metodo y se la pasaba al loader,
+    asi que todo el trabajo era un solo commit: un fallo a la mitad lo
+    revertia entero. Ahora el loader recibe el engine y commitea cada corte
+    y cada bloque, que es lo que hace la corrida reanudable -- y por eso el
+    CLI ya no puede ser quien abra la transaccion.
+    """
     import src.etl.main as main
     from src.etl.loaders import permanencia as loader
 
-    transacciones = []
-
-    class _EngineFalso:
-        @contextmanager
-        def begin(self):
-            transacciones.append(1)
-            yield None
-
-    monkeypatch.setattr("src.shared.db.session.get_engine", _EngineFalso)
-    monkeypatch.setattr(loader, "construir_permanencia", lambda conn, metodo: 1)
+    recibidos = []
+    monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
+    monkeypatch.setattr(
+        loader,
+        "construir_permanencia",
+        lambda engine, metodo, force=False: (recibidos.append((engine, metodo)), 1)[1],
+    )
 
     main._run_permanencia(metodos=["radio", "h3"])
-    assert len(transacciones) == 2
+    assert recibidos == [("engine", "radio"), ("engine", "h3")]
 
 
 @pytest.mark.unit
-class TestPasosDelLlenado:
-    """El llenado es una secuencia de pasos con nombre, no una sentencia opaca.
+def test_force_llega_hasta_el_loader(monkeypatch):
+    """Sin esto, `--force` no distinguiria rehacer de reanudar."""
+    import src.etl.main as main
+    from src.etl.loaders import permanencia as loader
 
-    Lo que se fija aquí es el contrato del log: un `INSERT ... SELECT` de
-    horas que muere solo deja escrito que empezó, así que los pasos --y que
-    sean varios-- son la única forma de saber dónde se quedó.
+    vistos = []
+    monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
+    monkeypatch.setattr(
+        loader,
+        "construir_permanencia",
+        lambda engine, metodo, force=False: (vistos.append(force), 1)[1],
+    )
+
+    main._run_permanencia(metodos=["radio"], force=True)
+    assert vistos == [True]
+
+
+@pytest.mark.unit
+class TestTroceo:
+    """El llenado va por partes para que un fallo no cueste todo el trabajo.
+
+    Dos llaves de troceo distintas, una por fase, y la razon de que sean
+    distintas es el grano: `obs` esta a nivel de observacion --cada fila
+    pertenece a un solo corte, asi que partir por corte no parte nada-- y
+    los agregados estan a nivel de identidad, que CRUZA los cortes.
     """
 
-    def _pasos(self):
+    def test_obs_es_unlogged_y_no_temporal(self):
+        """Una temporal muere en el primer COMMIT; el troceo necesita commitear.
+
+        Es la razon de ser de `UNLOGGED`: da lo que importaba de la
+        temporal --no escribe WAL-- sin morir al commitear cada corte.
+        """
+        from src.etl.loaders.permanencia import _sql_crear_obs
+
+        ddl = _sql_crear_obs("radio")
+        assert "UNLOGGED" in ddl
+        assert "CREATE TEMP" not in ddl
+
+    def test_la_primera_fase_se_trocea_por_corte(self):
+        """Y poda las particiones de los DOS lados del join.
+
+        Sin el `i.period` el resultado seria el mismo pero se recorreria la
+        tabla de identidad entera en cada una de las 20 vueltas.
+        """
         from datetime import date
 
-        from src.etl.loaders.permanencia import _pasos
+        from src.etl.loaders.permanencia import _sql_llenar_obs
 
-        return _pasos("radio", [date(2015, 1, 1), date(2026, 5, 1)])
+        sql = _sql_llenar_obs("radio", date(2019, 11, 1), 8, 32)
+        assert "e.period = DATE '2019-11-01'" in sql
+        assert "i.period = DATE '2019-11-01'" in sql
 
-    def test_son_varios_y_cada_uno_se_describe(self):
-        pasos = self._pasos()
-        assert len(pasos) > 1
-        for paso in pasos:
-            assert paso.nombre and paso.descripcion and paso.sql
+    def test_la_segunda_fase_se_trocea_por_identidad(self):
+        """Ningun paso del bloque lee la tabla completa.
 
-    def test_el_ultimo_escribe_la_tabla_destino(self):
-        """El rowcount del último es lo que `construir_permanencia` devuelve."""
-        from src.etl.loaders.permanencia import tabla_destino
+        Si a uno se le olvidara el filtro, agregaria las 82.9M filas y el
+        troceo no serviria de nada -- y los conteos saldrian del universo
+        entero, no del bloque.
+        """
+        from src.etl.loaders.permanencia import _pasos_bloque
 
-        ultimo = self._pasos()[-1]
+        pasos = _pasos_bloque("radio", 7, 19)
+        for paso in pasos[:-1]:
+            assert "WHERE bloque = 7" in paso.sql, paso.nombre
+
+    def test_el_bloque_es_funcion_de_la_identidad(self):
+        """Por eso ningun establecimiento se parte entre bloques.
+
+        Trocear por año o por `cve_ent` no cumple esto: la identidad cruza
+        los cortes, y los negocios se mudan de municipio.
+        """
+        from src.etl.loaders.permanencia import _expr_bloque
+
+        expr = _expr_bloque("clee_resuelto", 32)
+        assert "clee_resuelto" in expr
+        assert "md5" in expr  # estable entre versiones, a diferencia de hashtext
+        assert "% 32" in expr
+
+    def test_las_temporales_mueren_con_la_transaccion_del_bloque(self):
+        """`ON COMMIT DROP`: un bloque que falla no deja basura."""
+        from src.etl.loaders.permanencia import _pasos_bloque
+
+        for paso in _pasos_bloque("radio", 0, 19)[:-1]:
+            assert "ON COMMIT DROP" in paso.sql, paso.nombre
+
+    def test_el_ultimo_paso_escribe_la_tabla_destino(self):
+        from src.etl.loaders.permanencia import _pasos_bloque, tabla_destino
+
+        ultimo = _pasos_bloque("radio", 0, 19)[-1]
         assert ultimo.nombre == tabla_destino("radio")
         assert ultimo.sql.lstrip().startswith("INSERT INTO")
-
-    def test_las_temporales_mueren_con_la_transaccion(self):
-        """`ON COMMIT DROP`: un fallo a la mitad no deja basura en la base."""
-        for paso in self._pasos()[:-1]:
-            assert "ON COMMIT DROP" in paso.sql, paso.nombre
 
     def test_el_insert_cuadra_columnas_con_valores(self):
         """53 columnas y 53 expresiones: un desfase lo rechaza PostgreSQL.
 
-        Barato de verificar aquí y caro de descubrir cuatro pasos y varias
-        horas más tarde, que es cuando el `INSERT` corre.
+        Barato de verificar aqui y caro de descubrir veinte cortes y varias
+        horas mas tarde, que es cuando corre el primer `INSERT`.
         """
-        sql = self._pasos()[-1].sql
+        from src.etl.loaders.permanencia import _pasos_bloque
+
+        sql = _pasos_bloque("radio", 0, 19)[-1].sql
         columnas = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
         assert len([c for c in columnas.replace("\n", "").split(",") if c.strip()]) == 53
 
     def test_el_origen_sale_del_enum_no_de_una_cadena_suelta(self):
+        from src.etl.loaders.permanencia import _pasos_bloque
         from src.shared.enums import OrigenClee
 
-        ventana = next(p for p in self._pasos() if p.nombre == "ventana")
+        ventana = next(p for p in _pasos_bloque("radio", 0, 19) if p.nombre == "ventana")
         assert f"'{OrigenClee.DIRECTO.value}'" in ventana.sql
         assert f"'{OrigenClee.PROPAGADO.value}'" in ventana.sql
+
+    def test_cada_metodo_tiene_su_tabla_de_trabajo(self):
+        """Construir radio no debe pisar la tabla de trabajo de h3."""
+        from src.etl.loaders.permanencia import tabla_obs
+
+        assert tabla_obs("radio") != tabla_obs("h3")

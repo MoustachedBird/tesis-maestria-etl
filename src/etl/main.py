@@ -103,26 +103,29 @@ def _run_denue_transform(
     # Va al final porque colapsa lo que las resoluciones acaban de escribir.
     metodos = [m for m, activo in (("radio", permanencia_radio), ("h3", permanencia_h3)) if activo]
     if metodos and success:
-        success = _run_permanencia(metodos=metodos)
+        success = _run_permanencia(metodos=metodos, force=force)
     return success
 
 
-def _run_permanencia(*, metodos: list[str]) -> bool:
-    """Reconstruye `silver.permanencia_<metodo>` para los metodos pedidos.
+def _run_permanencia(*, metodos: list[str], force: bool = False) -> bool:
+    """Construye `silver.permanencia_<metodo>` para los metodos pedidos.
 
-    No recibe `force`: la tabla se reconstruye entera siempre, porque las
-    identidades sinteticas `NEW_*` no son estables entre corridas y no hay
-    nada que preservar de una construccion previa.
+    **Por default reanuda.** El trabajo va troceado en cortes y bloques, y
+    cada vuelta commitea, asi que una corrida que murio a la mitad se
+    retoma donde quedo. `--force` descarta el avance y rehace desde cero,
+    que es lo que hay que usar si la resolucion CLEE se re-corrio -- aunque
+    eso el loader lo detecta solo y se niega a reanudar.
 
-    Cada metodo va en su propia transaccion: una falla en h3 no debe tirar
-    lo que radio ya construyo, que es la misma razon por la que son tablas
-    separadas.
+    Cada metodo controla sus propias transacciones: una falla en h3 no debe
+    tirar lo que radio ya construyo, que es la misma razon por la que son
+    tablas separadas.
 
     Args:
         metodos: claves de `METODOS` a construir.
+        force: descartar el avance previo y reconstruir entero.
 
     Returns:
-        bool: True si se escribio al menos una fila.
+        bool: True si la tabla quedo con al menos una fila.
     """
     from src.etl.loaders.permanencia import construir_permanencia
     from src.shared.db.session import get_engine
@@ -131,8 +134,7 @@ def _run_permanencia(*, metodos: list[str]) -> bool:
     total = 0
     engine = get_engine()
     for metodo in metodos:
-        with engine.begin() as conn:
-            total += construir_permanencia(conn, metodo)
+        total += construir_permanencia(engine, metodo, force=force)
     console.print(f"   {total:,} fila(s) de permanencia en {len(metodos)} metodo(s)")
     return total > 0
 

@@ -32,12 +32,12 @@ import threading
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
 from sqlalchemy import text
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 
 from src.shared.config import get_settings
 from src.shared.db.base import DEFAULT_SCHEMA
@@ -243,62 +243,145 @@ def _cortes_ordenados(conn: Connection, schema: str = DEFAULT_SCHEMA) -> list[da
     return sorted(cortes)
 
 
-def _pasos(metodo: str, cortes: list[date], schema: str = DEFAULT_SCHEMA) -> list[_Paso]:
-    """Los pasos que llenan la tabla de permanencia de un método, en orden.
+def tabla_obs(metodo: str) -> str:
+    """Nombre de la tabla de trabajo de un método, sin calificar."""
+    return f"permanencia_obs_{metodo}"
 
-    El trabajo se parte en tablas temporales con nombre en vez de ir como un
-    solo `INSERT ... SELECT` con CTEs. La razón es de operación, no de SQL:
-    una sentencia de horas es opaca --si muere, el log dice que empezó y
-    nada más-- mientras que cinco pasos dicen cuál falló, cuántas filas
-    produjo cada uno y cuánto tardó.
 
-    No es un costo que se paga por el diagnóstico: `obs` se materializaba de
-    todos modos, porque PostgreSQL materializa un CTE referenciado más de
-    una vez y este lo usan tres. Lo que cambia es que ahora se puede
-    `ANALYZE`: una tabla temporal nace sin estadísticas y el autovacuum no
-    las toca, así que sin esto el planificador arma los joins finales a
-    ciegas.
+def _expr_bloque(columna: str, bloques: int) -> str:
+    """Expresión SQL que asigna una identidad a un bloque.
 
-    Las temporales son `ON COMMIT DROP`: viven dentro de la transacción del
-    llamador y se van con ella, así que un fallo no deja basura.
+    Es el primer byte del `md5` de la identidad, módulo el número de
+    bloques. Dos propiedades la hacen la llave correcta para trocear:
 
-    Los cortes entran como `VALUES` y no se consultan dentro del SQL: ya se
-    leyeron del catálogo, y su posición en la secuencia es lo que convierte
-    una fecha en el índice que usa el análisis.
+    - **Es función de la identidad**, así que todas las observaciones de un
+      establecimiento caen en el mismo bloque y ningún agregado se parte.
+      Trocear por año o por `cve_ent` no cumple esto: la identidad cruza los
+      cortes, y los negocios se mudan de municipio --que es justo una de las
+      señales que la tabla mide.
+    - **Es estable entre versiones de PostgreSQL.** `hashtext()` sería más
+      directo pero es una función interna sin garantía de estabilidad; si
+      cambiara en un upgrade mayor, una reanudación reasignaría los bloques
+      y recalcularía trabajo ya hecho. `md5`, `decode` y `get_byte` están
+      documentadas y son inmutables.
+
+    Con `bloques` divisor de 256 el reparto es exactamente uniforme; con
+    cualquier otro valor queda un sesgo de a lo más un bloque.
+
+    Args:
+        columna: expresión que da la identidad (`clee_resuelto` o `i.clee_resuelto`).
+        bloques: cuántos bloques repartir.
+
+    Returns:
+        str: expresión entera en `[0, bloques)`.
+    """
+    return f"(get_byte(decode(md5({columna}), 'hex'), 0) % {bloques})"
+
+
+def _sql_crear_obs(metodo: str, schema: str = DEFAULT_SCHEMA) -> str:
+    """DDL de la tabla de trabajo: los hechos unidos a la identidad.
+
+    Es `UNLOGGED` y no `TEMP` por una razón concreta: una temporal muere en
+    el primer `COMMIT`, y el troceo necesita commitear cada corte para que
+    un fallo no se lleve lo ya hecho. `UNLOGGED` da lo que importaba de la
+    temporal --no escribe WAL, así que cuesta casi lo mismo-- sin esa
+    restricción. El precio es que hay que borrarla a mano al terminar; lo
+    hace `construir_permanencia`.
+
+    Vive en `silver` con nombre explícito, como las tablas de staging del
+    ingest: es transitoria, no parte del esquema.
 
     Args:
         metodo: clave de `METODOS`.
-        cortes: cortes ordenados, del más antiguo al más nuevo.
+        schema: schema donde crearla.
+
+    Returns:
+        str: `CREATE UNLOGGED TABLE` completo.
+    """
+    return f"""
+CREATE UNLOGGED TABLE IF NOT EXISTS {schema}.{tabla_obs(metodo)} (
+    clee_resuelto   text    NOT NULL,
+    bloque          smallint NOT NULL,
+    idx             integer NOT NULL,
+    period          date    NOT NULL,
+    id              text    NOT NULL,
+    nom_estab       text,
+    raz_social      text,
+    codigo_act      text,
+    cve_ent         text,
+    cve_mun         text,
+    cod_postal      text,
+    latitud         double precision,
+    longitud        double precision,
+    h3_cell_9       bigint,
+    fecha_alta_date date,
+    telefono        text,
+    correoelec      text,
+    www             text,
+    tipo_asent      text,
+    cve_loc         text,
+    ageb            text,
+    h3_cell_5       bigint,
+    nom_cencom      text,
+    origen          text,
+    per_ocu         text,
+    categoria_tamano text,
+    empleados_min   integer,
+    empleados_max   integer,
+    tipounieco      text,
+    direccion       text
+)
+"""
+
+
+def _sql_llenar_obs(
+    metodo: str, corte: date, idx: int, bloques: int, schema: str = DEFAULT_SCHEMA
+) -> str:
+    """Carga en la tabla de trabajo las observaciones de UN corte.
+
+    Es la unidad de troceo de la primera fase, y es la correcta porque aquí
+    el grano es la observación: cada fila pertenece a un solo corte, así que
+    partir por corte no parte nada. Además lee exactamente una partición de
+    los hechos y una de la identidad --el `WHERE period` las poda-- en vez
+    de recorrer los 82.9M.
+
+    El índice del corte entra como literal: ya se calculó desde el catálogo,
+    y es lo que convierte una fecha en la posición que usa el análisis.
+
+    Args:
+        metodo: clave de `METODOS`.
+        corte: el corte a cargar.
+        idx: su posición en la secuencia ordenada de cortes.
+        bloques: cuántos bloques repartir.
         schema: schema de origen y destino.
 
     Returns:
-        list[_Paso]: pasos a ejecutar en orden; el último es el `INSERT`.
+        str: `INSERT ... SELECT` de un corte.
     """
     identidad = METODOS[metodo]
-    destino = tabla_destino(metodo)
-    ultimo_idx = len(cortes) - 1
-
-    valores = ", ".join(f"(DATE '{c.isoformat()}', {i})" for i, c in enumerate(cortes))
-    directo = OrigenClee.DIRECTO.value
-    propagado = OrigenClee.PROPAGADO.value
-
-    return [
-        _Paso(
-            "obs",
-            f"uniendo los hechos con {identidad} y resolviendo catalogos",
-            f"""
-CREATE TEMP TABLE obs ON COMMIT DROP AS
-WITH cortes(period, idx) AS (VALUES {valores})
+    literal = f"DATE '{corte.isoformat()}'"
+    return f"""
+INSERT INTO {schema}.{tabla_obs(metodo)} (
+    clee_resuelto, bloque, idx, period, id,
+    nom_estab, raz_social, codigo_act, cve_ent, cve_mun, cod_postal,
+    latitud, longitud, h3_cell_9, fecha_alta_date,
+    telefono, correoelec, www, tipo_asent,
+    cve_loc, ageb, h3_cell_5, nom_cencom, origen,
+    per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
+    direccion
+)
 SELECT
-    i.clee_resuelto, c.idx, e.period, e.id,
+    i.clee_resuelto,
+    {_expr_bloque("i.clee_resuelto", bloques)},
+    {idx},
+    e.period, e.id,
     e.nom_estab, e.raz_social, e.codigo_act,
     e.cve_ent, e.cve_mun, e.cod_postal,
     e.latitud, e.longitud, e.h3_cell_9, e.fecha_alta_date,
     e.telefono, e.correoelec, e.www, ta.tipo_asent,
     e.cve_loc, e.ageb, e.h3_cell_5, e.nom_cencom,
     i.origen,
-    ep.per_ocu, ep.categoria AS categoria_tamano,
-    ep.empleados_min, ep.empleados_max,
+    ep.per_ocu, ep.categoria, ep.empleados_min, ep.empleados_max,
     tu.tipounieco,
     -- El domicilio como UNA cadena: arrays paralelos por componente
     -- perderian que numero va con que calle.
@@ -308,16 +391,49 @@ SELECT
     ), '') AS direccion
 FROM {schema}.establecimientos e
 JOIN {schema}.{identidad} i ON i.id = e.id AND i.period = e.period
-JOIN cortes c ON c.period = e.period
 LEFT JOIN {schema}.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id
 LEFT JOIN {schema}.denue_estratos_personal ep ON ep.id = e.per_ocu_id
 LEFT JOIN {schema}.denue_tipos_unidad_economica tu ON tu.id = e.tipounieco_id
-WHERE i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
-""",
-        ),
+WHERE e.period = {literal}
+  AND i.period = {literal}
+  AND i.clee_resuelto IS NOT NULL AND i.clee_resuelto <> ''
+"""
+
+
+def _pasos_bloque(
+    metodo: str, bloque: int, ultimo_idx: int, schema: str = DEFAULT_SCHEMA
+) -> list[_Paso]:
+    """Los pasos que escriben la permanencia de UN bloque de identidades.
+
+    Las tres temporales sí son `TEMP ... ON COMMIT DROP`: viven dentro de la
+    transacción del bloque y se van con ella, commitee o falle.
+
+    El troceo por identidad no cambia un solo resultado --los agregados de
+    un establecimiento dependen solo de sus propias filas, y todas están en
+    el mismo bloque-- y suele ser más RÁPIDO que hacerlo de golpe: el
+    `GROUP BY` completo ordena 10M de grupos con una decena de
+    `COUNT(DISTINCT)` cada uno y se derrama a disco, mientras que los
+    ~300k grupos de un bloque caben en `work_mem`. Evitar el derrame vale
+    más que el costo de dar varias vueltas.
+
+    Args:
+        metodo: clave de `METODOS`.
+        bloque: qué bloque procesar.
+        ultimo_idx: posición del último corte publicado, para la censura.
+        schema: schema de origen y destino.
+
+    Returns:
+        list[_Paso]: pasos del bloque, en orden; el último es el `INSERT`.
+    """
+    obs = f"{schema}.{tabla_obs(metodo)}"
+    destino = tabla_destino(metodo)
+    directo = OrigenClee.DIRECTO.value
+    propagado = OrigenClee.PROPAGADO.value
+
+    return [
         _Paso(
             "ventana",
-            "colapsando a una fila por identidad (el agregado mas caro)",
+            "colapsando a una fila por identidad",
             f"""
 CREATE TEMP TABLE ventana ON COMMIT DROP AS
 SELECT
@@ -361,33 +477,32 @@ SELECT
     MIN(longitud) AS lon_min, MAX(longitud) AS lon_max,
     COUNT(DISTINCT (latitud, longitud)) FILTER (
         WHERE latitud IS NOT NULL AND longitud IS NOT NULL) AS n_posiciones
-FROM obs
+FROM {obs}
+WHERE bloque = {bloque}
 GROUP BY clee_resuelto
 """,
         ),
         _Paso(
             "primera",
             "tomando la posicion con que empezo cada identidad",
-            """
+            f"""
 -- La posicion con que empezo. Es el otro extremo REAL del recorrido: el
 -- desplazamiento neto se mide entre esta y la del representante, no entre
 -- las esquinas del rectangulo, que pueden ser puntos donde el
 -- establecimiento nunca estuvo.
---
--- DISTINCT ON y no ROW_NUMBER: con tabla temporal, filtrar rn = 1 despues
--- obligaria a materializar las 82.9M filas numeradas para quedarse con 10M.
 CREATE TEMP TABLE primera ON COMMIT DROP AS
 SELECT DISTINCT ON (clee_resuelto)
        clee_resuelto, latitud AS lat_primera, longitud AS lon_primera,
        empleados_min AS empleados_min_primera
-FROM obs
+FROM {obs}
+WHERE bloque = {bloque}
 ORDER BY clee_resuelto, period ASC, id
 """,
         ),
         _Paso(
             "representante",
             "tomando el estado con que termino cada identidad",
-            """
+            f"""
 -- La fila con que el establecimiento "termino": el corte mas reciente,
 -- desempatado por id para que el resultado sea determinista.
 CREATE TEMP TABLE representante ON COMMIT DROP AS
@@ -396,13 +511,14 @@ SELECT DISTINCT ON (clee_resuelto)
        cve_ent, cve_mun, cod_postal, tipo_asent, latitud, longitud, h3_cell_9,
        per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
        cve_loc, ageb, h3_cell_5
-FROM obs
+FROM {obs}
+WHERE bloque = {bloque}
 ORDER BY clee_resuelto, period DESC, id
 """,
         ),
         _Paso(
             destino,
-            f"escribiendo {schema}.{destino}",
+            f"escribiendo el bloque en {schema}.{destino}",
             f"""
 INSERT INTO {schema}.{destino} (
     clee_resuelto, es_sintetica,
@@ -484,87 +600,283 @@ JOIN representante r USING (clee_resuelto)
     ]
 
 
-def construir_permanencia(conn: Connection, metodo: str, schema: str = DEFAULT_SCHEMA) -> int:
-    """Reconstruye la tabla de permanencia de un método, entera.
+def _obs_existe(conn: Connection, metodo: str, schema: str) -> bool:
+    """Si la tabla de trabajo de un método ya está creada."""
+    return bool(
+        conn.execute(
+            text("SELECT to_regclass(:nombre) IS NOT NULL"),
+            {"nombre": f"{schema}.{tabla_obs(metodo)}"},
+        ).scalar()
+    )
 
-    Es reconstrucción total y no incremental porque las identidades
-    sintéticas `NEW_*` no son estables entre corridas: un `--force` de la
-    resolución les asigna otro id, así que no hay nada que preservar.
 
-    `TRUNCATE`, temporales e `INSERT` van en la transacción del llamador: la
-    tabla no está particionada, así que no hay swap que hacer y el reemplazo
-    es atómico por la transacción. Si algo falla a la mitad, la tabla queda
-    como estaba y las temporales se van con el rollback.
+def _marcar_obs(conn: Connection, metodo: str, schema: str) -> None:
+    """Deja fechada la tabla de trabajo, para validar reanudaciones.
 
-    Cada paso se registra antes de empezar y al terminar, con sus filas y su
-    tiempo, así que el log dice en qué paso se quedó si el proceso muere.
+    La marca va en el COMMENT de la tabla y no en una columna: una columna
+    de fecha serían 8 bytes por cada una de las 82.9M filas para guardar un
+    solo dato, y el comentario se va solo cuando la tabla se borra.
 
     Args:
-        conn: conexión con permisos de escritura; el llamador controla la
-            transacción.
-        metodo: clave de `METODOS` (`radio` o `h3`).
-        schema: schema de origen y destino.
+        conn: conexión con permisos de DDL.
+        metodo: clave de `METODOS`.
+        schema: schema de la tabla.
+    """
+    conn.execute(
+        text(
+            f"COMMENT ON TABLE {schema}.{tabla_obs(metodo)} IS "
+            f"'armado_en={datetime.now(UTC).isoformat()}'"
+        )
+    )
+
+
+def _identidad_mas_nueva_que_obs(conn: Connection, metodo: str, schema: str) -> bool:
+    """Si la resolución CLEE se re-corrió después de armar la tabla de trabajo.
+
+    Reanudar en ese caso sería **incorrecto**, no solo inútil: los bloques
+    ya escritos vendrían de una resolución y los pendientes de otra, y la
+    tabla final mezclaría dos conjuntos de identidades sin que nada lo
+    delate. Las `NEW_*` ni siquiera son estables entre corridas, así que la
+    misma fila puede aparecer con dos identidades distintas.
+
+    Compara la marca que dejó `_marcar_obs` contra `resuelto_en`, la columna
+    que la resolución escribe justamente para poder fechar un resultado.
+
+    Args:
+        conn: conexión de lectura.
+        metodo: clave de `METODOS`.
+        schema: schema de las tablas.
 
     Returns:
-        int: filas escritas.
+        bool: True si la identidad cambió y hay que rehacer desde cero.
+    """
+    marca = conn.execute(
+        text(f"SELECT obj_description('{schema}.{tabla_obs(metodo)}'::regclass, 'pg_class')")
+    ).scalar()
+    if not marca or not marca.startswith("armado_en="):
+        # Sin marca no se puede afirmar que la identidad siga siendo la
+        # misma, y el riesgo de mezclarlas no se corre a la ligera.
+        return True
+
+    return bool(
+        conn.execute(
+            text(f"SELECT max(resuelto_en) > :armado FROM {schema}.{METODOS[metodo]}"),
+            {"armado": marca.removeprefix("armado_en=")},
+        ).scalar()
+    )
+
+
+def _cortes_pendientes(
+    conn: Connection, metodo: str, cortes: list[date], schema: str
+) -> list[tuple[int, date]]:
+    """Los cortes que aún no están en la tabla de trabajo, con su índice.
+
+    El avance se deriva de la propia tabla en vez de un registro aparte: un
+    corte que falló a la mitad hizo rollback y no dejó ni una fila, así que
+    "tiene filas" equivale a "está completo".
+
+    Args:
+        conn: conexión de lectura.
+        metodo: clave de `METODOS`.
+        cortes: todos los cortes, ordenados.
+        schema: schema de las tablas.
+
+    Returns:
+        list[tuple[int, date]]: pares (índice, corte) por cargar.
+    """
+    hechos = set(
+        conn.execute(text(f"SELECT DISTINCT period FROM {schema}.{tabla_obs(metodo)}"))
+        .scalars()
+        .all()
+    )
+    return [(i, c) for i, c in enumerate(cortes) if c not in hechos]
+
+
+def _bloques_pendientes(conn: Connection, metodo: str, bloques: int, schema: str) -> list[int]:
+    """Los bloques que aún no están en la tabla destino.
+
+    Mismo criterio que con los cortes: el `INSERT` de un bloque es una
+    transacción, así que o escribió todas sus identidades o ninguna.
+
+    Args:
+        conn: conexión de lectura.
+        metodo: clave de `METODOS`.
+        bloques: cuántos bloques en total.
+        schema: schema de las tablas.
+
+    Returns:
+        list[int]: bloques por procesar, en orden.
+    """
+    escritos = set(
+        conn.execute(
+            text(f"""
+            SELECT DISTINCT {_expr_bloque("clee_resuelto", bloques)}
+            FROM {schema}.{tabla_destino(metodo)}
+            """)
+        )
+        .scalars()
+        .all()
+    )
+    return [b for b in range(bloques) if b not in escritos]
+
+
+def _ejecutar(conn: Connection, paso: _Paso, etiqueta: str) -> int:
+    """Corre un paso con latido y lo registra al terminar.
+
+    Args:
+        conn: conexión dentro de una transacción.
+        paso: qué ejecutar.
+        etiqueta: prefijo del log, p. ej. `bloque 7/32`.
+
+    Returns:
+        int: filas que produjo.
+    """
+    inicio = time.monotonic()
+    with _latido(conn, f"{etiqueta} {paso.nombre}"):
+        resultado = conn.execute(text(paso.sql))
+    segundos = time.monotonic() - inicio
+    logger.info(f"      {etiqueta} {paso.nombre}: {resultado.rowcount:,} filas en {segundos:.1f}s")
+    return resultado.rowcount
+
+
+def construir_permanencia(
+    engine: Engine, metodo: str, schema: str = DEFAULT_SCHEMA, force: bool = False
+) -> int:
+    """Construye la tabla de permanencia de un método, por partes y reanudable.
+
+    El trabajo se parte en dos fases, cada una con la llave de troceo que su
+    grano admite:
+
+    1. **Por corte** (20 vueltas) se llena `permanencia_obs_<metodo>`, que
+       une los hechos con la identidad. Aquí el grano es la observación, así
+       que partir por corte no parte nada, y cada vuelta lee una sola
+       partición de los hechos.
+    2. **Por bloque de identidad** (`PERMANENCIA_BLOQUES` vueltas) se
+       agregan y se escriben. Aquí el grano es el establecimiento, que
+       **cruza** los cortes: trocear por año daría agregados calculados
+       sobre un fragmento de su vida. La llave es `_expr_bloque`.
+
+    **Cada vuelta es su propia transacción y commitea.** Eso es el punto: un
+    fallo en la vuelta 14 no se lleva las 13 anteriores. El precio es que se
+    pierde el reemplazo todo-o-nada --mientras corre, la tabla destino está
+    parcialmente llena-- y se acepta porque es una tabla derivada que solo
+    lee el análisis entre corridas, y rehacerla no cuesta datos.
+
+    **Por default reanuda**, misma convención que la resolución CLEE, que
+    salta los cortes que ya resolvió: el avance se deriva de las tablas, sin
+    registro aparte. `force=True` tira la tabla de trabajo y la destino y
+    empieza de cero. Si la resolución CLEE se re-corrió desde la última vez,
+    se niega a reanudar: ver `_identidad_mas_nueva_que_obs`.
+
+    Args:
+        engine: engine con permisos de escritura; esta función controla sus
+            transacciones, una por vuelta.
+        metodo: clave de `METODOS` (`radio` o `h3`).
+        schema: schema de origen y destino.
+        force: si True, descarta lo que haya y reconstruye entero.
+
+    Returns:
+        int: filas en la tabla destino al terminar.
 
     Raises:
         ValueError: si el método no está registrado.
+        RuntimeError: si hay avance previo pero la identidad cambió y no se
+            pidió `force`.
     """
     if metodo not in METODOS:
         raise ValueError(f"Metodo desconocido '{metodo}'. Opciones: {list(METODOS)}")
 
-    cortes = _cortes_ordenados(conn, schema)
-    if not cortes:
-        logger.warning(
-            f"   {metodo}: no hay cortes en {schema}.establecimientos, nada que construir"
-        )
-        return 0
-
+    bloques = max(get_settings().PERMANENCIA_BLOQUES, 1)
     destino = tabla_destino(metodo)
-    pasos = _pasos(metodo, cortes, schema)
+    obs = tabla_obs(metodo)
+
+    with engine.begin() as conn:
+        cortes = _cortes_ordenados(conn, schema)
+        if not cortes:
+            logger.warning(
+                f"   {metodo}: no hay cortes en {schema}.establecimientos, nada que construir"
+            )
+            return 0
+
+        if force:
+            logger.info(f"   {metodo}: --force, se descarta el avance previo")
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
+            conn.execute(text(f"TRUNCATE {schema}.{destino}"))
+        elif _obs_existe(conn, metodo, schema) and _identidad_mas_nueva_que_obs(
+            conn, metodo, schema
+        ):
+            raise RuntimeError(
+                f"{schema}.{METODOS[metodo]} se re-resolvio despues de armar {schema}.{obs}: "
+                f"reanudar mezclaria identidades de dos corridas. Corre con --force."
+            )
+
+        nueva = not _obs_existe(conn, metodo, schema)
+        conn.execute(text(_sql_crear_obs(metodo, schema)))
+        if nueva:
+            _marcar_obs(conn, metodo, schema)
+        pendientes = _cortes_pendientes(conn, metodo, cortes, schema)
+
+    hechos = len(cortes) - len(pendientes)
     logger.info(
-        f"   {metodo} -> {schema}.{destino}: colapsando {len(cortes)} cortes "
-        f"({cortes[0]} .. {cortes[-1]}) en {len(pasos)} pasos..."
+        f"   {metodo} -> {schema}.{destino}: {len(cortes)} cortes "
+        f"({cortes[0]} .. {cortes[-1]}) en {bloques} bloques"
     )
+    if hechos:
+        logger.info(f"   reanudando: {hechos}/{len(cortes)} cortes ya estaban en {obs}")
 
+    # ---- Fase 1: los hechos unidos a la identidad, un corte por vuelta ----
     inicio = time.monotonic()
-    conn.execute(text(SET_WORK_MEM))
-    conn.execute(text(f"TRUNCATE {schema}.{destino}"))
+    for n, (idx, corte) in enumerate(pendientes, start=hechos + 1):
+        etiqueta = f"obs {n}/{len(cortes)}"
+        logger.info(f"   ▶ {etiqueta}: cargando el corte {corte}...")
+        with engine.begin() as conn:
+            conn.execute(text(SET_WORK_MEM))
+            with _latido(conn, etiqueta):
+                filas = conn.execute(
+                    text(_sql_llenar_obs(metodo, corte, idx, bloques, schema))
+                ).rowcount
+        logger.info(f"   ✔ {etiqueta}: {corte} -> {filas:,} observaciones")
 
-    escritas = 0
-    for n, paso in enumerate(pasos, start=1):
-        etiqueta = f"[{n}/{len(pasos)}] {paso.nombre}"
-        logger.info(f"   ▶ {etiqueta}: {paso.descripcion}...")
-        inicio_paso = time.monotonic()
+    with engine.begin() as conn:
+        total_obs = conn.execute(text(f"SELECT count(*) FROM {schema}.{obs}")).scalar_one()
+        if total_obs == 0:
+            logger.warning(
+                f"   ⚠️ {destino} vacia: {schema}.{METODOS[metodo]} sin poblar. "
+                f"Corre primero `transform --only clee-{metodo}`."
+            )
+            conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
+            return 0
+        # Indice y estadisticas DESPUES de llenar: construirlo antes
+        # costaria mantenerlo en los 20 INSERT, y una tabla sin ANALYZE deja
+        # al planificador armando los bloques a ciegas (el autovacuum no
+        # toca las UNLOGGED recien creadas a tiempo).
+        logger.info(f"   ▶ indice y estadisticas sobre {total_obs:,} observaciones...")
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{obs}_bloque ON {schema}.{obs} (bloque)"))
+        conn.execute(text(f"ANALYZE {schema}.{obs}"))
+        faltan = _bloques_pendientes(conn, metodo, bloques, schema)
 
-        with _latido(conn, etiqueta):
-            resultado = conn.execute(text(paso.sql))
-        escritas = resultado.rowcount
-        min_paso = (time.monotonic() - inicio_paso) / 60
+    if len(faltan) < bloques:
+        logger.info(f"   reanudando: {bloques - len(faltan)}/{bloques} bloques ya escritos")
 
-        # ANALYZE porque una temporal nace sin estadisticas y el autovacuum
-        # no las toca: sin esto el planificador arma los pasos siguientes a
-        # ciegas. En el ultimo paso no hay nada que analizar.
-        if n < len(pasos):
-            conn.execute(text(f"ANALYZE {paso.nombre}"))
-
+    # ---- Fase 2: los agregados, un bloque de identidades por vuelta ----
+    ultimo_idx = len(cortes) - 1
+    for bloque in faltan:
+        etiqueta = f"bloque {bloque + 1}/{bloques}"
+        inicio_bloque = time.monotonic()
+        with engine.begin() as conn:
+            conn.execute(text(SET_WORK_MEM))
+            escritas = 0
+            for paso in _pasos_bloque(metodo, bloque, ultimo_idx, schema):
+                escritas = _ejecutar(conn, paso, etiqueta)
         logger.info(
-            f"   ✔ {etiqueta}: {escritas:,} filas en {min_paso:.1f} min "
-            f"({escritas / max(min_paso * 60, 1):,.0f} filas/s)"
+            f"   ✔ {etiqueta}: {escritas:,} establecimientos en "
+            f"{(time.monotonic() - inicio_bloque) / 60:.1f} min"
         )
+
+    with engine.begin() as conn:
+        total = conn.execute(text(f"SELECT count(*) FROM {schema}.{destino}")).scalar_one()
+        conn.execute(text(f"DROP TABLE IF EXISTS {schema}.{obs}"))
 
     minutos = (time.monotonic() - inicio) / 60
-
-    if escritas == 0:
-        logger.warning(
-            f"   ⚠️ {destino} vacia: {schema}.{METODOS[metodo]} sin poblar. "
-            f"Corre primero `transform --only clee-{metodo}`."
-        )
-    else:
-        logger.info(
-            f"   ✅ {destino}: {escritas:,} establecimientos en {minutos:.1f} min "
-            f"({escritas / max(minutos * 60, 1):,.0f} filas/s)"
-        )
-
-    return escritas
+    logger.info(f"   ✅ {destino}: {total:,} establecimientos en {minutos:.1f} min")
+    return total

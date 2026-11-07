@@ -846,41 +846,70 @@ docker compose run --rm etl transform --only permanencia-h3
 docker compose run --rm etl transform --only permanencia      # las dos
 ```
 
-### Cinco pasos, para saber dónde se quedó
+### Troceado y reanudable
 
-El llenado **no** es un `INSERT ... SELECT` único: son cinco sentencias
-sobre tablas temporales `ON COMMIT DROP`, cada una registrada antes de
-empezar y al terminar con sus filas, su tiempo y su tasa.
+El llenado **no** es un `INSERT ... SELECT` único. Va en dos fases, cada una
+troceada por la llave que su grano admite, y **cada vuelta commitea**: un
+fallo en la vuelta 14 no se lleva las 13 anteriores.
 
-```
-▶ [1/5] obs: uniendo los hechos con clee_radio y resolviendo catalogos...
-✔ [1/5] obs: 82,896,801 filas en 14.2 min (97,296 filas/s)
-▶ [2/5] ventana: colapsando a una fila por identidad (el agregado mas caro)...
-```
-
-La razón es de operación: una sentencia de horas que muere solo deja
-escrito que empezó. No cuesta nada de más —`obs` se materializaba igual,
-porque PostgreSQL materializa un CTE referenciado más de una vez y este lo
-usaban tres— y habilita el `ANALYZE` de cada temporal, que antes no existía
-(una temporal nace sin estadísticas y el autovacuum no las toca, así que el
-planificador armaba los joins finales a ciegas).
-
-Dentro de cada paso hay además un **latido** cada
-`PERMANENCIA_LATIDO_SEGUNDOS` (default 60), emitido por un hilo que
-consulta `pg_stat_activity` con su propia conexión —la del `INSERT` está
-bloqueada:
+| fase | troceo | vueltas | por qué esa llave |
+|---|---|---|---|
+| `permanencia_obs_<m>` | por corte | 20 | el grano es la **observación**: cada fila es de un solo corte, y la vuelta lee una sola partición de los hechos y de la identidad |
+| agregados + `INSERT` | por bloque de `md5(clee_resuelto)` | `PERMANENCIA_BLOQUES` (32) | el grano es la **identidad**, que *cruza* los cortes; trocear por año daría agregados sobre un fragmento de su vida, y por `cve_ent` partiría a los que se mudan |
 
 ```
-⏳ [2/5] ventana: 23.0 min | estado=active | IO:BufFileWrite | temp +41.3 GiB
+▶ obs 9/20: cargando el corte 2019-11-01...
+✔ obs 9/20: 2019-11-01 -> 4,218,903 observaciones
+▶ indice y estadisticas sobre 82,896,801 observaciones...
+   bloque 7/32 ventana: 312,044 filas en 18.3s
+   bloque 7/32 primera: 312,044 filas en 9.1s
+✔ bloque 7/32: 312,044 establecimientos en 1.2 min
 ```
 
-`wait_event` dice en qué fase está (leyendo hechos, derramando el agregado
-a disco, esperando un lock) y `temp` cuánto ha derramado. Lo que **no** se
-puede reportar es "filas escritas hasta ahora": el `INSERT` vive en una
-transacción sin commitear, así que desde otra conexión la tabla destino se
-ve vacía hasta el final.
+`permanencia_obs_<m>` es **`UNLOGGED`** y no `TEMP`: una temporal muere en
+el primer `COMMIT`, y el troceo necesita commitear. No escribe WAL, así que
+cuesta casi lo mismo. Se borra al terminar.
 
-Y si prefieres preguntarle a la base directamente:
+**Troceo ≠ más lento.** El `GROUP BY` completo ordena 10M de grupos con una
+decena de `COUNT(DISTINCT)` cada uno y se derrama a disco; los ~300k grupos
+de un bloque caben en `work_mem`. Evitar el derrame suele valer más que dar
+32 vueltas.
+
+**Reanuda por default**, igual que la resolución CLEE, que salta los cortes
+ya resueltos. El avance se deriva de las propias tablas —una vuelta que
+falló hizo rollback y no dejó filas, así que "tiene filas" equivale a "está
+completa"—, sin registro aparte:
+
+```bash
+docker compose run --rm etl transform --only permanencia            # reanuda
+docker compose run --rm etl transform --only permanencia --force    # rehace
+```
+
+Si la **resolución CLEE se re-corrió** desde que se armó la tabla de
+trabajo, reanudar mezclaría identidades de dos corridas (las `NEW_*` no son
+estables), así que se niega y pide `--force`. Lo detecta comparando
+`max(resuelto_en)` de `clee_<metodo>` contra la marca que deja en el
+`COMMENT` de la tabla de trabajo.
+
+Lo que se **pierde** con el troceo: el reemplazo todo-o-nada. Mientras
+corre, la tabla destino está parcialmente llena. Se acepta porque es
+derivada, no tiene consumidor hasta Gold, y rehacerla no cuesta datos.
+
+### Latido dentro de cada vuelta
+
+Cada `PERMANENCIA_LATIDO_SEGUNDOS` (60) un hilo consulta `pg_stat_activity`
+con su propia conexión —la de la carga está bloqueada:
+
+```
+⏳ bloque 7/32 ventana: 2.0 min | estado=active | IO:BufFileWrite | temp +4.1 GiB
+```
+
+`wait_event` dice en qué fase está (leyendo hechos, derramando a disco,
+esperando un lock). Lo que **no** se puede reportar es "filas escritas hasta
+ahora": la vuelta vive en una transacción sin commitear, así que desde otra
+conexión la tabla se ve sin esas filas hasta el final.
+
+Y si prefieres preguntarle a la base:
 
 ```sql
 SELECT pid, state, wait_event_type, wait_event, now() - query_start AS corriendo

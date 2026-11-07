@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     # resolucion para ver en que fase esta. En 0 se apaga el hilo.
     PERMANENCIA_LATIDO_SEGUNDOS: int = 60
 
+    # Bloques de identidades en que se trocea la permanencia. Cada bloque es
+    # su propia transaccion, asi que un fallo cuesta a lo mas 1/N del
+    # trabajo en vez de todo. Ademas suele ser mas RAPIDO: el GROUP BY
+    # completo ordena 10M de grupos y se derrama a disco, mientras que los
+    # ~300k de un bloque caben en work_mem.
+    # Divisor de 256 para que el reparto por md5 sea uniforme. En 1 se hace
+    # de una sola vez, como antes.
+    PERMANENCIA_BLOQUES: int = 32
+
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
     SQLALCHEMY_POOL_SIZE: int = 5
