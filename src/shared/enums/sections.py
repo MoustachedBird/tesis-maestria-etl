@@ -4,16 +4,16 @@ from enum import StrEnum
 class Section(StrEnum):
     """Secciones del pipeline seleccionables con el flag ``--only``.
 
-    Los tokens atómicos mapean 1:1 a un paso; ``denue`` y ``clee`` son alias
-    de grupo que se expanden a varias secciones atómicas. ``load`` solo
-    aplica al comando ``pipeline`` (``transform`` y ``extract`` lo ignoran).
+    Los tokens atómicos mapean 1:1 a un paso; ``denue``, ``clee`` y
+    ``permanencia`` son alias de grupo que se expanden a varias secciones
+    atómicas (ver `SECTION_GROUPS`).
 
     Vive en `shared`, no en el CLI del ETL, porque el scheduler necesita
-    nombrar qué sección corre en cada tick y el API las valida al encolar en
-    `meta.run_requests`; ninguno de los dos debe importar del CLI.
+    nombrar qué sección corre en cada tick y el API las valida al encolar;
+    ninguno de los dos debe importar del CLI.
 
-    Los valores llevan guion (``normalize-dates``) porque son exactamente lo
-    que el usuario teclea en la línea de comandos.
+    Los valores llevan guion (``clee-radio``) porque son exactamente lo que
+    el usuario teclea en la línea de comandos.
 
     No hay secciones para la fecha ni para las celdas H3: el ingest las
     deriva antes del ``COPY`` (ver `transformers/enrich.py`), así que no son
