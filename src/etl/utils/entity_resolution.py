@@ -77,6 +77,90 @@ def set_matching_logger(stage_logger: logging.Logger) -> None:
     logger = stage_logger
 
 
+scorer: Callable = calculate_match_score
+"""Regla de decision del matching, INYECTABLE por metodo de propagacion.
+
+Es el segundo eje que un metodo puede variar, y el que lo vuelve un metodo
+de verdad: `radio` y `h3` solo cambian el generador de candidatos, asi que
+producen la MISMA particion (medido: 0 de 82.9M observaciones en disputa,
+ver `alternativas_clee_propagation.md` §0). Cambiar la regla de decision es
+lo que da un voto distinto.
+
+Contrato, identico al de `calculate_match_score`:
+
+    scorer(t_name, t_raz, t_act, t_tel, t_email, t_web, t_cp,
+           kb_name, kb_raz, kb_act, kb_tel, kb_email, kb_www, kb_cp)
+        -> (is_match: bool, path: str, score: float)
+
+`score` lo usa `_best_candidate` para el argmax y tiene que ser comparable
+entre candidatos DEL MISMO metodo; no hace falta que sea comparable entre
+metodos. `path` es solo para trazas.
+
+Por default es la cascada de umbrales (`matching.calculate_match_score`).
+Los metodos con otra regla --probabilistico, ML, LLM-- registran la suya en
+`CLEEResolver.METHODS` y el resolver la inyecta aqui al arrancar la corrida.
+Los workers de multiprocessing la heredan por fork, igual que el logger.
+"""
+
+
+def _cascade_ceiling(t_raz: str) -> float:
+    """Techo teorico del score de la cascada para un target dado.
+
+    Si el target no trae razon social usable, Path A no puede disparar
+    contra NINGUN candidato y el techo real baja un tier. Es el caso
+    mayoritario en DENUE (razon social vacia), donde mas rinde el corte.
+
+    Args:
+        t_raz: razon social del target, ya normalizada.
+
+    Returns:
+        float: score que ningun candidato de este target puede superar.
+    """
+    return PERFECT_RAZON_SCORE if len(t_raz) > 2 else PERFECT_NAME_SCORE
+
+
+scorer_ceiling: Callable[[str], float] | None = _cascade_ceiling
+"""Techo del score del metodo activo, para el corte temprano del argmax.
+
+Va de la mano de `scorer` porque la escala del score es propia de cada
+regla de decision: el techo de la cascada (100 puntos de fuzzy) no
+significa nada para un modelo probabilistico que devuelve log-odds.
+
+`None` desactiva el corte temprano: `_best_candidate` evalua TODOS los
+candidatos. Es el default seguro para un metodo nuevo --sigue siendo
+correcto, solo mas lento-- y por eso `set_matching_scorer` no lo asume.
+"""
+
+
+def set_matching_scorer(
+    fn: Callable | None = None, ceiling: Callable[[str], float] | None = None
+) -> None:
+    """Inyecta la regla de decision del metodo activo en el motor.
+
+    Mismo patron y mismo motivo que `set_matching_logger`: se llama al
+    INICIO de cada corrida y no en `__init__`, porque el orquestador
+    construye un resolver por metodo al arrancar y el ultimo constructor
+    pisaria la inyeccion de los demas. `_best_candidate` resuelve `scorer`
+    como global en cada llamada, asi que el rebind aplica de inmediato.
+
+    Args:
+        fn: regla de decision con el contrato de `scorer`. **`None`
+            restituye la cascada CON su propio techo**, que es lo que los
+            metodos sin regla propia necesitan: pasarles un techo nulo les
+            quitaria el corte temprano y les costaria horas.
+        ceiling: techo del score de `fn`, para el corte temprano. Se ignora
+            si `fn` es `None`. **Omitirlo no hay corte**: se evaluan todos
+            los candidatos, que es correcto y mas lento. Es lo que debe
+            hacer un scorer nuevo; pasar el techo de otra escala rompe el
+            argmax en silencio.
+    """
+    global scorer, scorer_ceiling
+    if fn is None:
+        scorer, scorer_ceiling = calculate_match_score, _cascade_ceiling
+    else:
+        scorer, scorer_ceiling = fn, ceiling
+
+
 KB_COLUMNS = [
     "clee_id",
     "latitud",
@@ -213,16 +297,17 @@ def _best_candidate(
     Returns:
         El CLEE del mejor candidato, o None si ninguno hace match.
     """
-    # Si el target no trae razon social usable, Path A no puede disparar
-    # contra NINGUN candidato y el techo real baja un tier. Es el caso
-    # mayoritario en DENUE (razon social vacia), donde mas rinde el corte.
-    ceiling = PERFECT_RAZON_SCORE if len(t_raz) > 2 else PERFECT_NAME_SCORE
+    # Techo del metodo activo. Sin techo declarado no hay corte temprano:
+    # se evaluan todos los candidatos, que sigue siendo correcto.
+    ceiling = scorer_ceiling(t_raz) if scorer_ceiling is not None else float("inf")
 
     best_clee: str | None = None
     best_score = 0.0
 
     for n_idx in neighbors:
-        is_match, _, score = calculate_match_score(
+        # `scorer` es global y se resuelve en cada llamada: el metodo activo
+        # lo inyecta con set_matching_scorer() antes de arrancar.
+        is_match, _, score = scorer(
             t_name,
             t_raz,
             t_act,

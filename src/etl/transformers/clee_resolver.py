@@ -25,6 +25,7 @@ from pathlib import Path
 import polars as pl
 from sqlalchemy import Engine, exists, func, select, text
 
+from src.etl.utils import entity_resolution
 from src.etl.utils.clee_resolution_config import (
     ORIGEN_COLUMN,
     RESOLVED_COLUMN,
@@ -38,6 +39,7 @@ from src.etl.utils.entity_resolution import (
     propagate_clees_h3,
     propagate_clees_radio,
     set_matching_logger,
+    set_matching_scorer,
 )
 from src.etl.utils.matching import clean_contact_columns
 from src.meta.tracker import MetadataTracker
@@ -79,18 +81,34 @@ class CLEEResolver:
                      (incremental, preserves already-assigned identities).
     """
 
-    # Metodos disponibles: mapea method -> (columna destino, funcion de
-    # propagacion, sufijo de prefijo de region). Un solo lugar para registrar
-    # nuevos metodos de propagacion sin duplicar el orquestador.
+    # Registro de metodos de propagacion. Un metodo son CUATRO cosas, y es
+    # un solo lugar para agregar uno sin tocar el orquestador:
+    #
+    #   table          tabla destino en silver (una por metodo, b0002)
+    #   propagate      generador de candidatos + core de ventana deslizante
+    #   scorer         regla de decision; None = la cascada de umbrales
+    #   ceiling        techo del score de `scorer`, para el corte temprano
+    #                  del argmax; None = sin corte (correcto y mas lento)
+    #   prefix_suffix  sufijo del prefijo de los NEW_* sinteticos, para que
+    #                  no colisionen entre metodos
+    #
+    # `scorer` es el eje que separa un METODO de una OPTIMIZACION: `radio` y
+    # `h3` solo difieren en `propagate`, y por eso producen la misma
+    # particion (0 de 82.9M en disputa, medido). Ver
+    # `alternativas_clee_propagation.md`.
     METHODS = {
         "radio": {
             "table": "clee_radio",
             "propagate": propagate_clees_radio,
+            "scorer": None,
+            "ceiling": None,
             "prefix_suffix": "",
         },
         "h3": {
             "table": "clee_h3",
             "propagate": propagate_clees_h3,
+            "scorer": None,
+            "ceiling": None,
             "prefix_suffix": "H3",
         },
     }
@@ -125,6 +143,8 @@ class CLEEResolver:
         cfg = self.METHODS[method]
         self.clee_table: str = cfg["table"]
         self._propagate = cfg["propagate"]
+        self._scorer = cfg["scorer"]
+        self._ceiling = cfg["ceiling"]
         self._prefix_suffix: str = cfg["prefix_suffix"]
 
         # Log dedicado por metodo (archivo + stdout). La INYECCION al motor
@@ -630,10 +650,17 @@ class CLEEResolver:
         Returns:
             Dict with resolution statistics.
         """
-        # Redirigir el motor de matching compartido al log de ESTE metodo
-        # (el orquestador instancia ambos resolvers; el activo se declara
-        # al correr, no al construirse).
+        # Redirigir el motor de matching compartido a ESTE metodo: su log y
+        # su regla de decision. Va aqui y no en __init__ porque el
+        # orquestador instancia un resolver por metodo al arrancar y el
+        # ultimo constructor pisaria la inyeccion de los demas; el metodo
+        # activo se declara al correr.
         set_matching_logger(self.logger)
+        set_matching_scorer(self._scorer, self._ceiling)
+        self.logger.info(
+            f"   Regla de decision: {entity_resolution.scorer.__name__}"
+            + ("" if entity_resolution.scorer_ceiling else " (sin corte temprano del argmax)")
+        )
 
         periods = self._get_sorted_periods()
         if not periods:
