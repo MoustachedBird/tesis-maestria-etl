@@ -14,6 +14,12 @@ radio y H3 no coinciden.
 deterministas y el agente adjudicaba una franja que había que medir primero.
 **Medida el 2026-11-07: es cero** (§1.3), así que Gold no lleva agente.
 
+> **ALCANCE (2026-11-07).** `gold_cohorte_2021.md` restringe Gold a los
+> cortes con CLEE oficial, donde la identidad es observada y no inferida.
+> Las reglas por campo de §§4–6 siguen vigentes tal cual; lo que cambia es
+> que §§2–3 (reconciliación entre métodos) dejan de aplicar, porque en esa
+> ventana los tres métodos hacen la misma copia determinística.
+
 ---
 
 ## 0. Lo que ya está decidido en otros documentos

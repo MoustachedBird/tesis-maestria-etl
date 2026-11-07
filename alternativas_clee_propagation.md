@@ -14,6 +14,14 @@ cubre lo que falta: **combinarlos**. Son dos propósitos con requisitos
 distintos, y el segundo impone uno que el primero no necesita — diversidad
 de errores.
 
+> **REUBICADO (2026-11-07).** `gold_cohorte_2021.md` construye la capa de
+> consumo solo sobre los cortes con CLEE oficial, donde no hay identidades
+> propagadas ni sintéticas. Eso saca a este documento del camino crítico:
+> los métodos diversos y el consenso dejan de ser el requisito para unificar
+> identidades y pasan a ser **la vía para extender la ventana a 2015-2020**,
+> como análisis de robustez. El contenido sigue vigente; cambia para qué
+> sirve.
+
 ---
 
 ## 0. El hecho que lo motiva: hoy hay UN método, no dos
