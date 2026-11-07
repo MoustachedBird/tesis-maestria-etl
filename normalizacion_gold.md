@@ -11,8 +11,8 @@ diseño de un reconciliador LLM que adjudica **solo** donde los métodos
 radio y H3 no coinciden.
 
 **La tesis del documento, en una línea:** el 95% de esto son reglas
-deterministas, el agente adjudica una franja que **todavía no está medida**,
-y el paso 1 es medirla.
+deterministas y el agente adjudicaba una franja que había que medir primero.
+**Medida el 2026-11-07: es cero** (§1.3), así que Gold no lleva agente.
 
 ---
 
@@ -192,6 +192,36 @@ repetir después de cada re-resolución.
 
 Escribir el agente antes de este número es construir sobre una suposición.
 
+### 1.3 MEDIDO el 2026-11-07: el desacuerdo es CERO
+
+```
+ obs_comparadas | clusters_radio | clusters_h3 | radio_unio_mas | h3_unio_mas | obs_en_disputa
+----------------+----------------+-------------+----------------+-------------+----------------
+       82896807 |       15643923 |    15643923 |              0 |           0 |         (nulo)
+
+ clusters_h3_por_cluster_radio | cuantos_clusters_radio | observaciones
+-------------------------------+------------------------+---------------
+                             1 |               15643923 |      82896807
+```
+
+Los 15,643,923 clusters de radio mapean cada uno a **exactamente uno** de
+H3, y el drill-down de clusters en disputa devuelve 0 filas. `obs_en_disputa`
+sale nulo porque ninguna fila cumple el filtro. Las dos particiones son la
+misma. Corrió en ~2.5 min sin paralelismo.
+
+**Consecuencia: el reconciliador de §3 NO se construye.** Gold es 100%
+determinista, con `radio` como método base. §2 y §3 quedan como diseño
+archivado por si el desacuerdo aparece en una re-resolución futura; la
+consulta es repetible (`scripts/sql/desacuerdo_particiones.sql`) y hay que
+volver a correrla cada vez que se re-resuelva un método.
+
+**Y es un resultado, no solo un ahorro.** Dos generadores de candidatos
+independientes —BallTree sobre haversine y blocking H3 con `grid_disk`—
+producen particiones idénticas sobre 82.9M observaciones. Eso es la
+evidencia de que el blocking H3 es una optimización de rendimiento y **no**
+un cambio de método, que es justo lo que el capítulo metodológico necesita
+afirmar. Va al capítulo con esta tabla.
+
 ---
 
 ## 2. El desacuerdo tiene tres formas, y solo una necesita LLM
@@ -213,6 +243,11 @@ latencia por decisiones que un `WHERE` resuelve.
 ---
 
 ## 3. El reconciliador: qué decide y qué no
+
+> **ARCHIVADO (2026-11-07).** §1.3 midió el desacuerdo en cero, así que esto
+> no se construye. Se conserva el diseño porque la medición hay que repetirla
+> después de cada re-resolución, y si algún día sale distinta, esto es el
+> punto de partida.
 
 Es un **clasificador de un paso sin herramientas**, igual en forma al
 adjudicador CLEE de `crear_agentes.md` §9.1: los datos van en el prompt, los
