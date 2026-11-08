@@ -49,7 +49,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from src.etl.utils.troceado import Agregado, Paso, construir, expr_bloque
 from src.meta.tracker import MetadataTracker
@@ -150,6 +150,18 @@ class Permanencia(Agregado):
     def pista_vacio(self) -> str:
         """El comando exacto, que es lo que uno quiere leer en el log."""
         return f"Corre primero `transform --only clee-{self.metodo}`."
+
+    def contexto_meta(self, conn: Connection) -> dict:
+        """El método y su identidad, explícitos en `meta.job_runs.config`.
+
+        Se deducen del nombre de la tabla, pero deducir no es consultar: con
+        esto, "¿qué corridas de permanencia usaron `clee_h3`?" es un `WHERE`
+        sobre el JSON y no un `LIKE` sobre un nombre.
+        """
+        return {
+            "metodo": self.metodo,
+            "identidad": f"{self.origen_schema}.{self.identidad}",
+        }
 
     def sql_crear_obs(self) -> str:
         """DDL de la tabla de trabajo: los hechos unidos a la identidad.

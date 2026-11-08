@@ -376,6 +376,22 @@ class Agregado(ABC):
         self.origen_schema = origen_schema
 
     @property
+    def tablas_destino(self) -> tuple[str, ...]:
+        """Todas las tablas que este agregado escribe, de madre a hijas.
+
+        Casi siempre es una. Son varias cuando el destino publica evidencia
+        en una tabla aparte --Gold escribe el negocio y sus variantes-- y
+        entonces el orden importa dos veces: la madre primero al insertar
+        (la FK lo exige) y las dos en el MISMO `TRUNCATE` al rehacer, porque
+        PostgreSQL no deja truncar una tabla referenciada por una FK si la
+        que referencia no se trunca con ella.
+
+        Que las escriba el mismo bloque --y por tanto la misma transacción--
+        es lo que las mantiene consistentes: o quedan las dos o ninguna.
+        """
+        return (self.tabla,)
+
+    @property
     def obs(self) -> str:
         """Tabla de trabajo donde se juntan los hechos con la identidad.
 
@@ -443,6 +459,25 @@ class Agregado(ABC):
             text(f"SELECT max(resuelto_en) FROM {self.origen_schema}.{self.identidad}")
         ).scalar()
         return resuelta is not None and resuelta > construido_en
+
+    def contexto_meta(self, conn: Connection) -> dict:
+        """Lo que hay que saber de ESTA corrida, para el `config` de `meta.job_runs`.
+
+        La máquina ya guarda lo suyo (bloques, force). Esto es lo que solo el
+        destino sabe y que, sin él, obliga a abrir un log para entender un
+        número: con qué ventana se agregó, de qué identidad, bajo qué
+        versión de reglas.
+
+        Queda como JSON en `meta.job_runs.config`, así que "¿con qué ventana
+        se construyó la corrida del martes?" se contesta con SQL.
+
+        Args:
+            conn: conexión de lectura, por si hace falta medir algo.
+
+        Returns:
+            dict: claves JSON-serializables; se mezclan con las de la máquina.
+        """
+        return {}
 
     @property
     def pista_vacio(self) -> str:
@@ -662,7 +697,11 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
 
         if rehacer:
             conn.execute(text(f"DROP TABLE IF EXISTS {ag.obs_schema}.{ag.obs}"))
-            conn.execute(text(f"TRUNCATE {ag.schema}.{ag.tabla}"))
+            # Las tablas van en UNA sentencia: PostgreSQL rechaza truncar una
+            # tabla referenciada por una FK a menos que la que referencia se
+            # trunque junto con ella.
+            juntas = ", ".join(f"{ag.schema}.{nombre}" for nombre in ag.tablas_destino)
+            conn.execute(text(f"TRUNCATE {juntas}"))
         elif _obs_existe(conn, ag) and not _reanudable(conn, ag):
             raise RuntimeError(
                 f"el origen de {ag.obs_schema}.{ag.obs} cambio desde que se armo "
@@ -730,7 +769,14 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
             conn.execute(text(SET_WORK_MEM))
             escritas = 0
             for paso in ag.pasos_bloque(bloque, ultimo_idx):
-                escritas = ejecutar(conn, paso, etiqueta, log)
+                filas_paso = ejecutar(conn, paso, etiqueta, log)
+                # El conteo del bloque es el de la tabla MADRE, no el del
+                # ultimo paso: cuando hay tablas hijas, el ultimo INSERT
+                # escribe evidencia --varias filas por identidad-- y
+                # reportarlo haria creer que el bloque produjo mas negocios
+                # de los que produjo.
+                if paso.nombre == ag.tabla:
+                    escritas = filas_paso
         log.info(
             f"   ✔ {etiqueta}: {escritas:,} identidades en "
             f"{(time.monotonic() - inicio_bloque) / 60:.1f} min"
@@ -743,6 +789,38 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
     minutos = (time.monotonic() - inicio) / 60
     log.info(f"   ✅ {ag.schema}.{ag.tabla}: {total:,} identidades en {minutos:.1f} min")
     return total, total_obs
+
+
+def _registrar_hijas(
+    engine: Engine,
+    ag: Agregado,
+    tracker: MetadataTracker,
+    run_id: str,
+    log: logging.Logger,
+) -> None:
+    """Deja en `meta` una tarea por cada tabla destino que no es la madre.
+
+    Sin esto, un destino que escribe dos tablas reporta el conteo de una y la
+    otra queda sin rastro: habría que abrir el log --o contar a mano-- para
+    saber cuántas filas de evidencia produjo la corrida. Una tarea por tabla
+    destino es justamente lo que `meta.process_tasks` modela.
+
+    Las tareas nacen ya terminadas: el trabajo lo hicieron los bloques, en la
+    misma transacción que la madre, así que no hay una ventana en que una esté
+    escrita y la otra no.
+    """
+    with engine.connect() as conn:
+        for nombre in ag.tablas_destino[1:]:
+            escritas = filas(conn, nombre, ag.schema)
+            hija = tracker.create_process_task(
+                run_id=run_id,
+                task_name=nombre,
+                source_path=f"{ag.schema}.{ag.tabla}",
+                target_table=nombre,
+            )
+            tracker.start_process_task(hija)
+            tracker.complete_process_task(hija, TaskStatus.SUCCESS, rows_loaded=escritas)
+            log.info(f"   ✅ {ag.schema}.{nombre}: {escritas:,} filas")
 
 
 def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: bool = False) -> int:
@@ -787,12 +865,16 @@ def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: boo
     log = ag.logger
     bloques = max(get_settings().PERMANENCIA_BLOQUES, 1)
 
+    with engine.connect() as conn:
+        contexto = ag.contexto_meta(conn)
     run_id = tracker.create_run(
         job_name=ag.job_name,
         job_type=ag.job_type,
         trigger_type=TriggerType.MANUAL.value,
-        config={"agregado": ag.nombre, "bloques": bloques, "force": force},
+        config={"agregado": ag.nombre, "bloques": bloques, "force": force, **contexto},
     )
+    if contexto:
+        log.info(f"   contexto de la corrida: {contexto}")
     task_id = tracker.create_process_task(
         run_id=run_id,
         task_name=ag.nombre,
@@ -840,6 +922,8 @@ def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: boo
         _cerrar(tracker, run_id, task_id, TaskStatus.FAILED, error=str(e))
         raise
 
+    if observaciones:
+        _registrar_hijas(engine, ag, tracker, run_id, log)
     _cerrar(
         tracker,
         run_id,

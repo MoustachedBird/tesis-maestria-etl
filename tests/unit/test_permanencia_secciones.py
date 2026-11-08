@@ -238,3 +238,24 @@ class TestTroceo:
         from src.etl.loaders.permanencia import tabla_obs
 
         assert tabla_obs("radio") != tabla_obs("h3")
+
+
+@pytest.mark.unit
+class TestLoQueQuedaEnMeta:
+    """El metodo tiene que ser consultable, no deducible del nombre."""
+
+    def test_el_metodo_y_su_identidad_van_al_config_de_la_corrida(self):
+        """Asi "¿que corridas usaron clee_h3?" es un WHERE sobre el JSON."""
+        from src.etl.loaders.permanencia import Permanencia
+
+        contexto = Permanencia("h3").contexto_meta(conn=None)
+        assert contexto["metodo"] == "h3"
+        assert contexto["identidad"].endswith("clee_h3")
+
+    def test_el_contexto_es_serializable_a_json(self):
+        """`meta.job_runs.config` es JSON."""
+        import json
+
+        from src.etl.loaders.permanencia import Permanencia
+
+        json.dumps(Permanencia("radio").contexto_meta(conn=None))

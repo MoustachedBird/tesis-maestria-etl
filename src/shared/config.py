@@ -77,6 +77,31 @@ class Settings(BaseSettings):
     # de una sola vez, como antes.
     PERMANENCIA_BLOQUES: int = 32
 
+    # Cobertura minima de `clee` para considerar OFICIAL a un corte, y con eso
+    # dejarlo entrar a la ventana de gold.negocios_clee_oficial. Es el mismo
+    # 99.9% que ya usaba scripts/evaluate_masked_clee.py, adoptado para que
+    # las dos partes del proyecto llamen oficial a lo mismo.
+    # Medido el 2026-11-08 la cobertura es exactamente 0% o exactamente 100%,
+    # sin cortes parciales, asi que hoy el umbral no decide nada: es la guarda
+    # para el dia en que INEGI publique un corte a medias.
+    GOLD_COBERTURA_CLEE_MINIMA: float = 0.999
+
+    # Deteccion de jitter de GPS, para elegir de donde salen las coordenadas
+    # canonicas de Gold. La regla normal es "del corte de referencia", pero si
+    # un negocio disperso mucho SIN desplazarse (dispersion grande y neto ~0)
+    # el ultimo dato es una coordenada mala y la MEDIANA es el local de
+    # verdad (normalizacion_gold.md §4).
+    # Se aplica la mediana solo si dispersion_max_m > DISPERSION y
+    # desplazamiento_neto_m < NETO. Subir NETO mete mudanzas reales al caso
+    # mediana (mal); subir DISPERSION deja pasar jitter sin corregir.
+    GOLD_JITTER_DISPERSION_M: float = 200.0
+    GOLD_JITTER_NETO_M: float = 50.0
+
+    # Version de las reglas de normalizacion con que se construye Gold. Queda
+    # en cada fila (`version_reglas`): cambiar una regla cambia los numeros que
+    # reporta la tesis, asi que la fila tiene que decir bajo que reglas nacio.
+    GOLD_VERSION_REGLAS: str = "v1"
+
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
     SQLALCHEMY_POOL_SIZE: int = 5
