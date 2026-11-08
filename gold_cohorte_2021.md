@@ -216,6 +216,9 @@ que `clee_radio`/`clee_h3` son dos tablas (§5.2).
 - `cortes_observados <= len(ventana_cortes)`.
 - `idx_primer = 0` ⟺ el negocio aparece en el primer corte oficial.
 - Todo `clee` de `gold.variantes_negocio` existe en esta tabla.
+- Cada `(clee, campo)` de variantes tiene **exactamente una** fila con
+  `es_canonico`, y su `valor` coincide con el que esta tabla publicó. Es lo
+  que hace verificable la canonicalización sin re-derivarla.
 
 ### 5.2 Una tabla por régimen, nunca una columna `cohorte`
 

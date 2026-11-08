@@ -391,21 +391,59 @@ concretas:
 ```sql
 -- SOLO la cohorte con CLEE oficial. Ver 6.0.1.
 CREATE TABLE gold.variantes_negocio (
-    clee            text  NOT NULL,   -- FK logica a gold.negocios_clee_oficial.clee
-    campo           text  NOT NULL,   -- 'nom_estab' | 'raz_social' | ...
-    valor           text  NOT NULL,
-    primer_periodo  date  NOT NULL,   -- desde cuando uso este valor
-    ultimo_periodo  date  NOT NULL,   -- hasta cuando
-    cortes          integer NOT NULL, -- en cuantos cortes aparecio
+    clee            text    NOT NULL,  -- FK logica a gold.negocios_clee_oficial.clee
+    campo           text    NOT NULL,  -- nom_estab | raz_social | codigo_act
+                                       -- | telefono | correoelec | www
+    valor           text    NOT NULL,  -- tal como INEGI lo publico, sin normalizar
+    primer_periodo  date    NOT NULL,  -- primer corte en que uso este valor
+    ultimo_periodo  date    NOT NULL,  -- ultimo corte en que lo uso
+    n_cortes        integer NOT NULL,  -- en cuantos cortes distintos aparecio
+    es_canonico     boolean NOT NULL,  -- si es el valor que publico la tabla madre
     PRIMARY KEY (clee, campo, valor)
 );
+
+-- Busqueda difusa: "que negocio es 'tacos paco'?"
 CREATE INDEX ix_variantes_valor ON gold.variantes_negocio USING gin (valor gin_trgm_ops);
+
+-- A lo mas UN canonico por (negocio, campo). Lo hace estructural en vez de
+-- convencion: con dos canonicos la tabla madre seria indefendible y aqui el
+-- INSERT falla.
+CREATE UNIQUE INDEX ux_variantes_canonico
+    ON gold.variantes_negocio (clee, campo) WHERE es_canonico;
 
 COMMENT ON TABLE gold.variantes_negocio IS
   'Variantes de los negocios con CLEE OFICIAL de INEGI. No contiene '
   'identidades propagadas ni sinteticas NEW_*; esas irian en una tabla '
   'aparte (ver normalizacion_gold.md 6.0.1)';
 ```
+
+Las tres columnas de ventana y conteo salen del **mismo `GROUP BY`** que
+produce las filas, así que son gratis. Un campo que el negocio nunca llenó
+no tiene filas — y eso ya lo dice `tiene_<campo>` en la tabla madre, sin
+necesidad de una fila vacía aquí.
+
+**`es_canonico` es lo que cierra el círculo.** Sin ella la tabla lista las
+alternativas pero no dice cuál ganó, y había que ir a la tabla madre a
+comparar cadenas. Con ella, "el canónico y sus alternativas" es una
+consulta, y la decisión —venga de una regla o del LLM— queda auditable en
+el mismo lugar que su evidencia. Aplica a los seis campos por igual: en
+todos, la tabla madre publicó **un** valor y aquí se marca cuál fue.
+
+**Nota sobre la PK:** `(clee, campo, valor)` es un btree, y btree tiene un
+tope de ~2704 bytes por entrada. `nom_estab` quedó sin límite de largo en
+`b0004` (INEGI publica nombres largos), así que un nombre patológico
+rompería el `INSERT` — falla fuerte, no en silencio. Antes de construir,
+medir a qué distancia estamos del tope:
+
+```sql
+SELECT max(length(nom_estab)) AS max_nombre,
+       max(length(raz_social)) AS max_razon
+FROM silver.establecimientos;
+```
+
+Si el máximo real está en decenas de caracteres el filo es teórico y se
+queda documentado; si está en cientos, la PK pasa a `(clee, campo,
+md5(valor))` con un `UNIQUE` sobre el triple original.
 
 ### 6.0.1 Solo identidades oficiales, y en su propia tabla
 
