@@ -178,7 +178,7 @@ resolución no falla — corre sobre nada y produce una tabla vacía.
 
 ```bash
 cd ~/tesis-maestria-etl
-nohup caffeinate -dims docker compose run --rm etl \
+nohup docker compose run --rm etl \
   transform --only h3-cell-7 > h3_7.log 2>&1 &
 sleep 10
 tail -f h3_7.log
@@ -300,7 +300,7 @@ terminado las propagaciones.
 
 ```bash
 cd ~/tesis-maestria-etl
-nohup caffeinate -dims docker compose run --rm etl \
+nohup docker compose run --rm etl \
   transform --only gold > gold.log 2>&1 &
 sleep 10
 tail -f gold.log
