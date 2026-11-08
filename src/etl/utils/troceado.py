@@ -57,7 +57,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import NamedTuple
 
 from sqlalchemy import text
@@ -394,6 +394,56 @@ class Agregado(ABC):
         """
         return self.schema
 
+    def huella_origen(self, conn: Connection) -> str:
+        """Firma del origen: si cambia, un avance a medias no se puede reanudar.
+
+        Es el guardia de la tabla de trabajo. Reanudar con el origen cambiado
+        sería **incorrecto**, no solo inútil: los bloques ya escritos vendrían
+        de un origen y los pendientes de otro, y la tabla final mezclaría los
+        dos sin que nada lo delate.
+
+        Es una firma y no una fecha porque una firma detecta el cambio en los
+        dos sentidos y sin margen: si alguien vuelve a una resolución anterior,
+        o si un corte SALE de la ventana, un `>` sobre timestamps no lo vería.
+
+        El default es la resolución de la que depende la identidad. Un destino
+        que no dependa de una tabla de identidad --Gold lee el `clee` de los
+        propios hechos-- firma con lo que a él lo invalida.
+
+        Args:
+            conn: conexión de lectura.
+
+        Returns:
+            str: la firma; se guarda en el COMMENT de la tabla de trabajo.
+        """
+        resuelta = conn.execute(
+            text(f"SELECT max(resuelto_en) FROM {self.origen_schema}.{self.identidad}")
+        ).scalar()
+        return f"resuelto_en={resuelta.isoformat() if resuelta else 'vacia'}"
+
+    def obsoleto(self, conn: Connection, construido_en: datetime) -> bool:
+        """Si la tabla YA construida corresponde a un origen que cambió después.
+
+        La máquina solo lo pregunta cuando hay una construcción exitosa
+        previa; `construido_en` es cuándo terminó, según `meta`.
+
+        Es distinto de `huella_origen` a propósito: ahí se protege un estado a
+        medio construir, aquí se decide si hay que rehacer una tabla completa
+        y servible. Un destino puede querer criterios distintos para las dos
+        cosas, y de hecho Gold los quiere.
+
+        Args:
+            conn: conexión de lectura.
+            construido_en: cuándo terminó la última construcción exitosa.
+
+        Returns:
+            bool: True si hay que reconstruir desde cero.
+        """
+        resuelta = conn.execute(
+            text(f"SELECT max(resuelto_en) FROM {self.origen_schema}.{self.identidad}")
+        ).scalar()
+        return resuelta is not None and resuelta > construido_en
+
     @property
     def pista_vacio(self) -> str:
         """Qué correr si la tabla de trabajo quedó vacía, en una línea.
@@ -458,64 +508,42 @@ def _obs_existe(conn: Connection, ag: Agregado) -> bool:
     )
 
 
+_PREFIJO_HUELLA = "huella="
+"""Qué se guarda en el COMMENT de la tabla de trabajo, y cómo se reconoce."""
+
+
 def _marcar_obs(conn: Connection, ag: Agregado) -> None:
-    """Deja fechada la tabla de trabajo, para validar reanudaciones.
+    """Firma la tabla de trabajo con el origen del que salió.
 
     La marca va en el COMMENT de la tabla y no en una columna: una columna
-    de fecha serían 8 bytes por cada una de las 82.9M filas para guardar un
-    solo dato, y el comentario se va solo cuando la tabla se borra.
+    serían bytes por cada una de las 82.9M filas para guardar un solo dato, y
+    el comentario se va solo cuando la tabla se borra.
     """
-    conn.execute(
-        text(
-            f"COMMENT ON TABLE {ag.obs_schema}.{ag.obs} IS "
-            f"'armado_en={datetime.now(UTC).isoformat()}'"
-        )
-    )
+    huella = ag.huella_origen(conn).replace("'", "''")
+    conn.execute(text(f"COMMENT ON TABLE {ag.obs_schema}.{ag.obs} IS '{_PREFIJO_HUELLA}{huella}'"))
 
 
-def identidad_resuelta_en(conn: Connection, ag: Agregado) -> datetime | None:
-    """Cuándo se resolvió por última vez la identidad de la que depende.
+def _reanudable(conn: Connection, ag: Agregado) -> bool:
+    """Si el avance de la tabla de trabajo salió del mismo origen que hay hoy.
 
-    `resuelto_en` es la columna que la resolución CLEE escribe justamente
-    para poder fechar un resultado, y es el insumo de los dos chequeos de
-    frescura: el de la tabla de trabajo a medio llenar y el de la tabla ya
-    construida.
+    Sin esto, una reanudación con el origen cambiado dejaría una tabla que
+    mezcla dos orígenes sin que nada lo delate: los bloques escritos de uno y
+    los pendientes de otro. Las identidades `NEW_*` ni siquiera son estables
+    entre corridas, así que la misma fila puede aparecer con dos distintas.
 
-    Returns:
-        datetime | None: el instante más reciente, o None si la tabla de
-        identidad está vacía.
-    """
-    return conn.execute(
-        text(f"SELECT max(resuelto_en) FROM {ag.origen_schema}.{ag.identidad}")
-    ).scalar()
-
-
-def _identidad_mas_nueva_que_obs(conn: Connection, ag: Agregado) -> bool:
-    """Si la resolución CLEE se re-corrió después de armar la tabla de trabajo.
-
-    Reanudar en ese caso sería **incorrecto**, no solo inútil: los bloques
-    ya escritos vendrían de una resolución y los pendientes de otra, y la
-    tabla final mezclaría dos conjuntos de identidades sin que nada lo
-    delate. Las `NEW_*` ni siquiera son estables entre corridas, así que la
-    misma fila puede aparecer con dos identidades distintas.
-
-    El reloj de este lado es el `COMMENT` que dejó `_marcar_obs` y no
-    `meta.process_tasks`: lo que hay que fechar es la tabla de trabajo, un
-    estado a medio construir que puede sobrevivir a varias corridas y que
-    muere cuando ella se borra. Lo que `meta` fecha es la tabla terminada.
+    El reloj de este lado es el `COMMENT` que dejó `_marcar_obs` y no `meta`:
+    lo que hay que firmar es la tabla de trabajo, un estado a medio construir
+    que puede sobrevivir a varias corridas y que muere cuando ella se borra.
+    Lo que `meta` fecha es la tabla terminada.
     """
     marca = conn.execute(
         text(f"SELECT obj_description('{ag.obs_schema}.{ag.obs}'::regclass, 'pg_class')")
     ).scalar()
-    if not marca or not marca.startswith("armado_en="):
-        # Sin marca no se puede afirmar que la identidad siga siendo la
-        # misma, y el riesgo de mezclarlas no se corre a la ligera.
-        return True
-
-    resuelta = identidad_resuelta_en(conn, ag)
-    return resuelta is not None and resuelta > datetime.fromisoformat(
-        marca.removeprefix("armado_en=")
-    )
+    if not marca or not marca.startswith(_PREFIJO_HUELLA):
+        # Sin firma no se puede afirmar que el origen siga siendo el mismo, y
+        # el riesgo de mezclar dos no se corre a la ligera.
+        return False
+    return marca.removeprefix(_PREFIJO_HUELLA) == ag.huella_origen(conn)
 
 
 def _cortes_pendientes(
@@ -635,11 +663,11 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
         if rehacer:
             conn.execute(text(f"DROP TABLE IF EXISTS {ag.obs_schema}.{ag.obs}"))
             conn.execute(text(f"TRUNCATE {ag.schema}.{ag.tabla}"))
-        elif _obs_existe(conn, ag) and _identidad_mas_nueva_que_obs(conn, ag):
+        elif _obs_existe(conn, ag) and not _reanudable(conn, ag):
             raise RuntimeError(
-                f"{ag.origen_schema}.{ag.identidad} se re-resolvio despues de armar "
-                f"{ag.obs_schema}.{ag.obs}: reanudar mezclaria identidades de dos "
-                f"corridas. Corre con --force."
+                f"el origen de {ag.obs_schema}.{ag.obs} cambio desde que se armo "
+                f"(huella esperada: {ag.huella_origen(conn)}): reanudar mezclaria dos "
+                f"origenes en la misma tabla. Corre con --force."
             )
 
         nueva = not _obs_existe(conn, ag)
@@ -778,17 +806,15 @@ def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: boo
     try:
         with engine.connect() as conn:
             construida_en = _ultimo_exito(tracker, ag.nombre)
-            resuelta_en = identidad_resuelta_en(conn, ag)
-            desactualizada = (
-                construida_en is not None
-                and resuelta_en is not None
-                and resuelta_en > construida_en
-            )
+            desactualizada = construida_en is not None and ag.obsoleto(conn, construida_en)
+            # Se lee aqui, con la conexion abierta, y no en el log de abajo:
+            # abrir una conexion dentro de un f-string la dejaria sin cerrar.
+            huella = ag.huella_origen(conn) if desactualizada else ""
             if construida_en is not None and not desactualizada and not force:
                 total = filas(conn, ag.tabla, ag.schema)
                 if total > 0:
                     log.info(
-                        f"   ✨ {ag.tabla}: ya construida con la identidad vigente "
+                        f"   ✨ {ag.tabla}: ya construida con el origen vigente "
                         f"({total:,} identidades). Nada que hacer; --force la rehace."
                     )
                     _cerrar(tracker, run_id, task_id, TaskStatus.SKIPPED, rows_loaded=total)
@@ -805,8 +831,8 @@ def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: boo
             log.info(f"   {ag.nombre}: --force, se descarta el avance previo")
         elif desactualizada:
             log.info(
-                f"   {ag.nombre}: {ag.origen_schema}.{ag.identidad} se re-resolvio despues "
-                f"de construir {ag.tabla}; se reconstruye desde cero"
+                f"   {ag.nombre}: el origen cambio despues de construir {ag.tabla} "
+                f"(huella vigente: {huella}); se reconstruye desde cero"
             )
 
         total, observaciones = _llenar(engine, ag, bloques, rehacer=force or desactualizada)
