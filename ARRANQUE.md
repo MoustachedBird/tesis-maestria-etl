@@ -169,6 +169,32 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
 "SELECT COUNT(*) FROM silver.sesnsp_incidencia_municipal"
 ```
 
+## 6.5. Rellenar `h3_cell_7` (antes de la resolución por celda)
+
+`b0008` agregó la columna y el ingest la calcula desde entonces, pero los
+cortes que ya estaban cargados la traen en NULL. Va **antes** de
+`clee-celda-h3-7`, que la usa *como* criterio: con la columna vacía esa
+resolución no falla — corre sobre nada y produce una tabla vacía.
+
+```bash
+cd ~/tesis-maestria-etl
+nohup caffeinate -dims docker compose run --rm etl \
+  transform --only h3-cell-7 > h3_7.log 2>&1 &
+sleep 10
+tail -f h3_7.log
+```
+
+Idempotente y reanudable: solo toca filas en NULL, así que volver a correrlo
+cuesta un conteo. **No acepta `--force`** (el padre de una celda no cambia).
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT count(*) AS sin_padre FROM silver.establecimientos
+ WHERE h3_cell_9 IS NOT NULL AND h3_cell_7 IS NULL"
+```
+
+Tiene que dar **0** antes de seguir.
+
 ## 7. Resolución CLEE
 
 Es la etapa más larga: ~1 noche por método. Escribe `silver.clee_<metodo>`,
@@ -264,6 +290,76 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
 Si una segunda corrida sale en `SKIPPED` es correcto: la tabla ya está
 construida con la identidad vigente. Si la resolución CLEE se re-corrió
 después, reconstruye sola.
+
+## 10. Gold: la cohorte con CLEE oficial (2021+)
+
+La capa de consumo: una fila por negocio de los cortes en que INEGI publica
+el CLEE (9 cortes, 2021-05 → 2026-05). **No depende de la resolución CLEE**
+—lee el `clee` de los propios hechos— así que se puede correr sin haber
+terminado las propagaciones.
+
+```bash
+cd ~/tesis-maestria-etl
+nohup caffeinate -dims docker compose run --rm etl \
+  transform --only gold > gold.log 2>&1 &
+sleep 10
+tail -f gold.log
+```
+
+Lo primero que hace es **medir la ventana** (un recorrido de los 82.9M
+contando `clee` por corte), y la deja en el log y en `meta`. Esperado:
+
+```
+✔ ventana oficial: 9 cortes (2021-05-01 .. 2026-05-01)
+```
+
+Si da otro número, algo cambió en los datos y **todas las tasas de la tesis
+cambian con él**: hay que entenderlo antes de seguir.
+
+Al terminar corre siete invariantes; si alguno falla, la corrida queda
+`FAILED` en `meta` con el detalle y **la tabla se deja como está** para poder
+mirar las filas que lo violan.
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT count(*) AS negocios,
+        count(*) FILTER (WHERE cluster_sospechoso) AS sospechosos,
+        count(*) FILTER (WHERE nombre IS NULL)     AS sin_nombre,
+        count(*) FILTER (WHERE codigo_act IS NULL AND tiene_actividad) AS scian_cruza_rama,
+        count(*) FILTER (WHERE cortes_tras_ultimo = 0) AS presentes_al_final
+ FROM gold.negocios_clee_oficial"
+```
+
+El canónico y sus alternativas, para un negocio cualquiera:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT campo, valor, n_cortes, primer_periodo, ultimo_periodo, es_canonico
+ FROM gold.negocios_clee_oficial_variantes
+ WHERE clee = (SELECT clee FROM gold.negocios_clee_oficial
+               WHERE n_nombres > 1 AND NOT cluster_sospechoso LIMIT 1)
+ ORDER BY campo, n_cortes DESC"
+```
+
+Búsqueda difusa, que es para lo que existe el índice trigram — "¿qué negocio
+es *tacos paco*?":
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT clee, valor, round(similarity(valor, 'TACOS PACO')::numeric, 3) AS sim
+ FROM gold.negocios_clee_oficial_variantes
+ WHERE campo = 'nom_estab' AND valor % 'TACOS PACO'
+ ORDER BY sim DESC LIMIT 10"
+```
+
+Con qué ventana se construyó cada corrida, sin abrir un log:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT start_time, status, config->>'n_cortes_oficiales' AS cortes,
+        config->'ventana_cortes' AS ventana
+ FROM meta.job_runs WHERE job_type = 'GOLD' ORDER BY start_time DESC LIMIT 5"
+```
 
 ## Comandos sueltos
 

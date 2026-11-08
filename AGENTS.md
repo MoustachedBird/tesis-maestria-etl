@@ -304,7 +304,7 @@ Defined in `clee_resolution_config.py` with full docstrings:
 
 ## CLEE Resolution Step (Entity Resolution)
 
-El bloque DENUE de `transform` tiene cinco secciones en orden: **ingest -> clee-radio -> clee-h3 -> permanencia-radio -> permanencia-h3**. Esta seccion documenta la resolucion de identidad en detalle.
+El bloque DENUE de `transform` tiene ocho secciones en orden: **ingest -> h3-cell-7 -> clee-radio -> clee-h3 -> clee-celda-h3-7 -> permanencia-radio -> permanencia-h3 -> gold**. Esta seccion documenta la resolucion de identidad en detalle.
 
 ### Purpose
 
@@ -889,9 +889,11 @@ docker compose run --rm etl transform --only permanencia --force    # rehace
 
 Si la **resolución CLEE se re-corrió** desde que se armó la tabla de
 trabajo, reanudar mezclaría identidades de dos corridas (las `NEW_*` no son
-estables), así que se niega y pide `--force`. Lo detecta comparando
-`max(resuelto_en)` de `clee_<metodo>` contra la marca que deja en el
-`COMMENT` de la tabla de trabajo.
+estables), así que se niega y pide `--force`. Lo detecta comparando la
+**firma** del origen —`resuelto_en=<max>` de `clee_<metodo>`— contra la que
+dejó en el `COMMENT` de la tabla de trabajo. Es una firma y no una fecha
+porque el cambio importa en los dos sentidos: volver a una resolución
+anterior también invalida el avance, y un `>` sobre timestamps no lo vería.
 
 ### Registro en `meta` y decisión de reconstruir
 
@@ -966,6 +968,140 @@ Log del stage: `data/etl_permanencia.log`. **Los tests escriben en ese mismo
 archivo** (el logger se construye a nivel de módulo con ruta fija), así que
 las líneas de 4 cortes / 7 establecimientos son de `pytest`, no de una
 corrida real.
+
+---
+
+## N4: `h3-cell-7` — rellenar la columna en los cortes viejos
+
+`b0008` agregó `establecimientos.h3_cell_7` y el ingest la calcula desde
+entonces, pero **los cortes cargados antes la traen en NULL**. Importa porque
+`clee-celda-h3-7` la usa *como* criterio: con la columna vacía no falla —
+corre sobre nada y produce una tabla vacía, que es peor que un error.
+
+```bash
+docker compose run --rm etl transform --only h3-cell-7
+```
+
+**Se deriva como padre de `h3_cell_9`, nunca del punto**, igual que
+`enrich.add_h3_cells`. En los bordes, el padre de la celda res 9 y la celda
+res 7 del mismo punto pueden diferir; si el relleno usara el punto, las filas
+viejas y las nuevas quedarían con criterios incompatibles y el blocking
+perdería matches sin que nada lo delatara.
+
+No es un `UPDATE` sobre los 82.9M: va corte por corte y **mapea celdas, no
+filas**. De los ~4M de observaciones de un corte salen muchas menos celdas
+distintas (los establecimientos se apiñan), los padres se calculan en Python
+—9.2M celdas/s, o sea gratis— y el servidor hace un `UPDATE ... FROM` contra
+un mapa temporal, acotado a una partición.
+
+**No tiene `--force`, a propósito.** Solo toca filas con `h3_cell_7 IS NULL`
+y el padre de una celda no cambia, así que reescribir todo daría los mismos
+valores a cambio de un rewrite completo por MVCC. Por lo mismo es idempotente
+y reanudable sin registro aparte: un corte está hecho cuando no le quedan
+filas pendientes. Al terminar valida que no quede ninguna; si quedan, falla.
+
+En `meta`: una corrida (`job_type = BACKFILL`) y **una tarea por corte**.
+Log del stage: `data/etl_h3_7.log`.
+
+---
+
+## N5: Gold — `gold.negocios_clee_oficial` (la cohorte 2021+)
+
+La capa de consumo, y el único lugar del proyecto donde **se materializan
+valores** en vez de agregados. El alcance está en `gold_cohorte_2021.md` y
+las reglas por campo en `normalizacion_gold.md` §§4-6.
+
+```bash
+docker compose run --rm etl transform --only gold            # reanuda
+docker compose run --rm etl transform --only gold --force    # rehace
+```
+
+### El grano cambia dos veces, y por eso los nombres no se parecen
+
+```
+silver.establecimientos        82,896,807   una OBSERVACION (negocio, corte)
+silver.permanencia_<metodo>        ~15.6M   un negocio, ventana de 20 cortes
+gold.negocios_clee_oficial            (?)   un negocio de la cohorte OFICIAL
+```
+
+No se llama `gold.establecimientos`: con nombres distintos, confundir la N de
+82.9M observaciones con la de los negocios deja de ser posible.
+
+### La cohorte: solo los cortes en que INEGI publica el CLEE
+
+Un corte es *oficial* si ≥99.9% de sus observaciones traen `clee` no vacío
+(`GOLD_COBERTURA_CLEE_MINIMA`). **El loader lo mide al arrancar**, no lo
+supone, y la ventana queda en el log y en `meta.job_runs.config`. Medido el
+2026-11-08: **9 cortes (2021-05 → 2026-05), 51.5M de 82.9M observaciones**,
+frente a 11 cortes al 0%.
+
+**Gold no lee ninguna `silver.clee_<metodo>`.** La identidad es el `clee` de
+los propios hechos, que es lo que "oficial" significa — así que no hay `NEW_*`
+que consolidar ni error de propagación que arrastrar, y por eso `metodo_base`
+dice `inegi` y no `radio`.
+
+De ahí que su **reloj de frescura sea la ventana** y no `max(resuelto_en)`: lo
+que invalida esta tabla es que un corte entre o salga de la lista de
+oficiales. Lo detecta comparando la ventana vigente contra la que quedó
+grabada en `ventana_cortes`, y reconstruye solo.
+
+### No copia `permanencia`, y no es una optimización perdida
+
+`permanencia` agrega sobre los **20** cortes, y una fila suya mezcla los dos
+regímenes: un negocio visto en 2019 (identidad propagada) y en 2021 (oficial)
+comparte `clee_resuelto`. Filtrar por `cortes_directo > 0` daría la cohorte
+correcta con **la ventana contaminada**. Y los `idx` se renumeran dentro de la
+ventana oficial: heredar los de la secuencia de 20 rompería
+`presente_desde_el_inicio` y `duracion_periodos` **sin un solo error
+visible**.
+
+### Las reglas que producen los valores canónicos
+
+| Campo | Regla |
+|---|---|
+| `nombre` | La **moda**, desempatada por el más reciente (baseline 1 de §6.4). Un LLM solo lo reemplaza si *gana* en una muestra etiquetada |
+| `codigo_act` | Ancestro común por prefijo (la jerarquía **es** el código: sector=2, subsector=3, rama=4). Si cruza rama, **NULL** |
+| Bloque de ubicación | **TODO del mismo corte de referencia.** Armarlo por partes —CP de 2017, colonia de 2019, punto de 2024— produce un domicilio que nunca existió |
+| `telefono`/`correoelec`/`www` | El más reciente **no vacío** de cada uno, por separado: ahí no se describe un lugar, se acumula una vía de verificación |
+| `razon_social` | La más reciente no vacía. Dato legal: no se promedia |
+| Tamaño y tipo | Del corte de referencia |
+
+**Dos cosas se niega a afirmar.** Un cluster con más nombres que cortes
+—imposible para un cluster correcto, porque un establecimiento aparece a lo
+más una vez por corte— queda **sin nombre canónico** y marcado en
+`cluster_sospechoso`; sus variantes siguen ahí, que es el mejor diagnóstico de
+una fusión indebida que existe. Y un SCIAN que cruza rama queda **NULL**: ahí
+hay que juzgar, y un valor inventado es peor que la ausencia (`tiene_actividad`
+lo distingue de "nunca tuvo").
+
+### La tabla de variantes es la evidencia, y no puede discrepar
+
+`gold.negocios_clee_oficial_variantes` guarda una fila por `(negocio, campo,
+valor)` con su ventana, su conteo y `es_canonico`. `es_canonico` se decide
+**comparando contra la fila ya escrita**, no recalculando la regla: así, por
+construcción, la hija no puede afirmar un canónico que la madre no publicó. El
+índice único parcial `(clee, campo) WHERE es_canonico` lo vuelve estructural.
+
+Las dos tablas las escribe el **mismo bloque** y por tanto la misma
+transacción: o quedan las dos o ninguna. Y al rehacer se truncan juntas,
+porque PostgreSQL rechaza truncar una tabla referenciada por una FK sola.
+
+### Invariantes que fallan la corrida
+
+Siete chequeos de `gold_cohorte_2021.md` §5.1 corren con la tabla ya escrita y
+**antes** de que `meta` la declare exitosa: ninguna identidad `NEW_*`,
+`cortes_observados` dentro de la ventana, ninguna fila con otra
+`ventana_cortes`, `presente_desde_el_inicio` coherente, ninguna variante
+huérfana, a lo más un canónico por `(negocio, campo)`, y el nombre publicado
+marcado canónico en las variantes.
+
+Se reportan **todas** y no la primera: con una sola, cada arreglo cuesta otra
+corrida de horas para descubrir la siguiente. **La tabla se deja como está** —
+lo que hace falta cuando un invariante falla es mirar las filas que lo violan,
+y la corrida ya quedó `FAILED` en `meta` con las violaciones en
+`error_message`.
+
+Log del stage: `data/etl_gold.log`.
 
 ---
 
@@ -1120,12 +1256,14 @@ etl-core/
 │   ├── transformers/
 │   │   ├── denue.py               # Orquestador de las secciones DENUE
 │   │   ├── processor.py           # Ingest: ZIP -> particion de silver.establecimientos
-│   │   ├── enrich.py              # fecha_alta_date + h3_cell_9/5, antes del COPY
+│   │   ├── enrich.py              # fecha_alta_date + h3_cell_9/7/5, antes del COPY
 │   │   ├── catalogs.py            # Resolucion de FKs a catalogo (fail-fast)
 │   │   ├── clee_resolver.py       # CLEEResolver: identidad a traves del tiempo
 │   │   └── sesnsp.py              # CSV ancho -> largo + catalogo de delitos
 │   ├── loaders/
-│   │   ├── permanencia.py         # silver.permanencia_<metodo> (troceada, reanudable)
+│   │   ├── permanencia.py         # silver.permanencia_<metodo> (SQL; la forma la pone troceado.py)
+│   │   ├── gold_cohorte_oficial.py # gold.negocios_clee_oficial + variantes (cohorte 2021+)
+│   │   ├── relleno_h3_7.py        # Rellena establecimientos.h3_cell_7 en cortes pre-b0008
 │   │   ├── seeds.py               # Orquestador de la siembra
 │   │   ├── geography.py           # entidades / municipios / localidades
 │   │   ├── scian.py               # Actividades economicas
@@ -1133,6 +1271,7 @@ etl-core/
 │   │   ├── dominios.py            # vialidad / asentamiento / unidad economica
 │   │   └── sesnsp.py              # Catalogo de delitos (append-only)
 │   └── utils/
+│       ├── troceado.py            # Agregado troceado/reanudable: la FORMA que Silver y Gold comparten
 │       ├── browser.py             # Chrome driver para Selenium
 │       ├── denue_schema.py        # Mapeo de columnas, enums, alias de dominio
 │       ├── denue_scraping.py      # Scraping de la tabla de INEGI
@@ -1290,8 +1429,11 @@ cómo arranca **sin** pasar nada.
 | | `--ingest/--no-ingest` | ON | CSVs crudos → Silver |
 | | `--clee-resolution-radio/--no-…` | ON | Propagación radio/BallTree |
 | | `--clee-resolution-h3/--no-…` | ON | Propagación H3 (track de comparación) |
+| | `--clee-resolution-celda-h3-7/--no-…` | ON | Propagación donde la celda res 7 **es** el criterio |
+| | `--h3-cell-7/--no-h3-cell-7` | ON | Rellena `h3_cell_7` en cortes pre-`b0008`; **ignora `--force`** |
 | | `--permanencia-radio/--no-…` | ON | `silver.permanencia_radio` |
 | | `--permanencia-h3/--no-…` | ON | `silver.permanencia_h3` |
+| | `--gold/--no-gold` | ON | `gold.negocios_clee_oficial` + variantes |
 | | `--sesnsp/--no-sesnsp` | ON | Transform SESNSP |
 | | `--period MM_YYYY` (repetible) | — | Carga SOLO esos cortes (solo afecta al ingest) |
 | | `--only <token>` (repetible) | — | Allowlist (gana sobre los `--no-*`) |
@@ -1321,9 +1463,9 @@ targets tipo `extract-sesnsp` / `clee-resolution-radio`: **todo se hace con
 el comando global + flags**.
 
 - `docker compose run --rm etl extract` → DENUE **+** SESNSP (Bronze).
-- `docker compose run --rm etl transform` → DENUE (`ingest → clee-radio →
-  clee-h3 → permanencia-radio → permanencia-h3`) **+** SESNSP, todo en una
-  sola corrida.
+- `docker compose run --rm etl transform` → DENUE (`ingest → h3-cell-7 →
+  clee-radio → clee-h3 → clee-celda-h3-7 → permanencia-radio →
+  permanencia-h3 → gold`) **+** SESNSP, todo en una sola corrida.
 - `docker compose run --rm etl pipeline` → el transform global (agrega
   `--extract` para incluir la descarga; va OFF por default porque re-scrapea
   INEGI).
@@ -1342,10 +1484,13 @@ Hay **dos modos** para elegir secciones:
 | ingest de CSVs a Silver | `--no-ingest` | `ingest` |
 | propagación CLEE radio/BallTree | `--no-clee-resolution-radio` | `clee-radio` |
 | propagación CLEE H3 (comparación) | `--no-clee-resolution-h3` | `clee-h3` |
-| ambas propagaciones CLEE | — | `clee` (grupo) |
+| propagación por celda res 7 | `--no-clee-resolution-celda-h3-7` | `clee-celda-h3-7` |
+| las tres propagaciones CLEE | — | `clee` (grupo) |
+| relleno de `h3_cell_7` | `--no-h3-cell-7` | `h3-cell-7` |
 | permanencia radio | `--no-permanencia-radio` | `permanencia-radio` |
 | permanencia H3 | `--no-permanencia-h3` | `permanencia-h3` |
 | ambas permanencias | — | `permanencia` (grupo) |
+| cohorte Gold (CLEE oficial) | `--no-gold` | `gold` |
 | transform SESNSP | `--no-sesnsp` | `sesnsp` |
 
 Qué tokens acepta cada comando: `transform` y `pipeline` los atómicos DENUE
@@ -1370,6 +1515,12 @@ nohup docker compose run --rm etl transform --only clee-radio > clee.log 2>&1 &
 
 # Solo la permanencia (va DESPUES de la resolucion, lee clee_<metodo>):
 nohup docker compose run --rm etl transform --only permanencia > permanencia.log 2>&1 &
+
+# Rellenar h3_cell_7 antes de poder correr clee-celda-h3-7:
+nohup docker compose run --rm etl transform --only h3-cell-7 > h3_7.log 2>&1 &
+
+# Solo Gold (NO depende de la resolucion CLEE: lee el `clee` de los hechos):
+nohup docker compose run --rm etl transform --only gold > gold.log 2>&1 &
 ```
 
 **Combinaciones frecuentes** (fin a fin):
@@ -1418,7 +1569,10 @@ avance y rehaz". Tabla canónica:
 | `ingest` | Reconstruye **los 20 cortes**: cada uno se re-lee de sus ZIP, se carga en staging y reemplaza su partición | ~27.5h. No vacía la tabla de golpe: cada partición se reemplaza entera y Silver nunca se ve a medias. Los `id` son hash del contenido, así que re-ingestar los MISMOS ZIP los reproduce idénticos y `clee_<metodo>` sigue cuadrando; lo que sí la deja huérfana es un corte re-descargado con correcciones (esas filas cambian de `id`) |
 | `clee-radio` | Reconstruye `silver.clee_radio` (+ limpia su KB cache) | ~1 noche; no toca `clee_h3` ni los hechos |
 | `clee-h3` | Idem para `silver.clee_h3` | ~1 noche; no toca `clee_radio` |
+| `clee-celda-h3-7` | Idem para `silver.clee_celda_h3_7` | ~1 noche; **exige `h3_cell_7` poblada** o corre sobre nada |
+| `h3-cell-7` | **Nada: lo ignora.** Solo toca filas en NULL y el padre de una celda no cambia, así que reescribir los 82.9M daría los mismos valores a cambio de un rewrite completo por MVCC | — |
 | `permanencia-radio` / `-h3` | Descarta el avance y reconstruye `silver.permanencia_<metodo>` | Horas. Rara vez necesario: si la identidad cambió, la etapa lo detecta y rehace sola |
+| `gold` | Trunca las **dos** tablas de `gold` y reconstruye | Horas. Rara vez necesario: si la ventana oficial cambió, la etapa lo detecta y rehace sola. No toca Silver ni `meta` |
 | `sesnsp` | Re-procesa el CSV consolidado | Minutos |
 
 **Regla práctica**: un `--force` global (`transform --force`) arrastra al
