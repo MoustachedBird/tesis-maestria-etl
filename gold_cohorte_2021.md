@@ -23,9 +23,10 @@ necesidad de un consenso entre métodos.
 | El agente adjudicador | Sin desacuerdo no hay triángulos inconsistentes que arbitrar |
 | `clee_prob`, `clee_ml`, `clee_nombre`, `clee_llm` (A, B, C, E) | Dejan de ser prerrequisito. Ver §7 |
 
-| Cuesta | Magnitud |
+| Cuesta | Magnitud (medido el 2026-11-08) |
 |---|---|
-| La ventana de observación | De ~11 años a ~5. `duracion_periodos` pierde la mitad de su rango |
+| La ventana de observación | **9 cortes sobre 5 años** (2021-05 → 2026-05), de 20 cortes sobre 11 años |
+| Las observaciones que quedan fuera | 31.4M de 82.9M. **La cohorte conserva el 62%** |
 | Los negocios que nacieron y murieron antes de 2021 | Invisibles por construcción |
 | La generalidad de la afirmación | Es una cohorte, no el universo. Ver §3 |
 
@@ -71,6 +72,31 @@ arrancar y la **registra en el log y en `meta`**: si un día entran o salen
 cortes, queda constancia de con qué ventana se construyó esa versión de la
 tabla.
 
+#### Medido el 2026-11-08: la ventana son 9 cortes
+
+```
+ period     |   obs   | pct_clee        period     |   obs   | pct_clee
+ 2015-01-01 | 2683667 |   0.000         2021-05-01 | 5515863 | 100.000
+ 2016-01-01 | 2736201 |   0.000         2021-11-01 | 5529201 | 100.000
+ 2016-10-01 | 2734953 |   0.000         2022-05-01 | 5528695 | 100.000
+ 2017-03-01 | 2726730 |   0.000         2022-11-01 | 5530924 | 100.000
+ 2017-11-01 | 2729456 |   0.000         2023-11-01 | 5541077 | 100.000
+ 2018-03-01 | 2731413 |   0.000         2024-05-01 | 5564607 | 100.000
+ 2018-11-01 | 2736090 |   0.000         2024-11-01 | 6058534 | 100.000
+ 2019-04-01 | 2763135 |   0.000         2025-05-01 | 6097668 | 100.000
+ 2019-11-01 | 3143215 |   0.000         2026-05-01 | 6138074 | 100.000
+ 2020-04-01 | 3183180 |   0.000
+ 2020-11-01 | 3224124 |   0.000         9 cortes, 51,504,643 obs (62%)
+```
+
+La cobertura es **exactamente 0% o exactamente 100%**, sin cortes parciales.
+El criterio de `>= 99.9%` no tiene que decidir nada hoy, y por eso mismo se
+queda: es la guarda para el día en que un corte salga a medias.
+
+**Falta el corte 2023-05**, así que los intervalos van 6, 6, 6, **12**, 6,
+6, 6, **12** meses. Irregulares — que es por lo que el tiempo se mide en
+`periodos` y no en días (`AGENTS.md` §N3).
+
 ### 1.2 Un matiz que importa: dos definiciones conviven en el repo
 
 | Dónde | Criterio | Consecuencia |
@@ -105,7 +131,33 @@ Lo que queda fuera, y por qué está bien:
 
 ---
 
-## 3. El sesgo de supervivencia es de encuadre, y hay que escribirlo
+## 3. Dos discontinuidades, y la segunda es la que importa
+
+### 3.0 En 2021 la cobertura de DENUE casi se duplica
+
+| Corte | Observaciones |
+|---|---|
+| 2020-11 (último sin CLEE) | 3,224,124 |
+| **2021-05** (primero con CLEE) | **5,515,863** |
+
+**+71% en un solo corte, seis meses.** No es crecimiento económico: es un
+cambio de metodología de INEGI, 2.3M de establecimientos que aparecen de
+golpe. Tiene tres consecuencias:
+
+1. **Refuerza la decisión de restringir a 2021+.** Los cortes pre-2021 no
+   solo carecen de CLEE: cubren un universo **distinto y más chico**.
+   Mezclarlos nunca fue solo un problema de identidad inferida.
+2. **Es un caveat serio para la extensión de robustez (§7).** Comparar la
+   ventana completa contra la oficial confundiría el cambio de cobertura con
+   la dinámica de supervivencia: todo lo que "nace" en 2021-05 sería un
+   artefacto. Si esa extensión se construye, 2021-05 se trata como una
+   **discontinuidad**, no como un corte más.
+3. **`presente_desde_el_inicio` no significa "ya existía"** para esos 2.3M:
+   significa "INEGI empezó a verlo". El modelo no puede confundir las dos
+   cosas, y de ahí que `fecha_alta_date` sea la covariable de antigüedad y
+   no el primer corte observado.
+
+### 3.1 El sesgo de supervivencia es de encuadre, y hay que escribirlo
 
 Restringir a 2021+ hace que la cohorte sea "establecimientos que llegaron
 vivos a 2021". Eso **no** es un defecto del dato, pero sí acota lo que se
@@ -251,17 +303,44 @@ posible: **el nombre canónico es campo de presentación, no covariable**
 columna tiene que decirlo). Si el modelo se equivoca, se equivoca en la
 legibilidad de un reporte, no en un resultado.
 
-El alcance se mide antes de escribir nada:
+### 6.1 Medido el 2026-11-08: el lote real son ~393 mil, no 2.7 millones
 
-```sql
-SELECT n_nombres, count(*) AS negocios
-FROM silver.permanencia_radio
-WHERE cortes_directo > 0 AND NOT es_sintetica
-GROUP BY 1 ORDER BY 1;
+Sobre los 20 cortes (la cota superior; en la ventana oficial será menor):
+
+```
+n_nombres = 1   ->  12,967,459   82.9%    nada que decidir
+n_nombres = 0   ->       2,184             nunca publico nombre
+n_nombres >= 2  ->   2,674,280   17.1%
 ```
 
-Los de `n_nombres = 1` **no necesitan LLM**: ya hay un solo nombre. El
-trabajo es la cola de `n_nombres >= 2`, y hay que verla antes de dimensionar.
+Pero la distribución está muy sesgada, y eso **reduce el alcance del LLM**:
+
+| | Negocios | ¿Necesita LLM? |
+|---|---:|---|
+| `n = 2` | 1,748,685 (65% de los multi-nombre) | **No.** Gana el que apareció en más cortes; si empatan, el más reciente. El baseline lo resuelve |
+| `n = 3` | 532,194 (20%) | Marginal. La moda sigue decidiendo |
+| `n >= 4` | **393,401** | **Sí.** Aquí hay un juicio real |
+
+~393 mil decisiones son unas 2 horas a 8 llamadas concurrentes, no 14.
+
+### 6.2 `n_nombres > 20` no se canonicaliza: se marca
+
+Un establecimiento aparece **una vez por corte** y hay 20 cortes, así que
+`n_nombres > 20` es **imposible** para un cluster correcto: significa que la
+identidad agrupó más de un establecimiento en el mismo corte.
+
+Medido: **~1,245 negocios con `n_nombres >= 21`**, con casos de 345, 150 y
+123 nombres distintos. Esos no son negocios que cambiaron de nombre 345
+veces; son fusiones indebidas de la resolución.
+
+Confirma por una vía independiente la métrica de "colisiones intra-periodo"
+de `clee_propagation_stats.py`, y da una regla dura: **esos clusters no van
+al LLM.** Pedirle un nombre canónico para algo que no es un negocio produce
+una respuesta convincente y sin sentido. Se marcan con una bandera y se
+reportan como límite de la resolución.
+
+El umbral exacto se recalcula sobre la ventana oficial: ahí son 9 cortes, así
+que el imposible es `n_nombres > 9`.
 
 Y sigue en pie la condición de `normalizacion_gold.md` §6.4: el LLM se
 adopta **solo si vence** a los dos baselines deterministas (moda desempatada
