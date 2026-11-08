@@ -6,7 +6,7 @@ tocar código, igual que `crear_agentes.md`.
 **Qué entrega:** las reglas con que una fila de `gold.negocios_clee_oficial`
 —un negocio, su ventana de vida y sus atributos canónicos— se construye a
 partir de `silver.permanencia_<metodo>`, `silver.clee_<metodo>` y los
-hechos; la tabla `gold.variantes_negocio` con los alias de cada negocio (§6); y el
+hechos; la tabla `gold.negocios_clee_oficial_variantes` con los alias de cada negocio (§6); y el
 diseño de un reconciliador LLM que adjudica **solo** donde los métodos
 radio y H3 no coinciden.
 
@@ -28,7 +28,7 @@ No se re-litiga aquí; se cita.
 
 | Decisión | Dónde |
 |---|---|
-| `gold.negocios_clee_oficial` = una fila por **negocio** (~10.45M) frente a 82.9M observaciones en `silver`. Mismo nombre, grano distinto, con tres salvaguardas contra confundir la N | `arquitectura.md` §2.3.1 |
+| `gold.negocios_clee_oficial` = una fila por **negocio** frente a 82,896,807 observaciones en `silver`. El nombre lleva el grano y la cohorte, justo para que confundir las dos N no sea posible | `arquitectura.md` §2.3.1 (revertido el 2026-11-07) |
 | `silver.permanencia_<m>` no guarda el valor de ningún corte: agregados de trayectoria + banderas `tiene_*`, y el valor sale del join | `AGENTS.md` §N3, migración `b0007` |
 | El contrato de todo agente (`Decision`, `Evidencia`, `meta.agent_decisions` como caché/auditoría/reproducibilidad) y la estructura `src/agents/` | `crear_agentes.md` §9 |
 | La regla de cierre es **preliminar** y se aplica en la consulta, no en el esquema de Silver | `AGENTS.md` §N3 |
@@ -321,8 +321,8 @@ El **corte de referencia** es el último en que se observó al negocio (el que
 | Campo en `gold` | Regla | Por qué | ¿LLM? |
 |---|---|---|---|
 | `clee` | La identidad del método base; si hubo reconciliación, la del cluster ganador | Es la llave del negocio | — |
-| `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.variantes_negocio` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
-| `razon_social` | La más reciente no vacía; las anteriores a `gold.variantes_negocio` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
+| `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.negocios_clee_oficial_variantes` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
+| `razon_social` | La más reciente no vacía; las anteriores a `gold.negocios_clee_oficial_variantes` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
 | `codigo_act` | **Ancestro común más específico** en la jerarquía SCIAN; si eso cae por encima de `rama`, el LLM elige | `denue_actividades_economicas` ya trae `sector`/`subsector`/`rama`: dos actividades de la misma rama tienen una respuesta determinista y correcta. El LLM solo hace falta cuando la discrepancia cruza ramas, que es justo cuando hay que juzgar | Solo si cruza rama |
 | `per_ocu`, `categoria_tamano`, `empleados_min/max` | Del corte de referencia | Pedido explícito: el último dato. Es el tamaño con que el negocio terminó, que es lo que el protocolo mide | — |
 | `fecha_alta` | `MIN` sobre todos los cortes | Pedido explícito. Ya está en `permanencia.fecha_alta_date` | — |
@@ -390,7 +390,7 @@ concretas:
 
 ```sql
 -- SOLO la cohorte con CLEE oficial. Ver 6.0.1.
-CREATE TABLE gold.variantes_negocio (
+CREATE TABLE gold.negocios_clee_oficial_variantes (
     clee            text    NOT NULL,  -- FK logica a gold.negocios_clee_oficial.clee
     campo           text    NOT NULL,  -- nom_estab | raz_social | codigo_act
                                        -- | telefono | correoelec | www
@@ -403,15 +403,16 @@ CREATE TABLE gold.variantes_negocio (
 );
 
 -- Busqueda difusa: "que negocio es 'tacos paco'?"
-CREATE INDEX ix_variantes_valor ON gold.variantes_negocio USING gin (valor gin_trgm_ops);
+CREATE INDEX ix_negocios_clee_oficial_variantes_valor
+    ON gold.negocios_clee_oficial_variantes USING gin (valor gin_trgm_ops);
 
 -- A lo mas UN canonico por (negocio, campo). Lo hace estructural en vez de
 -- convencion: con dos canonicos la tabla madre seria indefendible y aqui el
 -- INSERT falla.
-CREATE UNIQUE INDEX ux_variantes_canonico
-    ON gold.variantes_negocio (clee, campo) WHERE es_canonico;
+CREATE UNIQUE INDEX ux_negocios_clee_oficial_variantes_canonico
+    ON gold.negocios_clee_oficial_variantes (clee, campo) WHERE es_canonico;
 
-COMMENT ON TABLE gold.variantes_negocio IS
+COMMENT ON TABLE gold.negocios_clee_oficial_variantes IS
   'Variantes de los negocios con CLEE OFICIAL de INEGI. No contiene '
   'identidades propagadas ni sinteticas NEW_*; esas irian en una tabla '
   'aparte (ver normalizacion_gold.md 6.0.1)';
@@ -456,8 +457,8 @@ completa (`gold_cohorte_2021.md` §7), sus variantes van en **otra tabla**,
 no en esta con una columna `cohorte`:
 
 ```
-gold.negocios_clee_oficial     ←→  gold.variantes_negocio
-gold.negocios_clee_propagado   ←→  gold.variantes_negocio_propagado
+gold.negocios_clee_oficial     ←→  gold.negocios_clee_oficial_variantes
+gold.negocios_clee_propagado   ←→  gold.negocios_clee_propagado_variantes
 ```
 
 El motivo es el mismo que ya decidió el proyecto para `clee_radio` /
@@ -475,7 +476,7 @@ Dos detalles que refuerzan la separación:
   cohorte propagada sí llevaría `clee_resuelto`, y esa diferencia de nombre
   es documentación: si ves `clee_resuelto`, estás en terreno inferido.
 - **Invariantes que fallan la construcción** (no avisos):
-  - Todo `clee` de `variantes_negocio` existe en `negocios_clee_oficial`.
+  - Todo `clee` de la tabla de variantes existe en `negocios_clee_oficial`.
   - Ningún `clee` empieza con `NEW_`. Es redundante por construcción —la
     fase 2 es la única que crea sintéticos— y justamente por eso es la
     aserción que atrapa un error de alcance futuro.
@@ -500,7 +501,7 @@ capa citable, con índice.
 
 ### 6.1 Qué campos entran y cuáles no
 
-> **Una variante entra a `gold.variantes_negocio` si es la evidencia de una decisión
+> **Una variante entra a `gold.negocios_clee_oficial_variantes` si es la evidencia de una decisión
 > que Gold tomó, o el insumo de un consumidor que trabaja negocio por
 > negocio. Lo demás se queda en el join.**
 
@@ -517,7 +518,7 @@ capa citable, con índice.
 
 ### 6.2 El tamaño se mide, no se estima
 
-El número de filas de `gold.variantes_negocio` para los nombres es exactamente
+El número de filas de `gold.negocios_clee_oficial_variantes` para los nombres es exactamente
 `SUM(n_nombres)` sobre la tabla de permanencia, que ya está calculado:
 
 ```sql
@@ -672,7 +673,7 @@ descubrirlo a las 14 horas.
    canónicos por las reglas de §4 y §5, invariantes de §9.1. Sin una línea
    de LLM. **Entregable usable por sí solo**: con esto la tesis ya tiene su
    unidad de análisis.
-   2b. **`gold.variantes_negocio`** (§6) en la misma pasada: sale del mismo
+   2b. **`gold.negocios_clee_oficial_variantes`** (§6) en la misma pasada: sale del mismo
    `GROUP BY` que los canónicos, y es lo que hace auditable el paso 2.
 3. **Reportar la N** y la distribución de `origen_identidad` (va a ser
    `ACUERDO` casi todo si §1 sale bajo).

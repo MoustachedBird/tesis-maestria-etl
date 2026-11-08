@@ -21,7 +21,7 @@ Lo que vendrá aquí:
   oficiales. No se copia de `silver.permanencia_<metodo>`: esa tabla agrega
   sobre los 20 cortes y una fila suya mezcla identidad observada con
   identidad propagada (`gold_cohorte_2021.md` §4).
-- `VarianteNegocio` → `gold.variantes_negocio`. Una fila por
+- `NegocioCleeOficialVariante` → `gold.negocios_clee_oficial_variantes`. Una fila por
   `(negocio, campo, valor)`: todos los valores distintos que tuvo en
   `nom_estab`, `raz_social`, `codigo_act`, `telefono`, `correoelec` y `www`,
   con `primer_periodo`/`ultimo_periodo`/`n_cortes` —la ventana en que usó
@@ -36,7 +36,7 @@ Lo que vendrá aquí:
 
   **Acotada a la misma cohorte**: sin identidades propagadas ni sintéticas
   `NEW_*`. La extensión de robustez tendría las suyas en
-  `gold.variantes_negocio_propagado`, porque aquí se aplica la misma regla
+  `gold.negocios_clee_propagado_variantes`, porque aquí se aplica la misma regla
   que a `clee_radio`/`clee_h3`: una tabla por régimen, nunca una columna
   discriminadora.
 - Los agregados del análisis: panel negocio×periodo e incidencia municipal

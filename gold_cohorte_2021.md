@@ -199,10 +199,10 @@ Lo que sí se agrega, propio de Gold (`normalizacion_gold.md` §8):
 | `version_reglas` | Versión del conjunto de reglas de §5 |
 | `construida_en` | Fecha de construcción |
 
-Y `gold.variantes_negocio` para los alias, con su índice trigram
+Y `gold.negocios_clee_oficial_variantes` para los alias, con su índice trigram
 (`normalizacion_gold.md` §6). **También acotada a esta cohorte**: no
 contiene identidades propagadas ni sintéticas, y si algún día existe la
-extensión de robustez sus variantes van en `gold.variantes_negocio_propagado`
+extensión de robustez sus variantes van en `gold.negocios_clee_propagado_variantes`
 — una tabla por régimen, nunca una columna `cohorte`, por el mismo motivo
 que `clee_radio`/`clee_h3` son dos tablas (§5.2).
 
@@ -215,7 +215,7 @@ que `clee_radio`/`clee_h3` son dos tablas (§5.2).
 - Ninguna observación `(id, period)` contribuye a dos filas.
 - `cortes_observados <= len(ventana_cortes)`.
 - `idx_primer = 0` ⟺ el negocio aparece en el primer corte oficial.
-- Todo `clee` de `gold.variantes_negocio` existe en esta tabla.
+- Todo `clee` de `gold.negocios_clee_oficial_variantes` existe en esta tabla.
 - Cada `(clee, campo)` de variantes tiene **exactamente una** fila con
   `es_canonico`, y su `valor` coincide con el que esta tabla publicó. Es lo
   que hace verificable la canonicalización sin re-derivarla.
@@ -226,8 +226,8 @@ La identidad **observada** y la **inferida** no se mezclan en la misma
 tabla. Si se construye la extensión de robustez (§7), va en tablas propias:
 
 ```
-gold.negocios_clee_oficial     ←→  gold.variantes_negocio
-gold.negocios_clee_propagado   ←→  gold.variantes_negocio_propagado
+gold.negocios_clee_oficial     ←→  gold.negocios_clee_oficial_variantes
+gold.negocios_clee_propagado   ←→  gold.negocios_clee_propagado_variantes
 ```
 
 Es el criterio que el proyecto ya aplicó a `clee_radio`/`clee_h3` y a
@@ -296,7 +296,7 @@ un resultado — dice cuánto del hallazgo depende del matching.
    la distribución de `n_nombres` (§6).
 3. **Parametrizar el agregado** por lista de cortes y destino (§4.1), con la
    renumeración de `idx` y sus tests.
-4. **`gold.negocios_clee_oficial` determinista** + `gold.variantes_negocio`, con los
+4. **`gold.negocios_clee_oficial` determinista** + `gold.negocios_clee_oficial_variantes`, con los
    invariantes de §5.1. **Entregable usable: la tesis ya tiene su unidad de
    análisis.**
 5. **Reportar la N** y la distribución de `duracion_periodos`.
