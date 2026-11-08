@@ -259,3 +259,82 @@ class TestLoQueQuedaEnMeta:
         from src.etl.loaders.permanencia import Permanencia
 
         json.dumps(Permanencia("radio").contexto_meta(conn=None))
+
+
+@pytest.mark.unit
+class TestRellenoH3Cell7:
+    """`h3-cell-7` tiene que correr ANTES de la resolucion que la usa."""
+
+    def test_es_una_seccion_atomica(self):
+        from src.shared.enums import DENUE_ATOMIC, Section
+
+        assert Section.h3_cell_7 in DENUE_ATOMIC
+
+    def test_va_antes_de_clee_celda_h3_7(self):
+        """`clee-celda-h3-7` usa la columna como criterio.
+
+        Con la columna en NULL la resolucion no falla: corre sobre nada y
+        produce una tabla vacia, que es peor que un error.
+        """
+        from src.shared.enums import DENUE_ATOMIC, Section
+
+        assert DENUE_ATOMIC.index(Section.h3_cell_7) < DENUE_ATOMIC.index(Section.clee_celda_h3_7)
+
+    def test_va_despues_del_ingest(self):
+        """Rellena lo que el ingest acaba de escribir."""
+        from src.shared.enums import DENUE_ATOMIC, Section
+
+        assert DENUE_ATOMIC.index(Section.ingest) < DENUE_ATOMIC.index(Section.h3_cell_7)
+
+    def test_pedirla_sola_no_arrastra_el_ingest(self):
+        from src.etl.main import _expand_only
+        from src.shared.enums import Section
+
+        assert _expand_only([Section.h3_cell_7]) == {Section.h3_cell_7}
+
+    def test_el_relleno_no_acepta_force(self):
+        """Solo toca filas en NULL y el padre de una celda no cambia.
+
+        Un `force` que reescribiera los 82.9M daria los mismos valores a
+        cambio de un rewrite completo por MVCC.
+        """
+        import inspect
+
+        from src.etl.loaders.relleno_h3_7 import rellenar_h3_cell_7
+
+        assert "force" not in inspect.signature(rellenar_h3_cell_7).parameters
+
+
+@pytest.mark.unit
+class TestElPadreNoSeCalculaDelPunto:
+    """La regla que mantiene consistente la jerarquia H3."""
+
+    def test_el_relleno_da_lo_mismo_que_el_ingest(self):
+        """Si difirieran, las filas viejas y nuevas tendrian criterios distintos.
+
+        En los bordes, el padre de la celda res 9 y la celda res 7 del mismo
+        punto pueden diferir, asi que esto no es una tautologia: es la
+        aserción de que el relleno usa el PADRE y no el punto.
+        """
+        import h3
+
+        from src.etl.loaders.relleno_h3_7 import _padres
+
+        # Un punto cualquiera de Guadalajara, por el camino del ingest.
+        celda9 = h3.latlng_to_cell(20.6736, -103.344, 9)
+        esperado = h3.str_to_int(h3.cell_to_parent(celda9, 7))
+
+        mapa = _padres([h3.str_to_int(celda9)])
+        assert mapa["h3_cell_7"][0] == esperado
+
+    def test_varias_celdas_res_9_comparten_padre(self):
+        """Es lo que vuelve barato mapear celdas en vez de filas."""
+        import h3
+
+        from src.etl.loaders.relleno_h3_7 import _padres
+
+        centro = h3.latlng_to_cell(20.6736, -103.344, 9)
+        vecinas = [h3.str_to_int(c) for c in h3.grid_disk(centro, 1)]
+        mapa = _padres(vecinas)
+        assert mapa.height == len(vecinas)
+        assert mapa["h3_cell_7"].n_unique() < len(vecinas)

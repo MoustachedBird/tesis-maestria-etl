@@ -21,6 +21,7 @@ class Section(StrEnum):
     """
 
     ingest = "ingest"
+    h3_cell_7 = "h3-cell-7"
     clee_radio = "clee-radio"
     clee_h3 = "clee-h3"
     clee_celda_h3_7 = "clee-celda-h3-7"
@@ -35,6 +36,7 @@ class Section(StrEnum):
 
 DENUE_ATOMIC: tuple[Section, ...] = (
     Section.ingest,
+    Section.h3_cell_7,
     Section.clee_radio,
     Section.clee_h3,
     Section.clee_celda_h3_7,
@@ -51,6 +53,11 @@ poder aislar una sin la otra.
 sobre lo que el ingest acaba de escribir. No es un grupo porque hoy es una
 sola tabla madre con su evidencia; si se construye la cohorte propagada
 (`gold_cohorte_2021.md` §7) ahí sí habría que partirla en dos tokens.
+
+``h3-cell-7`` va justo después del ingest y antes de las resoluciones, porque
+``clee-celda-h3-7`` usa esa columna como criterio y no puede correr con ella
+en NULL. Es idempotente y, una vez completa, cuesta un conteo: dejarla en el
+orden normal no le pesa a nadie.
 """
 
 SECTION_GROUPS: dict[Section, tuple[Section, ...]] = {

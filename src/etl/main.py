@@ -78,6 +78,7 @@ def _run_sesnsp_extract(*, force: bool) -> int:
 def _run_denue_transform(
     *,
     ingest: bool,
+    h3_cell_7: bool,
     clee_resolution_radio: bool,
     clee_resolution_h3: bool,
     clee_resolution_celda_h3_7: bool,
@@ -96,6 +97,10 @@ def _run_denue_transform(
     if ingest:
         console.print("[bold blue]   Running: ingest[/bold blue]")
         success = transformer.run_transform_stage(force=force, periods=periods)
+    # Antes de las resoluciones: `clee-celda-h3-7` usa h3_cell_7 como criterio
+    # y los cortes cargados antes de b0008 la traen en NULL.
+    if h3_cell_7 and success:
+        success = _run_h3_cell_7()
     # Un solo despacho para todos los metodos: agregar uno es una entrada
     # en `CLEEResolver.METHODS` mas su flag, sin un `if` nuevo aqui.
     metodos_clee = [
@@ -160,6 +165,31 @@ def _run_permanencia(*, metodos: list[str], force: bool = False) -> bool:
         total += construir_permanencia(engine, metodo, tracker, force=force)
     console.print(f"   {total:,} fila(s) de permanencia en {len(metodos)} metodo(s)")
     return total > 0
+
+
+def _run_h3_cell_7() -> bool:
+    """Rellena `silver.establecimientos.h3_cell_7` donde este en NULL.
+
+    `b0008` agrego la columna y el ingest la calcula desde entonces, pero los
+    cortes cargados antes la traen vacia -- y `clee-celda-h3-7` la usa como
+    criterio, asi que correria sobre nada.
+
+    No lleva `force`: solo toca filas en NULL y el padre de una celda no
+    cambia, asi que reescribir las 82.9M daria los mismos valores a cambio de
+    un rewrite completo por MVCC. Cuando la columna ya esta completa, esto
+    cuesta un conteo.
+
+    Returns:
+        bool: True si termino sin filas pendientes.
+    """
+    from src.etl.loaders.relleno_h3_7 import rellenar_h3_cell_7
+    from src.meta.tracker import MetadataTracker
+    from src.shared.db.session import get_engine
+
+    console.print("[bold magenta]   Running: h3-cell-7 (padre res 7 de h3_cell_9)[/bold magenta]")
+    escritas = rellenar_h3_cell_7(get_engine(), MetadataTracker())
+    console.print(f"   {escritas:,} fila(s) con h3_cell_7 nuevo")
+    return True
 
 
 def _run_gold(*, force: bool = False) -> bool:
@@ -332,6 +362,11 @@ def transform(
         "--clee-resolution-celda-h3-7/--no-clee-resolution-celda-h3-7",
         help="Run CLEE resolution (la celda h3_cell_7 ES el criterio -> silver.clee_celda_h3_7)",
     ),
+    h3_cell_7: bool = typer.Option(
+        True,
+        "--h3-cell-7/--no-h3-cell-7",
+        help="Rellena establecimientos.h3_cell_7 en los cortes cargados antes de b0008",
+    ),
     permanencia_radio: bool = typer.Option(
         True,
         "--permanencia-radio/--no-permanencia-radio",
@@ -356,8 +391,8 @@ def transform(
         None,
         "--only",
         help=(
-            "Run ONLY these sections (repeatable): ingest, clee-radio, clee-h3, "
-            "clee-celda-h3-7, permanencia-radio, permanencia-h3, gold, sesnsp "
+            "Run ONLY these sections (repeatable): ingest, h3-cell-7, clee-radio, "
+            "clee-h3, clee-celda-h3-7, permanencia-radio, permanencia-h3, gold, sesnsp "
             "(+ groups denue, clee, permanencia). Overrides --no-* defaults."
         ),
     ),
@@ -379,7 +414,7 @@ def transform(
     allowlist with --only (e.g. --only clee-radio --only sesnsp); nothing needs
     to be passed for the full run.
 
-    DENUE sub-steps (ordered): ingest -> clee-resolution-radio ->
+    DENUE sub-steps (ordered): ingest -> h3-cell-7 -> clee-resolution-radio ->
     clee-resolution-h3 -> clee-resolution-celda-h3-7 -> permanencia -> gold,
     each gated by its flag (--no-denue skips the whole DENUE block). El ingest
     deriva la fecha y las celdas H3 en vuelo, asi que no hay pasos sueltos para
@@ -390,6 +425,7 @@ def transform(
     selected = _expand_only(only)
     if selected is not None:
         ingest = Section.ingest in selected
+        h3_cell_7 = Section.h3_cell_7 in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
         clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
@@ -400,6 +436,7 @@ def transform(
         denue = any(
             (
                 ingest,
+                h3_cell_7,
                 clee_resolution_radio,
                 clee_resolution_h3,
                 clee_resolution_celda_h3_7,
@@ -420,6 +457,7 @@ def transform(
             overall_ok = (
                 _run_denue_transform(
                     ingest=ingest,
+                    h3_cell_7=h3_cell_7,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
                     clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,
@@ -479,6 +517,11 @@ def pipeline(
         "--clee-resolution-celda-h3-7/--no-clee-resolution-celda-h3-7",
         help="Run CLEE resolution (la celda h3_cell_7 ES el criterio -> silver.clee_celda_h3_7)",
     ),
+    h3_cell_7: bool = typer.Option(
+        True,
+        "--h3-cell-7/--no-h3-cell-7",
+        help="Rellena establecimientos.h3_cell_7 en los cortes cargados antes de b0008",
+    ),
     permanencia_radio: bool = typer.Option(
         True,
         "--permanencia-radio/--no-permanencia-radio",
@@ -518,6 +561,7 @@ def pipeline(
     selected = _expand_only(only)
     if selected is not None:
         ingest = Section.ingest in selected
+        h3_cell_7 = Section.h3_cell_7 in selected
         clee_resolution_radio = Section.clee_radio in selected
         clee_resolution_h3 = Section.clee_h3 in selected
         clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
@@ -528,6 +572,7 @@ def pipeline(
         denue = any(
             (
                 ingest,
+                h3_cell_7,
                 clee_resolution_radio,
                 clee_resolution_h3,
                 clee_resolution_celda_h3_7,
@@ -559,6 +604,7 @@ def pipeline(
             overall_ok = (
                 _run_denue_transform(
                     ingest=ingest,
+                    h3_cell_7=h3_cell_7,
                     clee_resolution_radio=clee_resolution_radio,
                     clee_resolution_h3=clee_resolution_h3,
                     clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,

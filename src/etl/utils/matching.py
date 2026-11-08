@@ -345,39 +345,39 @@ def _haversine_expr(lat_a: str, lon_a: str, lat_b: str, lon_b: str) -> pl.Expr:
 def find_cell_neighbors(ref_df: pl.DataFrame, target_df: pl.DataFrame, radius_meters: float):
     """Genera candidatos por IGUALDAD de celda H3: la celda es el criterio.
 
-    Es el generador del metodo `celda_h3_7` (tabla `silver.clee_celda_h3_7`), y la
-    diferencia con `find_h3_neighbors` es de fondo y no de implementacion:
+        Es el generador del metodo `celda_h3_7` (tabla `silver.clee_celda_h3_7`), y la
+        diferencia con `find_h3_neighbors` es de fondo y no de implementacion:
 
-        find_h3_neighbors   la celda ACELERA la busqueda; el criterio sigue
-                            siendo el circulo de SPATIAL_RADIUS_M, que se
-                            aplica como post-filtro exacto
-        find_cell_neighbors la celda ES el criterio; no hay post-filtro
+            find_h3_neighbors   la celda ACELERA la busqueda; el criterio sigue
+                                siendo el circulo de SPATIAL_RADIUS_M, que se
+                                aplica como post-filtro exacto
+            find_cell_neighbors la celda ES el criterio; no hay post-filtro
 
-    **`radius_meters` se ignora a proposito.** Se acepta para respetar la
-    interfaz de los generadores (`_propagate_single_kb` la invoca igual para
-    todos), pero este metodo no tiene radio: su tolerancia la fija
-    `CELL_MATCH_RES` y varia entre 0 y ~2.9 km segun donde caiga el negocio
-    en la reticula (ver el docstring de esa constante).
+        **`radius_meters` se ignora a proposito.** Se acepta para respetar la
+        interfaz de los generadores (`_propagate_single_kb` la invoca igual para
+        todos), pero este metodo no tiene radio: su tolerancia la fija
+        `CELL_MATCH_RES` y varia entre 0 y ~2.9 km segun donde caiga el negocio
+        en la reticula (ver el docstring de esa constante).
 
-La celda la trae **precalculada** la columna `h3_cell_7`, derivada en el
-    ingest como padre de `h3_cell_9` y nunca del punto: ~6.5% de los puntos
-    cerca de fronteras caen en una celda gruesa que no es la ancestra de su
-    celda res 9, y lo que el metodo necesita es que la jerarquia sea
-    consistente. Aqui no se llama a h3: es un equi-join por entero.
+    La celda la trae **precalculada** la columna `h3_cell_7`, derivada en el
+        ingest como padre de `h3_cell_9` y nunca del punto: ~6.5% de los puntos
+        cerca de fronteras caen en una celda gruesa que no es la ancestra de su
+        celda res 9, y lo que el metodo necesita es que la jerarquia sea
+        consistente. Aqui no se llama a h3: es un equi-join por entero.
 
-    La distancia SI se calcula, aunque no filtre: `_best_candidate` resuelve
-    los empates de score por cercania y para eso necesita los vecinos
-    ordenados. Sin el orden, un empate se resolveria por el orden del join.
+        La distancia SI se calcula, aunque no filtre: `_best_candidate` resuelve
+        los empates de score por cercania y para eso necesita los vecinos
+        ordenados. Sin el orden, un empate se resolveria por el orden del join.
 
-    Args:
-        ref_df: KB de referencia; requiere `h3_cell_7`, `latitud`, `longitud`.
-        target_df: filas a resolver; mismas columnas.
-        radius_meters: ignorado (ver arriba).
+        Args:
+            ref_df: KB de referencia; requiere `h3_cell_7`, `latitud`, `longitud`.
+            target_df: filas a resolver; mismas columnas.
+            radius_meters: ignorado (ver arriba).
 
-    Returns:
-        (indices, distances) -- np.ndarray(object) de longitud
-        target_df.height, mismo formato que los otros generadores: por fila,
-        los indices posicionales de KB ordenados por cercania.
+        Returns:
+            (indices, distances) -- np.ndarray(object) de longitud
+            target_df.height, mismo formato que los otros generadores: por fila,
+            los indices posicionales de KB ordenados por cercania.
     """
     from src.etl.utils.clee_resolution_config import H3_TARGET_CHUNK_ROWS
 

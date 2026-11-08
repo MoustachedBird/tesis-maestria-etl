@@ -416,6 +416,7 @@ class TestLaSeccionDelCLI:
 
         main._run_denue_transform(
             ingest=False,
+            h3_cell_7=False,
             clee_resolution_radio=False,
             clee_resolution_h3=False,
             clee_resolution_celda_h3_7=False,
@@ -436,6 +437,7 @@ class TestLaSeccionDelCLI:
 
         ok = main._run_denue_transform(
             ingest=False,
+            h3_cell_7=False,
             clee_resolution_radio=False,
             clee_resolution_h3=False,
             clee_resolution_celda_h3_7=False,

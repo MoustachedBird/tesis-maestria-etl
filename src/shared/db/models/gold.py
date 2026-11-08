@@ -357,7 +357,9 @@ class NegocioCleeOficial(Base):
             "mediana. Materializarlo es lo que hace verificable la coherencia"
         ),
     )
-    cve_ent: Mapped[str | None] = mapped_column(String(2), comment="Entidad; llave del cruce SESNSP")
+    cve_ent: Mapped[str | None] = mapped_column(
+        String(2), comment="Entidad; llave del cruce SESNSP"
+    )
     cve_mun: Mapped[str | None] = mapped_column(
         String(3), comment="Municipio; llave del cruce con incidencia delictiva"
     )
