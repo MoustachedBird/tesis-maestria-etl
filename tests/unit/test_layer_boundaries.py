@@ -74,3 +74,28 @@ def test_los_paquetes_declarados_cubren_src():
     en_disco = {f"src.{d.name}" for d in SRC.iterdir() if d.is_dir() and not d.name.startswith("_")}
     sin_declarar = en_disco - set(PROHIBIDOS)
     assert not sin_declarar, f"paquetes sin fronteras declaradas: {sorted(sin_declarar)}"
+
+
+@pytest.mark.unit
+def test_la_maquinaria_de_troceo_no_conoce_ningun_destino():
+    """`etl/utils/troceado.py` no puede importar un loader ni un modelo de destino.
+
+    Es la frontera que vuelve verdadero el reparto: la maquina pone la forma
+    --trocear, reanudar, latido, registro en `meta`-- y cada destino pone su
+    SQL. Permanencia escribe en Silver y la cohorte oficial en Gold, y ninguna
+    de las dos sabe de la otra: las dos dependen de esto, esto no depende de
+    ninguna.
+
+    Un import de `src.etl.loaders` o de un modelo concreto seria la primera
+    grieta: a partir de ahi la maquina empieza a tener ramas por destino y el
+    reparto deja de ser cierto -- que es justo el momento en que conviene
+    partirla en dos archivos independientes en vez de agregarle banderas.
+    """
+    importados = _imports(SRC / "etl" / "utils" / "troceado.py")
+    especificos = {
+        i
+        for i in importados
+        if i.startswith(("src.etl.loaders", "src.etl.transformers", "src.etl.extractors"))
+        or i.startswith(("src.shared.db.models.gold", "src.shared.db.models.permanencia"))
+    }
+    assert not especificos, f"la maquinaria conoce destinos concretos: {sorted(especificos)}"

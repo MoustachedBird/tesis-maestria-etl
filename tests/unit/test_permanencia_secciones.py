@@ -144,9 +144,9 @@ class TestTroceo:
         Es la razon de ser de `UNLOGGED`: da lo que importaba de la
         temporal --no escribe WAL-- sin morir al commitear cada corte.
         """
-        from src.etl.loaders.permanencia import _sql_crear_obs
+        from src.etl.loaders.permanencia import Permanencia
 
-        ddl = _sql_crear_obs("radio")
+        ddl = Permanencia("radio").sql_crear_obs()
         assert "UNLOGGED" in ddl
         assert "CREATE TEMP" not in ddl
 
@@ -158,9 +158,9 @@ class TestTroceo:
         """
         from datetime import date
 
-        from src.etl.loaders.permanencia import _sql_llenar_obs
+        from src.etl.loaders.permanencia import Permanencia
 
-        sql = _sql_llenar_obs("radio", date(2019, 11, 1), 8, 32)
+        sql = Permanencia("radio").sql_llenar_obs(date(2019, 11, 1), 8, 32)
         assert "e.period = DATE '2019-11-01'" in sql
         assert "i.period = DATE '2019-11-01'" in sql
 
@@ -171,9 +171,9 @@ class TestTroceo:
         troceo no serviria de nada -- y los conteos saldrian del universo
         entero, no del bloque.
         """
-        from src.etl.loaders.permanencia import _pasos_bloque
+        from src.etl.loaders.permanencia import Permanencia
 
-        pasos = _pasos_bloque("radio", 7, 19)
+        pasos = Permanencia("radio").pasos_bloque(7, 19)
         for paso in pasos[:-1]:
             assert "WHERE bloque = 7" in paso.sql, paso.nombre
 
@@ -183,24 +183,24 @@ class TestTroceo:
         Trocear por año o por `cve_ent` no cumple esto: la identidad cruza
         los cortes, y los negocios se mudan de municipio.
         """
-        from src.etl.loaders.permanencia import _expr_bloque
+        from src.etl.utils.troceado import expr_bloque
 
-        expr = _expr_bloque("clee_resuelto", 32)
+        expr = expr_bloque("clee_resuelto", 32)
         assert "clee_resuelto" in expr
         assert "md5" in expr  # estable entre versiones, a diferencia de hashtext
         assert "% 32" in expr
 
     def test_las_temporales_mueren_con_la_transaccion_del_bloque(self):
         """`ON COMMIT DROP`: un bloque que falla no deja basura."""
-        from src.etl.loaders.permanencia import _pasos_bloque
+        from src.etl.loaders.permanencia import Permanencia
 
-        for paso in _pasos_bloque("radio", 0, 19)[:-1]:
+        for paso in Permanencia("radio").pasos_bloque(0, 19)[:-1]:
             assert "ON COMMIT DROP" in paso.sql, paso.nombre
 
     def test_el_ultimo_paso_escribe_la_tabla_destino(self):
-        from src.etl.loaders.permanencia import _pasos_bloque, tabla_destino
+        from src.etl.loaders.permanencia import Permanencia, tabla_destino
 
-        ultimo = _pasos_bloque("radio", 0, 19)[-1]
+        ultimo = Permanencia("radio").pasos_bloque(0, 19)[-1]
         assert ultimo.nombre == tabla_destino("radio")
         assert ultimo.sql.lstrip().startswith("INSERT INTO")
 
@@ -212,10 +212,10 @@ class TestTroceo:
         esto atrapa, y sin la comparacion solo se descubre veinte cortes y
         varias horas mas tarde, cuando corre el primer `INSERT`.
         """
-        from src.etl.loaders.permanencia import _pasos_bloque, tabla_destino
+        from src.etl.loaders.permanencia import Permanencia, tabla_destino
         from src.shared.db.base import get_table
 
-        sql = _pasos_bloque("radio", 0, 19)[-1].sql
+        sql = Permanencia("radio").pasos_bloque(0, 19)[-1].sql
         bloque = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
         escritas = {c.strip() for c in bloque.replace("\n", "").split(",") if c.strip()}
 
@@ -225,10 +225,11 @@ class TestTroceo:
         assert escritas == del_modelo - {"construida_en"}
 
     def test_el_origen_sale_del_enum_no_de_una_cadena_suelta(self):
-        from src.etl.loaders.permanencia import _pasos_bloque
+        from src.etl.loaders.permanencia import Permanencia
         from src.shared.enums import OrigenClee
 
-        ventana = next(p for p in _pasos_bloque("radio", 0, 19) if p.nombre == "ventana")
+        pasos = Permanencia("radio").pasos_bloque(0, 19)
+        ventana = next(p for p in pasos if p.nombre == "ventana")
         assert f"'{OrigenClee.DIRECTO.value}'" in ventana.sql
         assert f"'{OrigenClee.PROPAGADO.value}'" in ventana.sql
 
