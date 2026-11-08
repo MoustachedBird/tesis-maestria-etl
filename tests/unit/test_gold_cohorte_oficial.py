@@ -376,3 +376,169 @@ class TestLoQueQuedaEnMeta:
         produjo la corrida.
         """
         assert TABLA_VARIANTES in cohorte.tablas_destino
+
+
+@pytest.mark.unit
+class TestLaSeccionDelCLI:
+    """`--only gold` tiene que aislar Gold sin arrastrar las horas de Silver."""
+
+    def test_gold_es_una_seccion_atomica(self):
+        from src.shared.enums import DENUE_ATOMIC, Section
+
+        assert Section.gold in DENUE_ATOMIC
+
+    def test_pedir_gold_no_arrastra_el_ingest_ni_la_resolucion(self):
+        """Es la diferencia entre minutos y un dia de computo."""
+        from src.etl.main import _expand_only
+        from src.shared.enums import Section
+
+        assert _expand_only([Section.gold]) == {Section.gold}
+
+    def test_el_grupo_denue_la_incluye(self):
+        """`--only denue` construye todo DENUE, Gold incluido."""
+        from src.etl.main import _expand_only
+        from src.shared.enums import Section
+
+        assert Section.gold in _expand_only([Section.denue])
+
+    def test_gold_va_despues_de_permanencia(self, monkeypatch):
+        """Es la capa de consumo: se construye sobre lo que Silver ya escribio.
+
+        El orden no es por dependencia de datos --Gold no lee permanencia--
+        sino porque un fallo en Silver no debe dejar una Gold recien hecha
+        sobre hechos a medio cargar.
+        """
+        import src.etl.main as main
+
+        orden: list[str] = []
+        monkeypatch.setattr(main, "_run_permanencia", lambda **kw: orden.append("perm") or True)
+        monkeypatch.setattr(main, "_run_gold", lambda **kw: orden.append("gold") or True)
+
+        main._run_denue_transform(
+            ingest=False,
+            clee_resolution_radio=False,
+            clee_resolution_h3=False,
+            clee_resolution_celda_h3_7=False,
+            permanencia_radio=True,
+            permanencia_h3=False,
+            gold=True,
+            force=False,
+        )
+        assert orden == ["perm", "gold"]
+
+    def test_un_fallo_en_permanencia_no_construye_gold(self, monkeypatch):
+        """Gold sobre Silver a medias seria una tabla citable que miente."""
+        import src.etl.main as main
+
+        corrio_gold = []
+        monkeypatch.setattr(main, "_run_permanencia", lambda **kw: False)
+        monkeypatch.setattr(main, "_run_gold", lambda **kw: corrio_gold.append(1) or True)
+
+        ok = main._run_denue_transform(
+            ingest=False,
+            clee_resolution_radio=False,
+            clee_resolution_h3=False,
+            clee_resolution_celda_h3_7=False,
+            permanencia_radio=True,
+            permanencia_h3=False,
+            gold=True,
+            force=False,
+        )
+        assert not ok
+        assert corrio_gold == []
+
+    def test_force_llega_hasta_el_loader(self, monkeypatch):
+        import src.etl.main as main
+
+        vistos = []
+        monkeypatch.setattr(
+            "src.etl.loaders.gold_cohorte_oficial.construir_cohorte_oficial",
+            lambda engine, tracker, force=False: (vistos.append(force), 1)[1],
+        )
+        monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
+        monkeypatch.setattr("src.meta.tracker.MetadataTracker", lambda: "tracker")
+
+        main._run_gold(force=True)
+        assert vistos == [True]
+
+
+@pytest.mark.unit
+class TestLosInvariantes:
+    """§5.1: lo que, si no se cumple, debe FALLAR la corrida.
+
+    Aquí se revisa que los chequeos existan y qué miran; que detecten de
+    verdad se prueba contra PostgreSQL, porque es SQL.
+    """
+
+    def _consultas(self, cohorte, monkeypatch):
+        """Las consultas que `validar` corre, sin ejecutarlas.
+
+        Se intercepta `conn.execute` y se devuelve "0 violaciones" para cada
+        una, de modo que el método recorra su lista completa.
+        """
+        vistas: list[str] = []
+
+        class ConnFalsa:
+            def execute(self, sentencia, *a, **kw):
+                vistas.append(str(sentencia))
+
+                class R:
+                    def one(self_inner):
+                        return (0, None)
+
+                return R()
+
+        assert cohorte.validar(ConnFalsa()) == []
+        return vistas
+
+    def test_los_siete_chequeos_estan(self, cohorte, monkeypatch):
+        """Seis consultas; el septimo de §5.1 lo garantiza el esquema."""
+        consultas = self._consultas(cohorte, monkeypatch)
+        assert len(consultas) == 7
+
+    def test_rechaza_identidades_sinteticas(self, cohorte, monkeypatch):
+        """Redundante por construccion, y por eso atrapa un error de alcance.
+
+        Solo la fase 2 de propagación crea `NEW_*`; si una apareciera aquí
+        querría decir que alguien amplió la cohorte sin darse cuenta.
+        """
+        todo = " ".join(self._consultas(cohorte, monkeypatch))
+        assert "STARTS_WITH(clee, 'NEW_')" in todo
+        # Con LIKE, el `_` de NEW_ seria un comodin y el chequeo seria mas
+        # laxo de lo que dice ser.
+        assert "LIKE 'NEW" not in todo
+
+    def test_rechaza_una_ventana_que_no_es_la_de_la_corrida(self, cohorte, monkeypatch):
+        """Mezclar dos ventanas en la misma tabla hace incomparables sus filas."""
+        todo = " ".join(self._consultas(cohorte, monkeypatch))
+        assert "ventana_cortes <>" in todo
+
+    def test_rechaza_dos_canonicos_para_el_mismo_campo(self, cohorte, monkeypatch):
+        """El indice unico parcial ya lo impide; esto lo confirma sobre el dato."""
+        todo = " ".join(self._consultas(cohorte, monkeypatch))
+        assert "WHERE es_canonico" in todo
+        assert "HAVING count(*) > 1" in todo
+
+    def test_rechaza_un_nombre_sin_su_evidencia(self, cohorte, monkeypatch):
+        """Es lo que vuelve verificable la canonicalizacion sin re-derivarla."""
+        todo = " ".join(self._consultas(cohorte, monkeypatch))
+        assert "va.valor = n.nombre" in todo
+
+    def test_rechaza_variantes_huerfanas(self, cohorte, monkeypatch):
+        todo = " ".join(self._consultas(cohorte, monkeypatch))
+        assert "WHERE n.clee IS NULL" in todo
+
+    def test_reporta_todas_las_violaciones_no_la_primera(self, cohorte):
+        """Con una sola, cada arreglo cuesta otra corrida de horas."""
+
+        class ConnRota:
+            def execute(self, sentencia, *a, **kw):
+                class R:
+                    def one(self_inner):
+                        return (3, "14ABC0001")
+
+                return R()
+
+        violaciones = cohorte.validar(ConnRota())
+        assert len(violaciones) == 7
+        assert all("14ABC0001" in v for v in violaciones)

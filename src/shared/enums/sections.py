@@ -26,6 +26,7 @@ class Section(StrEnum):
     clee_celda_h3_7 = "clee-celda-h3-7"
     permanencia_radio = "permanencia-radio"
     permanencia_h3 = "permanencia-h3"
+    gold = "gold"
     sesnsp = "sesnsp"
     denue = "denue"  # group -> all DENUE sub-steps
     clee = "clee"  # group -> clee-radio + clee-h3 + clee-celda
@@ -39,11 +40,17 @@ DENUE_ATOMIC: tuple[Section, ...] = (
     Section.clee_celda_h3_7,
     Section.permanencia_radio,
     Section.permanencia_h3,
+    Section.gold,
 )
 """Secciones atómicas a las que se expande el alias de grupo ``denue``.
 
 Excluye ``sesnsp`` a propósito: son fuentes distintas y ``--only denue`` debe
 poder aislar una sin la otra.
+
+``gold`` sí entra, y va al final: es la cohorte de consumo y se construye
+sobre lo que el ingest acaba de escribir. No es un grupo porque hoy es una
+sola tabla madre con su evidencia; si se construye la cohorte propagada
+(`gold_cohorte_2021.md` §7) ahí sí habría que partirla en dos tokens.
 """
 
 SECTION_GROUPS: dict[Section, tuple[Section, ...]] = {

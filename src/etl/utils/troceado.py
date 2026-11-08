@@ -506,6 +506,26 @@ class Agregado(ABC):
         """
         return cortes_ordenados(conn, self.origen_schema)
 
+    def validar(self, conn: Connection) -> list[str]:
+        """Invariantes que, si no se cumplen, **fallan la corrida**.
+
+        Corre con la tabla ya construida y antes de que `meta` la declare
+        exitosa. Se devuelven las violaciones en vez de levantar excepción
+        para que se reporten TODAS de una vez: con la primera nada más, cada
+        arreglo cuesta otra corrida de horas para descubrir la siguiente.
+
+        No es lo mismo que un test. Un test revisa el código contra datos
+        inventados; esto revisa el RESULTADO contra los datos reales, que es
+        donde aparecen las violaciones que ningún test pudo anticipar.
+
+        Args:
+            conn: conexión de lectura, con el destino ya escrito.
+
+        Returns:
+            list[str]: una línea por violación; vacía si todo cuadra.
+        """
+        return []
+
     @abstractmethod
     def sql_crear_obs(self) -> str:
         """DDL de la tabla de trabajo: las columnas que el agregado necesita."""
@@ -791,6 +811,34 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
     return total, total_obs
 
 
+def _validar(engine: Engine, ag: Agregado) -> None:
+    """Corre los invariantes del destino y truena si alguno no se cumple.
+
+    **La tabla se queda como esta.** No se borra ni se trunca: lo que se
+    necesita cuando un invariante falla es poder mirar las filas que lo
+    violan, y la corrida ya quedo en `meta` como FAILED con las violaciones
+    en `error_message`. Borrarla seria destruir la evidencia del problema.
+
+    Raises:
+        RuntimeError: con todas las violaciones, no solo la primera.
+    """
+    ag.logger.info(f"   ▶ validando invariantes de {ag.schema}.{ag.tabla}...")
+    inicio = time.monotonic()
+    with engine.connect() as conn:
+        with latido(conn, "invariantes", ag.logger):
+            violaciones = ag.validar(conn)
+    segundos = time.monotonic() - inicio
+
+    if violaciones:
+        for v in violaciones:
+            ag.logger.error(f"   ✖ invariante roto: {v}")
+        raise RuntimeError(
+            f"{len(violaciones)} invariante(s) roto(s) en {ag.schema}.{ag.tabla}; "
+            f"la tabla se dejo como esta para poder inspeccionarla: " + " | ".join(violaciones)
+        )
+    ag.logger.info(f"   ✔ invariantes: todos se cumplen ({segundos:.1f}s)")
+
+
 def _registrar_hijas(
     engine: Engine,
     ag: Agregado,
@@ -918,6 +966,8 @@ def construir(engine: Engine, ag: Agregado, tracker: MetadataTracker, force: boo
             )
 
         total, observaciones = _llenar(engine, ag, bloques, rehacer=force or desactualizada)
+        if observaciones:
+            _validar(engine, ag)
     except Exception as e:
         _cerrar(tracker, run_id, task_id, TaskStatus.FAILED, error=str(e))
         raise

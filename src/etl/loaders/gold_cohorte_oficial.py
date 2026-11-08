@@ -249,6 +249,82 @@ class CohorteOficial(Agregado):
             "de DENUE (`pipeline`) o revisa GOLD_COBERTURA_CLEE_MINIMA."
         )
 
+    def validar(self, conn: Connection) -> list[str]:
+        """Los invariantes de `gold_cohorte_2021.md` §5.1, contra los datos reales.
+
+        Cada uno cubre una forma concreta de equivocarse en silencio, y
+        ninguno levantaría un error por su cuenta: una tabla con una
+        identidad sintética, o con dos canónicos para el mismo campo, se ve
+        perfectamente bien hasta que alguien la cita.
+
+        Uno de los siete de §5.1 **no se consulta**: "ninguna observación
+        `(id, period)` contribuye a dos filas" está garantizado por
+        construcción, porque `(id, period)` es la PK de
+        `silver.establecimientos` --así que cada observación tiene UN `clee`--
+        y el agregado es un `GROUP BY clee`. Una consulta ahí gastaría un
+        recorrido de 51.5M filas para confirmar algo que el esquema ya impide.
+
+        Args:
+            conn: conexión de lectura, con las dos tablas ya escritas.
+
+        Returns:
+            list[str]: una línea por violación, con el conteo y un ejemplo.
+        """
+        madre = f"{self.schema}.{self.tabla}"
+        hija = f"{self.schema}.{TABLA_VARIANTES}"
+        n_cortes = len(self.cortes(conn))
+        primer_corte = self.cortes(conn)[0]
+
+        chequeos: list[tuple[str, str]] = [
+            (
+                "hay identidades sinteticas NEW_* en una cohorte que solo admite CLEE de INEGI",
+                # STARTS_WITH y no LIKE: el `_` de `NEW_` es un comodin en LIKE.
+                f"SELECT count(*), min(clee) FROM {madre} WHERE STARTS_WITH(clee, 'NEW_')",
+            ),
+            (
+                f"hay negocios con mas cortes observados que los {n_cortes} de la ventana",
+                f"SELECT count(*), min(clee) FROM {madre} WHERE cortes_observados > {n_cortes}",
+            ),
+            (
+                "hay negocios cuya ventana_cortes no es la de esta corrida",
+                f"SELECT count(*), min(clee) FROM {madre} "
+                f"WHERE ventana_cortes <> {self._ventana_literal()}",
+            ),
+            (
+                f"`presente_desde_el_inicio` no coincide con aparecer en {primer_corte}",
+                f"SELECT count(*), min(clee) FROM {madre} "
+                f"WHERE presente_desde_el_inicio <> (primer_periodo = DATE "
+                f"'{primer_corte.isoformat()}')",
+            ),
+            (
+                "hay variantes cuyo negocio no esta en la tabla madre",
+                f"SELECT count(*), min(va.clee) FROM {hija} va "
+                f"LEFT JOIN {madre} n USING (clee) WHERE n.clee IS NULL",
+            ),
+            (
+                "hay (negocio, campo) con mas de un valor canonico",
+                f"SELECT count(*), min(clee) FROM ("
+                f"  SELECT clee, campo FROM {hija} WHERE es_canonico "
+                f"  GROUP BY clee, campo HAVING count(*) > 1"
+                f") d",
+            ),
+            (
+                "la tabla madre publico un nombre que no esta marcado canonico en las variantes",
+                f"SELECT count(*), min(n.clee) FROM {madre} n "
+                f"WHERE n.nombre IS NOT NULL AND NOT EXISTS ("
+                f"  SELECT 1 FROM {hija} va WHERE va.clee = n.clee "
+                f"  AND va.campo = 'nom_estab' AND va.es_canonico "
+                f"  AND va.valor = n.nombre)",
+            ),
+        ]
+
+        violaciones = []
+        for descripcion, sql in chequeos:
+            cuantos, ejemplo = conn.execute(text(sql)).one()
+            if cuantos:
+                violaciones.append(f"{descripcion}: {cuantos:,} filas (p. ej. {ejemplo})")
+        return violaciones
+
     # ----- las tres piezas que la maquina pide -----
 
     def sql_crear_obs(self) -> str:

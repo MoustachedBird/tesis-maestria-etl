@@ -429,9 +429,11 @@ class NegocioCleeOficial(Base):
         String(20),
         nullable=False,
         comment=(
-            "De que silver.clee_<metodo> salio la identidad. En esta cohorte los "
-            "tres metodos coinciden (fase 1 deterministica), asi que es "
-            "trazabilidad y no una eleccion"
+            "De donde salio la identidad. En esta cohorte es `inegi`: el `clee` "
+            "viene en los propios hechos, asi que NO se leyo ninguna "
+            "silver.clee_<metodo> y no hubo nada que resolver. La columna existe "
+            "para que la cohorte propagada, si se construye, pueda decir `radio` "
+            "o `h3` en el mismo lugar"
         ),
     )
     version_reglas: Mapped[str] = mapped_column(

@@ -83,10 +83,11 @@ def _run_denue_transform(
     clee_resolution_celda_h3_7: bool,
     permanencia_radio: bool,
     permanencia_h3: bool,
+    gold: bool,
     force: bool,
     periods: list[str] | None = None,
 ) -> bool:
-    """Run the enabled DENUE Bronze->Silver sub-steps in order; return True on success."""
+    """Run the enabled DENUE sub-steps in order; return True on success."""
     from src.etl.transformers.denue import DenuePipelineOrchestrator
 
     transformer = DenuePipelineOrchestrator(data_root=DATA_ROOT)
@@ -115,6 +116,11 @@ def _run_denue_transform(
     metodos = [m for m, activo in (("radio", permanencia_radio), ("h3", permanencia_h3)) if activo]
     if metodos and success:
         success = _run_permanencia(metodos=metodos, force=force)
+    # Gold va DESPUES de todo Silver, aunque no dependa de la resolucion CLEE:
+    # su ventana sale del `clee` de los hechos, asi que lo que necesita es que
+    # el ingest ya escribio los cortes.
+    if gold and success:
+        success = _run_gold(force=force)
     return success
 
 
@@ -153,6 +159,30 @@ def _run_permanencia(*, metodos: list[str], force: bool = False) -> bool:
     for metodo in metodos:
         total += construir_permanencia(engine, metodo, tracker, force=force)
     console.print(f"   {total:,} fila(s) de permanencia en {len(metodos)} metodo(s)")
+    return total > 0
+
+
+def _run_gold(*, force: bool = False) -> bool:
+    """Construye `gold.negocios_clee_oficial` y su tabla de variantes.
+
+    **Por default reanuda**, igual que permanencia: el trabajo va troceado en
+    cortes y bloques y cada vuelta commitea.
+
+    Lo que la obliga a rehacerse no es la resolucion CLEE --que no usa-- sino
+    la VENTANA OFICIAL: si entra o sale un corte con `clee`, la N y todas las
+    tasas cambian. El loader lo detecta comparando la ventana vigente con la
+    que quedo grabada en `ventana_cortes`, y reconstruye solo.
+
+    Returns:
+        bool: True si la cohorte quedo con al menos un negocio.
+    """
+    from src.etl.loaders.gold_cohorte_oficial import construir_cohorte_oficial
+    from src.meta.tracker import MetadataTracker
+    from src.shared.db.session import get_engine
+
+    console.print("[bold magenta]   Running: gold (cohorte con CLEE oficial)[/bold magenta]")
+    total = construir_cohorte_oficial(get_engine(), MetadataTracker(), force=force)
+    console.print(f"   {total:,} negocio(s) en gold.negocios_clee_oficial")
     return total > 0
 
 
@@ -312,6 +342,11 @@ def transform(
         "--permanencia-h3/--no-permanencia-h3",
         help="Build silver.permanencia_h3, pista de comparacion",
     ),
+    gold: bool = typer.Option(
+        True,
+        "--gold/--no-gold",
+        help="Build gold.negocios_clee_oficial: la cohorte con CLEE oficial (2021+)",
+    ),
     sesnsp: bool = typer.Option(
         True,
         "--sesnsp/--no-sesnsp",
@@ -322,7 +357,8 @@ def transform(
         "--only",
         help=(
             "Run ONLY these sections (repeatable): ingest, clee-radio, clee-h3, "
-            "sesnsp (+ groups denue, clee). Overrides --no-* defaults."
+            "clee-celda-h3-7, permanencia-radio, permanencia-h3, gold, sesnsp "
+            "(+ groups denue, clee, permanencia). Overrides --no-* defaults."
         ),
     ),
     period: list[str] = typer.Option(
@@ -344,9 +380,11 @@ def transform(
     to be passed for the full run.
 
     DENUE sub-steps (ordered): ingest -> clee-resolution-radio ->
-    clee-resolution-h3 -> clee-resolution-celda-h3-7 -> permanencia, each gated
-    by its flag (--no-denue skips the whole DENUE block). El ingest deriva la fecha y las celdas H3 en vuelo, asi
-    que no hay pasos sueltos para eso.
+    clee-resolution-h3 -> clee-resolution-celda-h3-7 -> permanencia -> gold,
+    each gated by its flag (--no-denue skips the whole DENUE block). El ingest
+    deriva la fecha y las celdas H3 en vuelo, asi que no hay pasos sueltos para
+    eso. `gold` va al final: es la capa de consumo y se construye sobre lo que
+    el ingest acaba de escribir.
     SESNSP: CSV consolidado -> sesnsp_incidencia_municipal (--no-sesnsp skips).
     """
     selected = _expand_only(only)
@@ -357,6 +395,7 @@ def transform(
         clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
         permanencia_radio = Section.permanencia_radio in selected
         permanencia_h3 = Section.permanencia_h3 in selected
+        gold = Section.gold in selected
         sesnsp = Section.sesnsp in selected
         denue = any(
             (
@@ -366,6 +405,7 @@ def transform(
                 clee_resolution_celda_h3_7,
                 permanencia_radio,
                 permanencia_h3,
+                gold,
             )
         )
 
@@ -385,6 +425,7 @@ def transform(
                     clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,
                     permanencia_radio=permanencia_radio,
                     permanencia_h3=permanencia_h3,
+                    gold=gold,
                     force=force,
                     periods=period,
                 )
@@ -448,6 +489,11 @@ def pipeline(
         "--permanencia-h3/--no-permanencia-h3",
         help="Build silver.permanencia_h3, pista de comparacion",
     ),
+    gold: bool = typer.Option(
+        True,
+        "--gold/--no-gold",
+        help="Build gold.negocios_clee_oficial: la cohorte con CLEE oficial (2021+)",
+    ),
     sesnsp: bool = typer.Option(True, "--sesnsp/--no-sesnsp", help="Include the SESNSP source"),
     only: list[Section] = typer.Option(
         None,
@@ -477,6 +523,7 @@ def pipeline(
         clee_resolution_celda_h3_7 = Section.clee_celda_h3_7 in selected
         permanencia_radio = Section.permanencia_radio in selected
         permanencia_h3 = Section.permanencia_h3 in selected
+        gold = Section.gold in selected
         sesnsp = Section.sesnsp in selected
         denue = any(
             (
@@ -486,6 +533,7 @@ def pipeline(
                 clee_resolution_celda_h3_7,
                 permanencia_radio,
                 permanencia_h3,
+                gold,
             )
         )
 
@@ -516,6 +564,7 @@ def pipeline(
                     clee_resolution_celda_h3_7=clee_resolution_celda_h3_7,
                     permanencia_radio=permanencia_radio,
                     permanencia_h3=permanencia_h3,
+                    gold=gold,
                     force=force,
                 )
                 and overall_ok
