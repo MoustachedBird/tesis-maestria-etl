@@ -1131,6 +1131,22 @@ class TestRegistroEnMeta:
         assert tarea["rows_extracted"] is None  # no leyó ni una observación
         assert tarea["rows_loaded"] == 7
 
+    def test_una_tabla_vacia_se_construye_aunque_meta_diga_exito(self, db, metodo, tracker):
+        """Es el caso de una migración que recrea la tabla.
+
+        `b0007` tira y recrea `permanencia_*`, pero el `SUCCESS` de la
+        construcción anterior sigue en `meta.process_tasks`. Sin esta
+        guarda, "ya construida" salía verdadero sobre una tabla vacía y la
+        corrida se saltaba el trabajo reportando 0 filas.
+        """
+        construir_permanencia(db, metodo, tracker)
+        with db.begin() as conn:
+            conn.execute(text(f"TRUNCATE silver.{tabla_destino(metodo)}"))
+
+        # Sin --force: no hay avance que descartar, solo una tabla vacía.
+        assert construir_permanencia(db, metodo, tracker) == 7
+        assert self.tarea(db, metodo)["status"] == TaskStatus.SUCCESS.value
+
     def test_si_la_identidad_se_re_resolvio_reconstruye(self, db, metodo, tracker):
         """La tabla vigente quedó stale: sus agregados son de otras identidades.
 

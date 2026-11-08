@@ -1096,12 +1096,22 @@ def construir_permanencia(
             )
             if construida_en is not None and not desactualizada and not force:
                 total = _filas(conn, destino, schema)
+                if total > 0:
+                    logger.info(
+                        f"   ✨ {destino}: ya construida con la identidad vigente "
+                        f"({total:,} establecimientos). Nada que hacer; --force la rehace."
+                    )
+                    _cerrar(tracker, run_id, task_id, TaskStatus.SKIPPED, rows_loaded=total)
+                    return total
+                # Historial de exito pero la tabla esta VACIA: una migracion
+                # la recreo (b0007 lo hace) y el registro en `meta` quedo
+                # hablando de un esquema que ya no existe. "Ya construida"
+                # no puede ser cierto sin filas, asi que se construye -- y
+                # sin --force, porque no hay avance que descartar.
                 logger.info(
-                    f"   ✨ {destino}: ya construida con la identidad vigente "
-                    f"({total:,} establecimientos). Nada que hacer; --force la rehace."
+                    f"   {destino}: hay una corrida exitosa en meta pero la tabla esta "
+                    f"vacia (la recreo una migracion); se construye"
                 )
-                _cerrar(tracker, run_id, task_id, TaskStatus.SKIPPED, rows_loaded=total)
-                return total
 
         if force:
             logger.info(f"   {metodo}: --force, se descarta el avance previo")
