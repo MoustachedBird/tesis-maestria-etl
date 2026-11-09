@@ -26,6 +26,7 @@ El escenario está armado para que cada regla tenga un caso que la obligue:
                    default la regla NO dispara, y eso es lo que se afirma
 """
 
+import json
 from datetime import date
 
 import polars as pl
@@ -563,6 +564,13 @@ class TestLosInvariantesCorrenDeVerdad:
 @pytest.mark.unit
 class TestLoQueQuedaEnMetaDeVerdad:
     def test_la_corrida_queda_exitosa_con_su_ventana(self, db, tracker):
+        """`meta.job_runs.config` es `Text` con JSON, no `JSONB`.
+
+        Asi que hay que deserializarlo. Importa mas alla del test: una
+        consulta ad-hoc con `config->>'clave'` **falla** con "operator does
+        not exist", porque los operadores de JSON no aplican a `text`. Hay
+        que escribir `config::jsonb->>'clave'`.
+        """
         construir_cohorte_oficial(db, tracker)
         with db.connect() as conn:
             corrida = (
@@ -575,8 +583,9 @@ class TestLoQueQuedaEnMetaDeVerdad:
                 .one()
             )
         assert corrida["status"] == JobStatus.SUCCESS.value
-        assert corrida["config"]["n_cortes_oficiales"] == 3
-        assert corrida["config"]["ventana_cortes"] == [c.isoformat() for c in OFICIALES]
+        config = json.loads(corrida["config"])
+        assert config["n_cortes_oficiales"] == 3
+        assert config["ventana_cortes"] == [c.isoformat() for c in OFICIALES]
 
     def test_hay_una_tarea_por_tabla_destino(self, db, tracker):
         """La madre y la evidencia, cada una con su conteo."""
