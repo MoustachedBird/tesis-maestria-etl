@@ -72,8 +72,12 @@ COLONIA = 8
 #: (id, corte, clee, nombre, codigo_act, cve_ent, cve_mun, lat, lon,
 #:  telefono, correoelec, per_ocu_id)
 OBSERVACIONES = [
-    # --- oficial_vive: tambien esta en el corte viejo, que NO debe contar ---
+    # --- oficial_vive: tambien esta en el corte viejo, CON clee, y aun asi
+    #     ese corte no debe contar porque el corte no es oficial ---
     ("v0", VIEJO, "C_VIVE", "PANADERIA SOL", "311811", "14", "039", 20.67, -103.35, "", "", MICRO),
+    # --- relleno sin clee que baja la cobertura del corte viejo por debajo
+    #     del umbral: es lo que lo vuelve NO oficial ---
+    ("p0", VIEJO, "", "SIN IDENTIDAD", "311811", "14", "039", 20.4, -103.6, "", "", MICRO),
     (
         "v1",
         OFICIALES[0],
@@ -249,6 +253,27 @@ CODIGOS_ACT = sorted({o[4] for o in OBSERVACIONES})
 GEOGRAFIA = sorted({(o[5], o[6]) for o in OBSERVACIONES})
 
 
+@pytest.fixture(autouse=True)
+def umbral_para_un_escenario_chico(monkeypatch):
+    """Baja `GOLD_COBERTURA_CLEE_MINIMA` a 0.8 mientras corre este archivo.
+
+    El umbral real es 99.9%, y con decenas de filas en vez de millones **una
+    sola** observación sin `clee` descalificaría su corte entero. Eso haría
+    irrepresentable justo el caso que la regla describe: el ≤0.1% sin `clee`
+    dentro de un corte que sí es oficial.
+
+    Lo que se prueba sigue siendo el comportamiento real --qué cortes entran y
+    qué filas contribuyen--, solo con una escala donde los porcentajes son
+    expresables. El umbral mismo tiene su propio test unitario.
+    """
+    from src.shared.config import get_settings
+
+    monkeypatch.setenv("GOLD_COBERTURA_CLEE_MINIMA", "0.8")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def db(silver_engine):
     """Silver sembrado y `gold` recién creado desde el modelo.
@@ -349,7 +374,13 @@ class TestLaVentanaSeMide:
         assert negocios(db)["C_VIVE"]["ventana_cortes"] == OFICIALES
 
     def test_un_negocio_solo_pre_2021_no_entra(self, db, tracker):
-        """Su identidad seria propagada: es justo lo que esta capa no quiere."""
+        """Y C_VIEJO **si** trae clee: lo que lo excluye es el CORTE.
+
+        Es la distincion que importa: no basta con filtrar filas sin `clee`,
+        hay que filtrar cortes enteros. Si el loader solo mirara el `clee` de
+        la fila, este negocio entraria con una identidad de un corte que
+        INEGI no publico al 100%.
+        """
         construir_cohorte_oficial(db, tracker)
         assert "C_VIEJO" not in negocios(db)
 
@@ -357,6 +388,7 @@ class TestLaVentanaSeMide:
         """No tiene identidad observada, aunque este en un corte oficial."""
         construir_cohorte_oficial(db, tracker)
         assert "" not in negocios(db)
+        assert "SIN IDENTIDAD" not in {f["nombre"] for f in negocios(db).values()}
 
 
 @pytest.mark.unit

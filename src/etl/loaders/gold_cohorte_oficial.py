@@ -76,6 +76,27 @@ de propagación sería falso justamente en la columna cuyo trabajo es decir de
 dónde vino la identidad.
 """
 
+COLUMNA_CANONICA: dict[str, str] = {
+    "nom_estab": "nombre",
+    "raz_social": "razon_social",
+    "codigo_act": "codigo_act",
+    "telefono": "telefono",
+    "correoelec": "correoelec",
+    "www": "www",
+}
+"""Campo de la tabla de variantes -> columna canónica en la tabla madre.
+
+Casi todos se llaman igual, y **dos no**: la variante `nom_estab` se publica
+en `nombre` y la variante `raz_social` en `razon_social`. La diferencia es
+deliberada --en la madre son valores canónicos, no el campo crudo del DENUE--
+pero por lo mismo no se puede derivar con una regla.
+
+Se escribe completo en vez de con una excepción calculada precisamente porque
+derivarlo falló: una comprensión con un solo caso especial generaba
+`n.raz_social`, que no existe. `test_el_mapa_apunta_a_columnas_que_existen`
+lo valida contra el ORM, que es lo que vuelve imposible que vuelva a pasar.
+"""
+
 _EARTH_RADIUS_M = 6_371_000.0
 """Radio medio de la Tierra, para la diagonal del rectángulo envolvente."""
 
@@ -807,13 +828,9 @@ LEFT JOIN LATERAL (
         vuelve estructural el "a lo más uno": si esta consulta marcara dos, el
         `INSERT` falla aquí en vez de dejar una tabla indefendible.
         """
-        # Cada campo de la madre se llama igual que su `campo` en la hija,
-        # salvo el nombre: ahi la columna canonica es `nombre` y la variante
-        # es `nom_estab`.
-        columna = {c: ("nombre" if c == "nom_estab" else c) for c in CAMPOS_CON_VARIANTES}
         casos = "\n        ".join(
-            f"WHEN va.campo = '{campo}' THEN va.valor IS NOT DISTINCT FROM n.{col}"
-            for campo, col in columna.items()
+            f"WHEN va.campo = '{campo}' THEN va.valor IS NOT DISTINCT FROM n.{COLUMNA_CANONICA[campo]}"
+            for campo in CAMPOS_CON_VARIANTES
         )
         return Paso(
             TABLA_VARIANTES,

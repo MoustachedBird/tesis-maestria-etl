@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from src.etl.loaders.gold_cohorte_oficial import (
+    COLUMNA_CANONICA,
     METODO_BASE,
     TABLA,
     TABLA_VARIANTES,
@@ -235,11 +236,34 @@ class TestElNombreCanonicoYSuEvidencia:
         assert f"JOIN {'gold'}.{TABLA} n ON n.clee = va.clee" in sql
         assert "IS NOT DISTINCT FROM n.nombre" in sql
 
-    def test_la_variante_de_nom_estab_se_compara_contra_la_columna_nombre(self, pasos):
-        """Es el unico campo donde la columna canonica se llama distinto."""
+    def test_el_mapa_apunta_a_columnas_que_existen(self):
+        """Cada columna canonica tiene que existir en la tabla madre.
+
+        Esto es lo que faltaba: el mapa se derivaba con una comprension que
+        trataba `nom_estab -> nombre` como la UNICA excepcion, y generaba
+        `n.raz_social`, que no existe (la columna es `razon_social`). El SQL
+        era valido como cadena y solo truena al ejecutarse, asi que ningun
+        test de forma lo veia.
+        """
+        del_modelo = {c.name for c in get_table(TABLA, schema="gold").columns}
+        faltan = {campo: col for campo, col in COLUMNA_CANONICA.items() if col not in del_modelo}
+        assert not faltan, f"columnas canonicas inexistentes: {faltan}"
+
+    def test_el_mapa_cubre_todos_los_campos_con_variantes(self):
+        """Un campo sin entrada en el mapa levantaria KeyError al construir."""
+        assert set(COLUMNA_CANONICA) == set(CAMPOS_CON_VARIANTES)
+
+    def test_las_dos_excepciones_de_nombre_estan(self, pasos):
+        """`nom_estab -> nombre` y `raz_social -> razon_social`.
+
+        Son dos y no una: en la madre esas columnas guardan el valor
+        CANONICO, no el campo crudo del DENUE, y por eso se llaman distinto.
+        """
         sql = next(p.sql for p in pasos if p.nombre == TABLA_VARIANTES)
         assert "va.campo = 'nom_estab' THEN va.valor IS NOT DISTINCT FROM n.nombre" in sql
+        assert "va.campo = 'raz_social' THEN va.valor IS NOT DISTINCT FROM n.razon_social" in sql
         assert "n.nom_estab" not in sql
+        assert "n.raz_social " not in sql
 
     def test_se_listan_exactamente_los_campos_documentados(self, pasos):
         """Agregar uno es una decision de diseño (§6.1), no un descuido."""

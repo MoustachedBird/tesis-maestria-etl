@@ -19,7 +19,6 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from src.etl.loaders import permanencia as loader
 from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.permanencia import (
@@ -1165,8 +1164,15 @@ class TestRegistroEnMeta:
         assert tarea["rows_extracted"] == len(OBSERVACIONES)  # releyó los cortes
 
     def test_un_fallo_queda_registrado_y_se_propaga(self, db, metodo, tracker, monkeypatch):
-        """La corrida fallida es justo la que se quiere poder consultar."""
-        monkeypatch.setattr(loader, "SET_WORK_MEM", "SET LOCAL work_mem = 'no_es_memoria'")
+        """La corrida fallida es justo la que se quiere poder consultar.
+
+        El `SET LOCAL` se parchea en `troceado` y no en `permanencia`: la
+        memoria de trabajo es de la maquinaria, que es quien la emite en cada
+        vuelta.
+        """
+        from src.etl.utils import troceado
+
+        monkeypatch.setattr(troceado, "SET_WORK_MEM", "SET LOCAL work_mem = 'no_es_memoria'")
 
         with pytest.raises(Exception, match="work_mem"):
             construir_permanencia(db, metodo, tracker)
