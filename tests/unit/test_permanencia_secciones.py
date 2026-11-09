@@ -338,3 +338,35 @@ class TestElPadreNoSeCalculaDelPunto:
         mapa = _padres(vecinas)
         assert mapa.height == len(vecinas)
         assert mapa["h3_cell_7"].n_unique() < len(vecinas)
+
+
+@pytest.mark.unit
+class TestMemoriaCompartida:
+    """Por que los bloques corren sin paralelismo intra-consulta.
+
+    Un *parallel hash* reserva su memoria en MEMORIA COMPARTIDA y la
+    dimensiona con `work_mem`: 4 GB por hasta 8 workers pide decenas de GB a
+    un `/dev/shm` de 4 GB, y PostgreSQL muere con `DiskFull`. Serializando,
+    esos 4 GB se asignan en memoria privada del backend y el problema
+    desaparece sin bajar el presupuesto.
+    """
+
+    def test_los_bloques_desactivan_el_paralelismo(self):
+        from src.etl.utils.troceado import SET_SIN_PARALELISMO
+
+        assert "max_parallel_workers_per_gather = 0" in SET_SIN_PARALELISMO
+        # SET LOCAL: muere con la transaccion de la vuelta, asi que no deja la
+        # conexion del pool sin paralelismo para lo que venga despues.
+        assert SET_SIN_PARALELISMO.startswith("SET LOCAL")
+
+    def test_el_presupuesto_de_memoria_no_baja(self):
+        """La palanca que se mueve es el paralelismo, no `work_mem`.
+
+        Bajar `work_mem` tambien evitaria el DiskFull, pero derramaria el
+        agregado a disco -- que es justo lo que el troceo por bloques existe
+        para evitar.
+        """
+        from src.etl.utils.troceado import SET_WORK_MEM
+
+        assert "4GB" in SET_WORK_MEM
+        assert SET_WORK_MEM.startswith("SET LOCAL")

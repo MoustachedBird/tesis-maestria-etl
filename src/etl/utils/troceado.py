@@ -82,6 +82,32 @@ por sesión en las cargas masivas es el patrón que documenta `.env.example`.
 contamina la siguiente ni deja la conexión del pool con 4 GB de presupuesto.
 """
 
+SET_SIN_PARALELISMO = "SET LOCAL max_parallel_workers_per_gather = 0"
+"""Plan serial para los pasos del bloque, y no es una renuncia al rendimiento.
+
+**Es lo que vuelve compatible `work_mem = 4GB` con el `/dev/shm` del
+contenedor.** Un *parallel hash* reserva su memoria en MEMORIA COMPARTIDA, no
+en la del backend, y la dimensiona con `work_mem`: con hasta 8 workers por
+gather eso pide decenas de GB a un `/dev/shm` de 4 GB, y PostgreSQL muere con
+`DiskFull: could not resize shared memory segment`. Medido el 2026-11-09 en el
+paso `variantes` de Gold, que agrega un `UNION ALL` de seis proyecciones.
+
+Sin paralelismo intra-consulta, esos mismos 4 GB se asignan en memoria
+**privada** del backend --donde 4 GB sobre 125 GiB no es nada-- y la presión
+sobre `/dev/shm` desaparece. Es decir: se cambia una palanca que NO cabe por
+otra que sí, no se baja el presupuesto.
+
+Va solo en los pasos del bloque y no en la fase 1: ahí el `INSERT ... SELECT`
+une dos particiones y el paralelismo le da ~10 s por corte sin acercarse al
+límite (9 de 9 cortes pasaron). Arreglar lo que no falló costaría minutos por
+corrida a cambio de nada.
+
+**Alternativa descartada:** bajar `work_mem` hasta que `workers × work_mem`
+quepa en `/dev/shm`. Depende de un número del contenedor que el código no
+conoce, y derramaría el agregado a disco -- que es justo lo que el troceo por
+bloques existe para evitar.
+"""
+
 _SQL_LATIDO = """
 SELECT a.state,
        a.wait_event_type,
@@ -787,6 +813,7 @@ def _llenar(engine: Engine, ag: Agregado, bloques: int, rehacer: bool) -> tuple[
         inicio_bloque = time.monotonic()
         with engine.begin() as conn:
             conn.execute(text(SET_WORK_MEM))
+            conn.execute(text(SET_SIN_PARALELISMO))
             escritas = 0
             for paso in ag.pasos_bloque(bloque, ultimo_idx):
                 filas_paso = ejecutar(conn, paso, etiqueta, log)
