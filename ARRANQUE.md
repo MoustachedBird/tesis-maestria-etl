@@ -352,12 +352,15 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
  ORDER BY sim DESC LIMIT 10"
 ```
 
-Con qué ventana se construyó cada corrida, sin abrir un log:
+Con qué ventana se construyó cada corrida, sin abrir un log. El `::jsonb` no
+es adorno: `meta.job_runs.config` es `text` con JSON dentro, así que
+`config->>'clave'` falla con *operator does not exist*:
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT start_time, status, config->>'n_cortes_oficiales' AS cortes,
-        config->'ventana_cortes' AS ventana
+"SELECT start_time, status,
+        config::jsonb->>'n_cortes_oficiales' AS cortes,
+        config::jsonb->'ventana_cortes'      AS ventana
  FROM meta.job_runs WHERE job_type = 'GOLD' ORDER BY start_time DESC LIMIT 5"
 ```
 
