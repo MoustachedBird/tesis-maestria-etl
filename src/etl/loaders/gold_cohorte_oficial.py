@@ -478,6 +478,7 @@ WHERE e.period = {literal}
             self._paso_primera(bloque),
             self._paso_referencia(bloque),
             self._paso_variantes(bloque),
+            self._paso_canonico(),
             self._paso_insert(ultimo_idx, n_cortes, ventana_sql, ajustes),
             self._paso_insert_variantes(),
         ]
@@ -667,6 +668,39 @@ GROUP BY clee, campo, valor
 """,
         )
 
+    def _paso_canonico(self) -> Paso:
+        """La moda del nombre, en UNA pasada sobre las variantes.
+
+        Es un `DISTINCT ON` y no una subconsulta lateral por fila, y la
+        diferencia es de complejidad, no de estilo. Un `LEFT JOIN LATERAL`
+        con `LIMIT 1` fuerza un *nested loop*: una busqueda por cada
+        identidad del bloque, y cada una recorriendo la temporal completa
+        porque no tiene indice. Medido el 2026-11-09: ~300k identidades x
+        ~1M variantes dejaron el `INSERT` del bloque 1 corriendo **21
+        minutos sin terminar**, o sea ~11 horas proyectadas para los 32.
+
+        Asi es una ordenada y ya: el mismo criterio de §6.4 --el valor con
+        mas cortes, desempatado por el mas reciente-- expresado como el
+        primer elemento de cada grupo. Despues entra al `INSERT` por un hash
+        join sobre `clee`, como `primera` y `referencia`.
+
+        El desempate final por `valor` no es decorativo: sin el, dos
+        variantes con el mismo `n_cortes` y el mismo `ultimo_idx` darian un
+        resultado dependiente del plan, y la tabla dejaria de ser
+        reproducible.
+        """
+        return Paso(
+            "canonico",
+            "eligiendo el nombre canonico de cada negocio",
+            """
+CREATE TEMP TABLE canonico ON COMMIT DROP AS
+SELECT DISTINCT ON (clee) clee, valor AS nombre
+FROM variantes
+WHERE campo = 'nom_estab'
+ORDER BY clee, n_cortes DESC, ultimo_idx DESC, valor
+""",
+        )
+
     def _paso_insert(
         self, ultimo_idx: int, n_cortes: int, ventana_sql: str, ajustes: Settings
     ) -> Paso:
@@ -762,7 +796,7 @@ SELECT
     -- Los clusters sospechosos se quedan SIN nombre a proposito: con
     -- [TACOS PACO, FARMACIA PACO] cualquier canonico es una afirmacion
     -- falsa, y las variantes siguen ahi para mirarlas.
-    CASE WHEN v.n_nombres > {n_cortes} THEN NULL ELSE nom.valor END AS nombre,
+    CASE WHEN v.n_nombres > {n_cortes} THEN NULL ELSE nom.nombre END AS nombre,
     v.raz_social,
     -- SCIAN CANONICO: el ancestro comun mas especifico, por prefijo. La
     -- jerarquia ES el codigo (sector=2, subsector=3, rama=4), asi que no
@@ -805,14 +839,8 @@ SELECT
 FROM ventana v
 JOIN primera p USING (clee)
 JOIN referencia r USING (clee)
--- La moda del nombre: el valor con mas cortes, desempatado por el mas
--- reciente. LEFT porque un negocio puede no haber tenido nunca nombre.
-LEFT JOIN LATERAL (
-    SELECT valor FROM variantes
-    WHERE variantes.clee = v.clee AND campo = 'nom_estab'
-    ORDER BY n_cortes DESC, ultimo_idx DESC, valor
-    LIMIT 1
-) nom ON TRUE
+-- LEFT porque un negocio puede no haber tenido nunca nombre.
+LEFT JOIN canonico nom USING (clee)
 """,
         )
 

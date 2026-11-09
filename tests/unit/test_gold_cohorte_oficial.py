@@ -180,7 +180,7 @@ class TestLoQueSeNiegaAAfirmar:
         identidad agrupó más de un negocio y no hay nombre que lo represente.
         """
         sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "CASE WHEN v.n_nombres > 9 THEN NULL ELSE nom.valor END AS nombre" in sql
+        assert "CASE WHEN v.n_nombres > 9 THEN NULL ELSE nom.nombre END AS nombre" in sql
         assert "v.n_nombres > 9 AS cluster_sospechoso" in sql
 
     def test_el_scian_queda_null_si_la_discrepancia_cruza_rama(self, pasos):
@@ -217,8 +217,28 @@ class TestElNombreCanonicoYSuEvidencia:
 
     def test_el_nombre_es_la_moda_desempatada_por_el_mas_reciente(self, pasos):
         """Baseline 1 de §6.4, que el LLM solo reemplaza si GANA."""
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "ORDER BY n_cortes DESC, ultimo_idx DESC, valor" in sql
+        sql = next(p.sql for p in pasos if p.nombre == "canonico")
+        assert "ORDER BY clee, n_cortes DESC, ultimo_idx DESC, valor" in sql
+
+    def test_la_moda_sale_de_una_pasada_y_no_de_una_lateral(self, pasos):
+        """Es una diferencia de complejidad, no de estilo.
+
+        Un `LEFT JOIN LATERAL` con `LIMIT 1` fuerza un nested loop: una
+        busqueda por identidad, cada una recorriendo la temporal completa
+        porque no tiene indice. Medido: dejo el INSERT del bloque 1 corriendo
+        21 minutos sin terminar (~11 horas proyectadas para los 32).
+        """
+        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
+        assert "DISTINCT ON (clee)" in canonico
+
+        madre = next(p.sql for p in pasos if p.nombre == TABLA)
+        assert "LATERAL" not in madre
+        assert "LEFT JOIN canonico nom USING (clee)" in madre
+
+    def test_el_desempate_final_hace_reproducible_la_eleccion(self, pasos):
+        """Sin el `valor`, dos variantes empatadas dependerian del plan."""
+        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
+        assert canonico.rstrip().endswith("valor")
 
     def test_la_moda_necesita_las_variantes_antes(self, pasos):
         """De ahi el orden de los pasos: el conteo por valor es su insumo."""
@@ -275,16 +295,32 @@ class TestElNombreCanonicoYSuEvidencia:
 
 @pytest.mark.unit
 class TestTroceoYEscritura:
-    def test_ningun_paso_intermedio_lee_la_tabla_completa(self, pasos):
+    def test_ningun_paso_lee_la_tabla_de_trabajo_completa(self, pasos):
         """Si a uno se le olvidara el filtro, agregaria los 51.5M.
 
         Y peor que lento: los conteos saldrían del universo entero y no del
-        bloque.
+        bloque. El filtro se exige de los pasos que leen la tabla de trabajo;
+        `canonico` no la toca --lee `variantes`, que ya viene acotada-- y los
+        dos `INSERT` leen solo temporales.
         """
         for paso in pasos:
-            if paso.nombre in (TABLA, TABLA_VARIANTES):
+            if self.obs_nombre not in paso.sql:
                 continue
             assert "bloque = 7" in paso.sql, paso.nombre
+
+    #: La tabla de trabajo, para reconocer qué pasos la leen.
+    obs_nombre = "negocios_clee_oficial_obs"
+
+    def test_los_pasos_que_derivan_leen_solo_temporales(self, pasos):
+        """`canonico` y los dos INSERT no vuelven a la tabla de trabajo.
+
+        Es lo que vuelve baratos los pasos finales: la tabla de trabajo tiene
+        51.5M filas y las temporales del bloque unas cientos de miles.
+        """
+        derivados = ("canonico", TABLA, TABLA_VARIANTES)
+        for paso in pasos:
+            if paso.nombre in derivados:
+                assert self.obs_nombre not in paso.sql, paso.nombre
 
     def test_las_temporales_mueren_con_la_transaccion(self, pasos):
         """`ON COMMIT DROP`: un bloque que falla no deja basura."""
