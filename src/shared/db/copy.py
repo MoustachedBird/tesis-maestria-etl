@@ -61,13 +61,14 @@ def _chunks(df: pl.DataFrame, chunk_rows: int) -> Iterator[pl.DataFrame]:
 
     Args:
         df: DataFrame a partir.
-        chunk_rows: filas por bloque; debe ser positivo.
+        chunk_rows: filas por bloque; positivo. Lo valida `copy_dataframe`,
+            que es el unico llamador y lo necesita antes que esto: la
+            validacion no puede vivir aqui porque un generador no ejecuta
+            nada hasta que se itera.
 
     Yields:
         pl.DataFrame: vistas sucesivas del original, sin copiar los datos.
     """
-    if chunk_rows <= 0:
-        raise ValueError(f"chunk_rows debe ser positivo, se recibio {chunk_rows}")
     for offset in range(0, df.height, chunk_rows):
         yield df.slice(offset, chunk_rows)
 
@@ -127,6 +128,14 @@ def copy_dataframe(
         raise ValueError(f"columnas ausentes en el DataFrame: {sorted(missing)}")
 
     chunk_rows = chunk_rows if chunk_rows is not None else get_settings().COPY_CHUNK_ROWS
+    # Antes de cualquier aritmetica con el. `total_chunks` divide entre
+    # `chunk_rows` mas abajo, asi que un 0 reventaba con ZeroDivisionError --
+    # un error que no dice que esta mal-- en vez del ValueError que describe
+    # el problema. Y validarlo aqui cubre tambien el valor que viene de
+    # COPY_CHUNK_ROWS, que hasta ahora no se revisaba en ninguna parte.
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows debe ser positivo, se recibio {chunk_rows}")
+
     quoted_cols = ", ".join(f'"{c}"' for c in cols)
     destino = f'"{schema}"."{table}"' if schema else f'"{table}"'
     statement = f"COPY {destino} ({quoted_cols}) FROM STDIN (FORMAT CSV, QUOTE '\"')"
