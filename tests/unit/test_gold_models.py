@@ -283,6 +283,8 @@ def test_los_campos_con_variantes_son_los_documentados():
         "nom_estab",
         "raz_social",
         "codigo_act",
+        "per_ocu",
+        "tipounieco",
         "telefono",
         "correoelec",
         "www",

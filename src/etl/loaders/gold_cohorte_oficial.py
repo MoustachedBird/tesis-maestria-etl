@@ -78,23 +78,27 @@ dónde vino la identidad.
 
 COLUMNA_CANONICA: dict[str, str] = {
     "nom_estab": "nombre",
-    "raz_social": "razon_social",
     "codigo_act": "codigo_act",
-    "telefono": "telefono",
-    "correoelec": "correoelec",
-    "www": "www",
 }
-"""Campo de la tabla de variantes -> columna canónica en la tabla madre.
+"""Campo de variantes -> columna canónica en la madre, para los que la tienen.
 
-Casi todos se llaman igual, y **dos no**: la variante `nom_estab` se publica
-en `nombre` y la variante `raz_social` en `razon_social`. La diferencia es
-deliberada --en la madre son valores canónicos, no el campo crudo del DENUE--
-pero por lo mismo no se puede derivar con una regla.
+**Son dos de los ocho, y eso es la decisión, no una omisión.** La madre solo
+publica AGREGADOS sobre la vida completa: `nombre` es la moda de todas las
+variantes y `codigo_act` el ancestro común de todas las actividades. Los otros
+seis campos --`raz_social`, `per_ocu`, `tipounieco`, `telefono`, `correoelec`,
+`www`-- cambian entre cortes, así que la madre **no publica ninguno** y sus
+filas en variantes quedan todas con `es_canonico = FALSE`.
 
-Se escribe completo en vez de con una excepción calculada precisamente porque
-derivarlo falló: una comprensión con un solo caso especial generaba
-`n.raz_social`, que no existe. `test_el_mapa_apunta_a_columnas_que_existen`
-lo valida contra el ORM, que es lo que vuelve imposible que vuelva a pasar.
+Que no haya canónico no es un hueco: `tiene_*` dice si el dato existió, y
+variantes dice qué valores tuvo y en qué ventana. Lo que ya no existe es el
+valor sin fecha que antes invitaba a usarlo como si fuera atemporal.
+
+El índice único parcial sigue sirviendo igual --a lo más un canónico por
+`(clee, campo)`-- solo que para seis campos el máximo observado será cero.
+
+`test_el_mapa_apunta_a_columnas_que_existen` lo valida contra el ORM: la
+versión anterior derivaba el mapa con una regla y generaba `n.raz_social`,
+que no existía.
 """
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -387,9 +391,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS {self.obs_schema}.{self.obs} (
     www              text,
     nom_cencom       text,
     per_ocu          text,
-    categoria_tamano text,
     empleados_min    integer,
-    empleados_max    integer,
     tipounieco       text,
     direccion        text
 )
@@ -425,7 +427,7 @@ INSERT INTO {self.obs_schema}.{self.obs} (
     cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
     latitud, longitud, h3_cell_9,
     fecha_alta_date, telefono, correoelec, www, nom_cencom,
-    per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
+    per_ocu, empleados_min, tipounieco,
     direccion
 )
 SELECT
@@ -437,7 +439,7 @@ SELECT
     e.cve_ent, e.cve_mun, e.cve_loc, e.ageb, e.cod_postal, ta.tipo_asent,
     e.latitud, e.longitud, e.h3_cell_9,
     e.fecha_alta_date, e.telefono, e.correoelec, e.www, e.nom_cencom,
-    ep.per_ocu, ep.categoria, ep.empleados_min, ep.empleados_max,
+    ep.per_ocu, ep.empleados_min,
     tu.tipounieco,
     -- El domicilio como UNA cadena: arrays paralelos por componente
     -- perderian que numero va con que calle.
@@ -536,17 +538,10 @@ SELECT
         WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS act_min,
     MAX(codigo_act) FILTER (
         WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS act_max,
-    -- El mas reciente NO VACIO de cada uno, independientemente. Que vengan
-    -- de cortes distintos no es inconsistencia: aqui no se describe un
-    -- lugar, se acumula una via de verificacion.
-    (ARRAY_AGG(raz_social ORDER BY idx DESC) FILTER (
-        WHERE raz_social IS NOT NULL AND raz_social <> ''))[1] AS raz_social,
-    (ARRAY_AGG(telefono ORDER BY idx DESC) FILTER (
-        WHERE telefono IS NOT NULL AND telefono <> ''))[1] AS telefono,
-    (ARRAY_AGG(correoelec ORDER BY idx DESC) FILTER (
-        WHERE correoelec IS NOT NULL AND correoelec <> ''))[1] AS correoelec,
-    (ARRAY_AGG(www ORDER BY idx DESC) FILTER (
-        WHERE www IS NOT NULL AND www <> ''))[1] AS www,
+    -- Aqui NO se elige "el mas reciente no vacio" de razon social ni de
+    -- contacto: esos valores cambian entre cortes y la madre ya no los
+    -- publica. Viven en variantes con su ventana, y de ellos aqui solo
+    -- queda el BOOL_OR de mas abajo que dice si existieron.
     -- Cobertura del dato: UNION sobre toda la vida, no el corte de
     -- referencia. Dice de que negocios se puede afirmar algo sobre cada
     -- campo, que es lo que decide si entran a un analisis que dependa de el.
@@ -624,8 +619,10 @@ SELECT DISTINCT ON (clee)
        period AS corte_referencia,
        cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
        latitud, longitud, h3_cell_9,
-       per_ocu, categoria_tamano, empleados_min, empleados_max,
-       tipounieco
+       -- `empleados_min` NO se publica: se consume aqui para calcular
+       -- `delta_empleados_min` contra el primer corte, y lo que persiste es
+       -- ese escalar. El estrato mismo vive en variantes.
+       empleados_min
 FROM {obs}
 WHERE bloque = {bloque}
 ORDER BY clee, period DESC, id
@@ -744,11 +741,9 @@ INSERT INTO {self.schema}.{TABLA} (
     tiene_localidad, tiene_ageb, tiene_cod_postal, tiene_tipo_asent,
     tiene_coordenadas, tiene_estrato_personal, tiene_tipounieco,
     tiene_telefono, tiene_correo, tiene_sitio, en_centro_comercial,
-    nombre, razon_social, codigo_act,
+    nombre, codigo_act,
     corte_referencia, cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
     latitud, longitud, h3_cell_9,
-    per_ocu, categoria_tamano, empleados_min, empleados_max, tipounieco,
-    telefono, correoelec, www,
     cluster_sospechoso,
     ventana_cortes, metodo_base, version_reglas
 )
@@ -797,7 +792,6 @@ SELECT
     -- [TACOS PACO, FARMACIA PACO] cualquier canonico es una afirmacion
     -- falsa, y las variantes siguen ahi para mirarlas.
     CASE WHEN v.n_nombres > {n_cortes} THEN NULL ELSE nom.nombre END AS nombre,
-    v.raz_social,
     -- SCIAN CANONICO: el ancestro comun mas especifico, por prefijo. La
     -- jerarquia ES el codigo (sector=2, subsector=3, rama=4), asi que no
     -- hace falta unir el catalogo. Si la discrepancia cruza rama queda NULL:
@@ -828,9 +822,6 @@ SELECT
     -- llamada por fila. A res 9 (~175 m de arista) el jitter rara vez cruza
     -- de celda, y si cruza, lat/lon de la misma fila lo delatan.
     r.h3_cell_9,
-    r.per_ocu, r.categoria_tamano, r.empleados_min, r.empleados_max,
-    r.tipounieco,
-    v.telefono, v.correoelec, v.www,
     -- IMPOSIBLE para un cluster correcto: un establecimiento aparece a lo
     -- mas una vez por corte, asi que mas nombres que cortes significa que la
     -- identidad agrupo mas de un establecimiento.
@@ -856,9 +847,12 @@ LEFT JOIN canonico nom USING (clee)
         vuelve estructural el "a lo más uno": si esta consulta marcara dos, el
         `INSERT` falla aquí en vez de dejar una tabla indefendible.
         """
+        # Solo los campos que la madre PUBLICA pueden tener un canonico. Para
+        # los otros seis el `ELSE FALSE` es la respuesta correcta, no un
+        # descuido: la madre no eligio ninguno porque cambian entre cortes.
         casos = "\n        ".join(
-            f"WHEN va.campo = '{campo}' THEN va.valor IS NOT DISTINCT FROM n.{COLUMNA_CANONICA[campo]}"
-            for campo in CAMPOS_CON_VARIANTES
+            f"WHEN va.campo = '{campo}' THEN va.valor IS NOT DISTINCT FROM n.{columna}"
+            for campo, columna in COLUMNA_CANONICA.items()
         )
         return Paso(
             TABLA_VARIANTES,

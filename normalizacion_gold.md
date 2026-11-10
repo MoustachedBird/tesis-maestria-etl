@@ -322,14 +322,15 @@ El **corte de referencia** es el último en que se observó al negocio (el que
 |---|---|---|---|
 | `clee` | La identidad del método base; si hubo reconciliación, la del cluster ganador | Es la llave del negocio | — |
 | `nombre` | Canónico a partir de todas las variantes, que quedan listadas en `gold.negocios_clee_oficial_variantes` (§6) | Ninguna variante suelta representa al negocio, y el canónico sin sus fuentes al lado no es auditable | **Sí**, con baseline obligatorio |
-| `razon_social` | La más reciente no vacía; las anteriores a `gold.negocios_clee_oficial_variantes` | Dato legal: no se promedia ni se inventa. Si cambió, cambió — y las dos sirven para buscarlo en fuentes oficiales | — |
+| `razon_social` | **No se materializa** (2026-11-09). Todas sus variantes van a `gold.negocios_clee_oficial_variantes` con su ventana, y en la madre queda `tiene_razon_social` | Dato legal que cambia: "la más reciente no vacía" era el valor de un corte disfrazado de atributo. Si cambió, las dos versiones sirven para buscarlo en fuentes oficiales, y la ventana dice cuál usar para qué fecha | — |
 | `codigo_act` | **Ancestro común más específico** en la jerarquía SCIAN; si eso cae por encima de `rama`, el LLM elige | `denue_actividades_economicas` ya trae `sector`/`subsector`/`rama`: dos actividades de la misma rama tienen una respuesta determinista y correcta. El LLM solo hace falta cuando la discrepancia cruza ramas, que es justo cuando hay que juzgar | Solo si cruza rama |
-| `per_ocu`, `categoria_tamano`, `empleados_min/max` | Del corte de referencia | Pedido explícito: el último dato. Es el tamaño con que el negocio terminó, que es lo que el protocolo mide | — |
+| `per_ocu` | **No se materializa** (2026-11-09). Va a variantes con su ventana | Revisión del pedido original ("el último dato"): el tamaño es justo lo que cambia, y para el modelo de supervivencia es una covariable **variable en el tiempo** — variantes la entrega con `primer_periodo`/`ultimo_periodo`, que es lo que un Cox con covariables dependientes del tiempo necesita. Lo que sí es propiedad de la vida completa (`cambio_tamano`, `delta_empleados_min`) se queda en la madre | — |
+| `categoria_tamano`, `empleados_min/max` | **No se materializan ni entran a variantes** | Se derivan de `per_ocu` uniendo `silver.denue_estratos_personal`, así que guardarlas sería repetir el catálogo. El camino de recuperación está en `AGENTS.md` §N5 y tiene test | — |
 | `fecha_alta` | `MIN` sobre todos los cortes | Pedido explícito. Ya está en `permanencia.fecha_alta_date` | — |
 | `latitud`, `longitud`, `h3_cell_9`, `h3_cell_5` | Del corte de referencia. **Pero** si `dispersion_max_m` supera el umbral y `desplazamiento_neto_m` no, usar la **mediana** | Pedido explícito el último dato, y es el correcto para quien se mudó. La excepción es el jitter de GPS, que `permanencia` ya sabe detectar (neto ≈ 0 con dispersión grande): ahí el último dato es una coordenada mala y la mediana es el local | — |
 | `cve_ent`, `cve_mun`, `cve_loc`, `ageb`, `cod_postal`, `tipo_asent`, domicilio | **Del mismo corte que las coordenadas** | Ver §5: es coherencia, no una regla por campo | — |
-| `tipounieco` | Del corte de referencia | Fijo / semifijo / ambulante. Si varió, `cambio_tipounieco` lo dice | — |
-| `telefono`, `correoelec`, `www` | El más reciente no vacío de cada uno, **independientemente** | Para verificar un cierre sirve cualquiera que haya publicado; que vengan de cortes distintos no es inconsistencia, es cobertura | — |
+| `tipounieco` | **No se materializa** (2026-11-09). Va a variantes con su ventana | Fijo / semifijo / ambulante también cambia, y un ambulante que se vuelve fijo es precisamente una señal de supervivencia, no ruido a congelar | — |
+| `telefono`, `correoelec`, `www` | **No se materializan** (2026-11-09). Cada valor va a variantes con su ventana | Era el peor caso de todos: "el más reciente no vacío" produce un valor **sin fecha**, imposible de situar en el tiempo. La cascada de verificación los necesita **todos** de cualquier modo (§6.0 punto 3), así que la columna única no servía a nadie y sí invitaba a usarla como si fuera el teléfono actual |
 | Ventana y censura (`primer_periodo`, `duracion_periodos`, `cortes_tras_ultimo`, `huecos`, `presente_desde_el_inicio`, `cortes_idx`) | Copia de `permanencia_<metodo>` | Ya están calculados y son el insumo del modelo | — |
 | Trayectoria (`cambio_municipio`, `cambio_actividad`, `delta_empleados_min`, `n_nombres`, `desplazamiento_neto_m`, `dispersion_max_m`) | Copia de `permanencia_<metodo>` | Idem | — |
 | Cobertura (`tiene_*`) | Copia de `permanencia_<metodo>` | Es el filtro que decide qué negocios entran a cada análisis | — |
@@ -393,6 +394,7 @@ concretas:
 CREATE TABLE gold.negocios_clee_oficial_variantes (
     clee            text    NOT NULL,  -- FK logica a gold.negocios_clee_oficial.clee
     campo           text    NOT NULL,  -- nom_estab | raz_social | codigo_act
+                                       -- | per_ocu | tipounieco
                                        -- | telefono | correoelec | www
     valor           text    NOT NULL,  -- tal como INEGI lo publico, sin normalizar
     primer_periodo  date    NOT NULL,  -- primer corte en que uso este valor
@@ -427,8 +429,16 @@ necesidad de una fila vacía aquí.
 alternativas pero no dice cuál ganó, y había que ir a la tabla madre a
 comparar cadenas. Con ella, "el canónico y sus alternativas" es una
 consulta, y la decisión —venga de una regla o del LLM— queda auditable en
-el mismo lugar que su evidencia. Aplica a los seis campos por igual: en
-todos, la tabla madre publicó **un** valor y aquí se marca cuál fue.
+el mismo lugar que su evidencia.
+
+**Pero aplica solo a los campos que la madre publica**, y desde `b0010` son
+dos de los ocho: `nom_estab` y `codigo_act`. Para `raz_social`, `per_ocu`,
+`tipounieco`, `telefono`, `correoelec` y `www` todas las filas quedan en
+`es_canonico = FALSE`, porque la madre no eligió ninguno — cambian entre
+cortes y lo que afirma de ellos es solo `tiene_*`. No es un hueco: la
+pregunta "¿cuál es el teléfono?" dejó de tener una respuesta única a
+propósito, y la que sí tiene respuesta —"¿qué teléfonos tuvo y cuándo?"— la
+contesta esta tabla.
 
 **Nota sobre la PK:** `(clee, campo, valor)` es un btree, y btree tiene un
 tope de ~2704 bytes por entrada. `nom_estab` quedó sin límite de largo en

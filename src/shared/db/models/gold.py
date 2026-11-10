@@ -66,23 +66,37 @@ CAMPOS_CON_VARIANTES = (
     "nom_estab",
     "raz_social",
     "codigo_act",
+    "per_ocu",
+    "tipounieco",
     "telefono",
     "correoelec",
     "www",
 )
 """Campos cuyos valores distintos se listan en la tabla de variantes.
 
-El criterio para entrar, de `normalizacion_gold.md` §6.1: una variante se
-materializa si es **la evidencia de una decisión que Gold tomó** (el nombre
-canónico, el SCIAN elegido) o **el insumo de un consumidor que trabaja
-negocio por negocio** (la cascada de verificación prueba cada teléfono y
-cada correo, no solo el último).
+Dos criterios para entrar, y basta cumplir uno:
 
-Lo que NO entra, y por qué: el domicilio por componentes (ya está
-`n_direcciones`), las coordenadas (ya están el rectángulo, el neto y la
-dispersión), el estrato de personal (ya están `cambio_tamano` y el delta), y
-`tipo_asent`/`cod_postal`/`cve_loc`/`ageb` (variantes sin consumidor). Es el
-crecimiento de GB que `b0007` evitó en Silver.
+1. **Es la evidencia de una decisión que Gold tomó** --el nombre canónico, el
+   SCIAN elegido-- o el insumo de un consumidor que trabaja negocio por
+   negocio (la cascada de verificación prueba cada teléfono y cada correo, no
+   solo el último).
+2. **Cambia entre cortes y la madre ya no lo publica** (`b0010`). Aquí entran
+   `per_ocu` y `tipounieco`, que antes eran columnas de un solo corte: lo que
+   se quitó de la madre no se perdió, se movió aquí con su ventana.
+
+Lo que NO entra, y por qué:
+
+- `categoria_tamano`, `empleados_min` y `empleados_max`: se **derivan** de
+  `per_ocu` uniendo `silver.denue_estratos_personal`, así que tenerlas sería
+  repetir el catálogo.
+- El domicilio por componentes (ya está `n_direcciones`) y las coordenadas (ya
+  están el rectángulo, el neto y la dispersión): son variantes sin consumidor,
+  y el bloque de ubicación se queda en la madre fechado por
+  `corte_referencia` porque es la llave de los cruces.
+- `tipo_asent`/`cod_postal`/`cve_loc`/`ageb`: parte de ese mismo bloque.
+
+Lo que se evita es el crecimiento de GB que `b0007` evitó en Silver: una
+variante por campo y por valor distinto, no una fila por corte.
 """
 
 
@@ -319,28 +333,38 @@ class NegocioCleeOficial(Base):
         comment="True si en algun corte estuvo dentro de un centro comercial o mercado",
     )
 
-    # ===== VALORES CANONICOS =====
-    # La diferencia con Silver: aqui SI hay un valor por campo, porque esta
-    # capa es la citable. Las reglas de cual se elige estan en
-    # `normalizacion_gold.md` §4.
+    # ===== VALORES CANONICOS: solo AGREGADOS sobre la vida completa =====
+    # La frontera que decide que entra aqui (2026-11-09): un AGREGADO sobre
+    # los nueve cortes si se materializa; el VALOR DE UN CORTE no. Es el mismo
+    # criterio de `b0007` en Silver, llevado a Gold.
+    #
+    # Los dos que quedan lo cumplen por construccion: `nombre` es la moda de
+    # todas las variantes y `codigo_act` el ancestro comun de todas las
+    # actividades. Ninguno es "lo que decia el ultimo corte".
+    #
+    # Lo que SALIO por ser snapshot --razon_social, per_ocu, categoria_tamano,
+    # empleados_min/max, tipounieco, telefono, correoelec, www-- vive en
+    # `negocios_clee_oficial_variantes` CON SU VENTANA, y aqui solo queda la
+    # bandera `tiene_*` que dice si el dato existio. Un telefono "el mas
+    # reciente no vacio" era el peor caso de todos: un valor sin fecha, que no
+    # se puede ni situar en el tiempo ni defender.
     nombre: Mapped[str | None] = mapped_column(
         String,
         comment=(
-            "Nombre canonico derivado de todas las variantes. NO ES COVARIABLE "
-            "DEL MODELO: es campo de presentacion y puede haberlo generado un "
-            "LLM. Las variantes de las que sale estan en la tabla hija, con "
-            "es_canonico marcando esta"
+            "Nombre canonico: la MODA sobre los nueve cortes, desempatada por el "
+            "mas reciente. Es un agregado, no el nombre del ultimo corte. NO ES "
+            "COVARIABLE DEL MODELO: es campo de presentacion y puede haberlo "
+            "generado un LLM. Las variantes de las que sale estan en la tabla "
+            "hija, con es_canonico marcando esta"
         ),
-    )
-    razon_social: Mapped[str | None] = mapped_column(
-        String, comment="La mas reciente no vacia. Dato legal: no se promedia ni se inventa"
     )
     codigo_act: Mapped[str | None] = mapped_column(
         String(10),
         comment=(
-            "SCIAN canonico: el ancestro comun mas especifico en la jerarquia del "
-            "catalogo cuando hubo varios. Solo si la discrepancia cruza rama "
-            "interviene un LLM"
+            "SCIAN canonico: el ANCESTRO COMUN mas especifico de todas las "
+            "actividades que tuvo, no la del ultimo corte. Por eso puede ser un "
+            "prefijo (una rama, 4 digitos) y no un codigo de clase. NULL si la "
+            "discrepancia cruza rama: ahi hay que juzgar"
         ),
     )
 
@@ -379,29 +403,24 @@ class NegocioCleeOficial(Base):
         BigInteger, comment="Celda H3 res 9 del corte de referencia (int64)"
     )
 
-    # Tamano y tipo: variables del protocolo.
-    per_ocu: Mapped[str | None] = mapped_column(
-        String, comment="Estrato de personal ocupado en el corte de referencia"
-    )
-    categoria_tamano: Mapped[str | None] = mapped_column(
-        String, comment="Micro / Small / Medium / Large: el sujeto mismo de la tesis"
-    )
-    empleados_min: Mapped[int | None] = mapped_column(Integer)
-    empleados_max: Mapped[int | None] = mapped_column(Integer)
-    tipounieco: Mapped[str | None] = mapped_column(
-        String,
-        comment=(
-            "Fijo / semifijo / ambulante: dinamicas de supervivencia distintas, y "
-            "determina si el negocio es verificable con fuentes externas"
-        ),
-    )
-
-    # Contacto: el mas reciente no vacio de CADA UNO, independientemente. Que
-    # vengan de cortes distintos no es inconsistencia: aqui no se describe un
-    # lugar, se acumula una via de verificacion.
-    telefono: Mapped[str | None] = mapped_column(String(50))
-    correoelec: Mapped[str | None] = mapped_column(String(200))
-    www: Mapped[str | None] = mapped_column(String(200))
+    # NO hay columnas de tamano, tipo de unidad ni contacto, y la ausencia es
+    # la decision: todas cambian entre cortes.
+    #
+    #   el estrato de personal         -> variantes, campo `per_ocu`
+    #   fijo/semifijo/ambulante        -> variantes, campo `tipounieco`
+    #   telefono / correoelec / www    -> variantes, un campo cada uno
+    #   razon social                   -> variantes, campo `raz_social`
+    #
+    # `categoria_tamano`, `empleados_min` y `empleados_max` tampoco tienen fila
+    # propia en variantes: se DERIVAN de `per_ocu` uniendo
+    # `silver.denue_estratos_personal`, asi que guardarlas seria repetir el
+    # catalogo. La consulta esta en `AGENTS.md` §N5.
+    #
+    # Para el modelo de supervivencia el tamano es una covariable VARIABLE EN
+    # EL TIEMPO, y variantes la entrega con su ventana (`primer_periodo`,
+    # `ultimo_periodo`) que es justo lo que un Cox con covariables dependientes
+    # del tiempo necesita. Lo que no cambia de fila a fila --si cambio de
+    # tamano y cuanto-- sigue aqui, en `cambio_tamano` y `delta_empleados_min`.
 
     # ===== CALIDAD DE LA IDENTIDAD =====
     cluster_sospechoso: Mapped[bool] = mapped_column(

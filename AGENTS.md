@@ -1057,14 +1057,40 @@ visible**.
 
 ### Las reglas que producen los valores canónicos
 
+**La frontera (`b0010`): un agregado sobre la vida completa sí; el valor de
+un corte no.** Es `b0007` aplicado a Gold. Solo dos columnas de valor
+sobreviven, y las dos son agregados:
+
 | Campo | Regla |
 |---|---|
-| `nombre` | La **moda**, desempatada por el más reciente (baseline 1 de §6.4). Un LLM solo lo reemplaza si *gana* en una muestra etiquetada |
-| `codigo_act` | Ancestro común por prefijo (la jerarquía **es** el código: sector=2, subsector=3, rama=4). Si cruza rama, **NULL** |
-| Bloque de ubicación | **TODO del mismo corte de referencia.** Armarlo por partes —CP de 2017, colonia de 2019, punto de 2024— produce un domicilio que nunca existió |
-| `telefono`/`correoelec`/`www` | El más reciente **no vacío** de cada uno, por separado: ahí no se describe un lugar, se acumula una vía de verificación |
-| `razon_social` | La más reciente no vacía. Dato legal: no se promedia |
-| Tamaño y tipo | Del corte de referencia |
+| `nombre` | La **moda** sobre los nueve cortes, desempatada por el más reciente (baseline 1 de §6.4). Es un agregado, no el nombre del último corte. Un LLM solo lo reemplaza si *gana* en una muestra etiquetada |
+| `codigo_act` | **Ancestro común** por prefijo de todas las actividades que tuvo (la jerarquía **es** el código: sector=2, subsector=3, rama=4). Por eso puede ser un prefijo de 4 dígitos y no un código de clase. Si cruza rama, **NULL** |
+| Bloque de ubicación | **TODO del mismo corte de referencia.** Es el único snapshot que se queda, porque es la llave de los cruces (`cve_mun`→SESNSP, `ageb`→marginación) y porque `corte_referencia` dice de cuándo es. Armarlo por partes —CP de 2017, colonia de 2019, punto de 2024— produce un domicilio que nunca existió |
+
+Y lo que **no** se materializa, con su razón:
+
+| Campo | Dónde vive ahora |
+|---|---|
+| `razon_social`, `per_ocu`, `tipounieco`, `telefono`, `correoelec`, `www` | En `..._variantes`, **con su ventana**. En la madre solo queda `tiene_*` |
+| `categoria_tamano`, `empleados_min/max` | En ningún lado: se **derivan** de `per_ocu` uniendo `silver.denue_estratos_personal` (consulta abajo) |
+
+Las tres de contacto eran el peor caso: "el más reciente no vacío" produce un
+valor **sin fecha**, imposible de situar en el tiempo. Y el tamaño es, para el
+modelo de supervivencia, una covariable **variable en el tiempo** — variantes
+la entrega con `primer_periodo`/`ultimo_periodo`, que es justo lo que un Cox
+con covariables dependientes del tiempo necesita. Lo que sí es propiedad de la
+vida completa (`cambio_tamano`, `delta_empleados_min`) se queda en la madre.
+
+**Recuperar el tamaño con su categoría y su ventana:**
+
+```sql
+SELECT va.clee, va.primer_periodo, va.ultimo_periodo, va.n_cortes,
+       va.valor AS per_ocu, ep.categoria, ep.empleados_min, ep.empleados_max
+FROM gold.negocios_clee_oficial_variantes va
+JOIN silver.denue_estratos_personal ep ON ep.per_ocu = va.valor
+WHERE va.campo = 'per_ocu'
+ORDER BY va.clee, va.primer_periodo;
+```
 
 **Dos cosas se niega a afirmar.** Un cluster con más nombres que cortes
 —imposible para un cluster correcto, porque un establecimiento aparece a lo
@@ -1077,10 +1103,19 @@ lo distingue de "nunca tuvo").
 ### La tabla de variantes es la evidencia, y no puede discrepar
 
 `gold.negocios_clee_oficial_variantes` guarda una fila por `(negocio, campo,
-valor)` con su ventana, su conteo y `es_canonico`. `es_canonico` se decide
-**comparando contra la fila ya escrita**, no recalculando la regla: así, por
-construcción, la hija no puede afirmar un canónico que la madre no publicó. El
-índice único parcial `(clee, campo) WHERE es_canonico` lo vuelve estructural.
+valor)` con su ventana, su conteo y `es_canonico`. Cubre **ocho** campos:
+`nom_estab`, `raz_social`, `codigo_act`, `per_ocu`, `tipounieco`, `telefono`,
+`correoelec`, `www`.
+
+`es_canonico` se decide **comparando contra la fila ya escrita**, no
+recalculando la regla: así, por construcción, la hija no puede afirmar un
+canónico que la madre no publicó. El índice único parcial
+`(clee, campo) WHERE es_canonico` lo vuelve estructural.
+
+**Solo dos de los ocho campos tienen canónico** —`nom_estab` y `codigo_act`,
+los que la madre publica— y para los otros seis todas las filas quedan en
+`es_canonico = FALSE`. No es un hueco: la madre no eligió ninguno porque
+cambian entre cortes, y `tiene_*` ya dice si el dato existió.
 
 Las dos tablas las escribe el **mismo bloque** y por tanto la misma
 transacción: o quedan las dos o ninguna. Y al rehacer se truncan juntas,

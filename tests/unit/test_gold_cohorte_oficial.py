@@ -154,18 +154,44 @@ class TestCoherenciaDelDomicilio:
         sql = next(p.sql for p in pasos if p.nombre == TABLA)
         assert "r.corte_referencia" in sql
 
-    def test_el_contacto_es_la_excepcion_deliberada(self, pasos):
-        """Ahi no se describe un lugar, se acumula una via de verificacion.
+    def test_el_contacto_no_se_materializa_en_la_madre(self, pasos):
+        """Cambia entre cortes, asi que no hay un valor que publicar.
 
-        Y es "el más reciente NO VACÍO", no "el del último corte": el `FILTER`
-        es lo que hace la diferencia entre acumular cobertura y perderla.
+        La version anterior elegia "el mas reciente no vacio" de cada uno, que
+        era el peor caso posible: un valor **sin fecha**, imposible de situar
+        en el tiempo. Ahora viven en variantes con su ventana, y de la madre
+        solo queda la bandera de si existieron.
         """
-        ventana = next(p for p in pasos if p.nombre == "ventana")
-        for campo in ("telefono", "correoelec", "www", "raz_social"):
-            assert f"ARRAY_AGG({campo} ORDER BY idx DESC) FILTER (" in ventana.sql
         sql = next(p.sql for p in pasos if p.nombre == TABLA)
         for campo in ("telefono", "correoelec", "www"):
-            assert f"v.{campo}" in sql
+            assert f"v.{campo}" not in sql
+            assert f"r.{campo}" not in sql
+        # Pero la cobertura si se afirma.
+        for bandera in ("tiene_telefono", "tiene_correo", "tiene_sitio"):
+            assert bandera in sql
+
+    def test_el_tamano_tampoco_se_materializa(self, pasos):
+        """Es la covariable que CAMBIA, asi que congelar una es lo peor.
+
+        Para el modelo de supervivencia el tamano es una covariable variable
+        en el tiempo, y variantes la entrega con su ventana. Lo que si es
+        agregado --si cambio y cuanto-- se queda.
+        """
+        sql = next(p.sql for p in pasos if p.nombre == TABLA)
+        for campo in ("per_ocu", "categoria_tamano", "empleados_max", "tipounieco"):
+            assert f"r.{campo}" not in sql
+        assert "cambio_tamano" in sql
+        assert "delta_empleados_min" in sql
+
+    def test_empleados_min_se_consume_pero_no_se_publica(self, pasos):
+        """La temporal lo necesita para el delta; la tabla no lo guarda."""
+        referencia = next(p.sql for p in pasos if p.nombre == "referencia")
+        assert "empleados_min" in referencia
+
+        madre = next(p.sql for p in pasos if p.nombre == TABLA)
+        bloque = madre[madre.index("(") + 1 : madre.index(")\nSELECT")]
+        columnas = {c.strip() for c in bloque.replace("\n", "").split(",")}
+        assert "empleados_min" not in columnas
 
 
 @pytest.mark.unit
@@ -269,21 +295,45 @@ class TestElNombreCanonicoYSuEvidencia:
         faltan = {campo: col for campo, col in COLUMNA_CANONICA.items() if col not in del_modelo}
         assert not faltan, f"columnas canonicas inexistentes: {faltan}"
 
-    def test_el_mapa_cubre_todos_los_campos_con_variantes(self):
-        """Un campo sin entrada en el mapa levantaria KeyError al construir."""
-        assert set(COLUMNA_CANONICA) == set(CAMPOS_CON_VARIANTES)
+    def test_solo_los_agregados_tienen_valor_canonico(self):
+        """Dos de los ocho campos, y eso es la decision.
 
-    def test_las_dos_excepciones_de_nombre_estan(self, pasos):
-        """`nom_estab -> nombre` y `raz_social -> razon_social`.
+        La madre solo publica agregados sobre la vida completa: la moda del
+        nombre y el ancestro comun del SCIAN. Los otros seis cambian entre
+        cortes, asi que no hay nada que marcar como canonico y sus filas
+        quedan todas en `es_canonico = FALSE`.
+        """
+        assert set(COLUMNA_CANONICA) == {"nom_estab", "codigo_act"}
+        # Subconjunto, no igualdad: lo que cambio respecto al diseño anterior.
+        assert set(COLUMNA_CANONICA) < set(CAMPOS_CON_VARIANTES)
 
-        Son dos y no una: en la madre esas columnas guardan el valor
-        CANONICO, no el campo crudo del DENUE, y por eso se llaman distinto.
+    def test_los_campos_sin_canonico_no_quedan_sin_informacion(self):
+        """`tiene_*` dice si existio y variantes dice que valores tuvo."""
+        from src.shared.db.models.gold import CAMPOS_CON_VARIANTES as campos
+
+        sin_canonico = set(campos) - set(COLUMNA_CANONICA)
+        assert sin_canonico == {
+            "raz_social",
+            "per_ocu",
+            "tipounieco",
+            "telefono",
+            "correoelec",
+            "www",
+        }
+
+    def test_el_case_solo_cubre_los_campos_que_la_madre_publica(self, pasos):
+        """Dos ramas y un `ELSE FALSE`, que es la respuesta correcta.
+
+        `nom_estab` se compara contra la columna `nombre` --en la madre es el
+        valor canonico, no el campo crudo del DENUE-- y `codigo_act` contra
+        la suya. Para los otros seis no hay rama porque no hay canonico.
         """
         sql = next(p.sql for p in pasos if p.nombre == TABLA_VARIANTES)
         assert "va.campo = 'nom_estab' THEN va.valor IS NOT DISTINCT FROM n.nombre" in sql
-        assert "va.campo = 'raz_social' THEN va.valor IS NOT DISTINCT FROM n.razon_social" in sql
-        assert "n.nom_estab" not in sql
-        assert "n.raz_social " not in sql
+        assert "va.campo = 'codigo_act' THEN va.valor IS NOT DISTINCT FROM n.codigo_act" in sql
+        assert sql.count("WHEN va.campo") == 2
+        assert "ELSE FALSE" in sql
+        assert "n.razon_social" not in sql
 
     def test_se_listan_exactamente_los_campos_documentados(self, pasos):
         """Agregar uno es una decision de diseño (§6.1), no un descuido."""

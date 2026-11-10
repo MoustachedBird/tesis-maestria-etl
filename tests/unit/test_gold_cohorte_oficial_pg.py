@@ -482,32 +482,120 @@ class TestElScianCanonico:
 
 
 @pytest.mark.unit
-class TestValoresDelCorteDeReferencia:
-    def test_el_tamano_sale_del_ultimo_corte(self, db, tracker):
-        """C_VIVE pasa de MICRO a PEQUENA en el ultimo corte."""
-        construir_cohorte_oficial(db, tracker)
-        fila = negocios(db)["C_VIVE"]
-        assert fila["corte_referencia"] == OFICIALES[2]
-        assert fila["categoria_tamano"] == "Small"
-        assert fila["cambio_tamano"] is True
-        assert fila["delta_empleados_min"] == 11
+class TestLaMadreSoloGuardaAgregados:
+    """La regla de `b0010`: el valor de UN corte no se materializa aqui."""
 
-    def test_el_contacto_es_el_mas_reciente_NO_VACIO(self, db, tracker):
-        """El telefono vino en el corte 1 y el correo en el 2; los dos quedan.
+    def test_la_tabla_no_tiene_columnas_de_snapshot(self):
+        """Su ausencia ES la decision, no un olvido."""
+        columnas = {c.name for c in get_table(TABLA, schema="gold").columns}
+        assert not columnas & {
+            "razon_social",
+            "per_ocu",
+            "categoria_tamano",
+            "empleados_min",
+            "empleados_max",
+            "tipounieco",
+            "telefono",
+            "correoelec",
+            "www",
+        }
 
-        Si la regla fuera "el del corte de referencia", los dos serian NULL:
-        el ultimo corte de C_VIVE no trae ninguno.
+    def test_pero_si_guarda_los_agregados_de_tamano(self, db, tracker):
+        """C_VIVE pasa de MICRO a PEQUENA: eso SI es propiedad de la vida.
+
+        "Cambio de tamano" y "cuanto crecio" no son el valor de un corte, son
+        afirmaciones sobre la trayectoria completa.
         """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
-        assert fila["telefono"] == "3312345678"
-        assert fila["correoelec"] == "sol@x.mx"
+        assert fila["cambio_tamano"] is True
+        assert fila["delta_empleados_min"] == 11
+        assert fila["tiene_estrato_personal"] is True
 
-    def test_la_geografia_sale_del_corte_de_referencia(self, db, tracker):
+    def test_y_las_banderas_de_cobertura_del_contacto(self, db, tracker):
+        """El telefono vino en el corte 1 y el correo en el 2.
+
+        La madre no dice cuales fueron, pero si que existieron -- que es lo
+        que decide si el negocio entra a un analisis que dependa de ellos.
+        """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
+        assert fila["tiene_telefono"] is True
+        assert fila["tiene_correo"] is True
+        assert fila["tiene_sitio"] is False
+
+    def test_la_geografia_si_se_queda_con_su_fecha(self, db, tracker):
+        """El unico snapshot que sobrevive, porque es la llave de los cruces.
+
+        Y no finge ser atemporal: `corte_referencia` dice de que corte salio.
+        """
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_VIVE"]
+        assert fila["corte_referencia"] == OFICIALES[2]
         assert fila["cve_ent"] == "14"
         assert fila["cve_mun"] == "039"
+
+
+@pytest.mark.unit
+class TestLaInformacionNoSePierde:
+    """Lo que salio de la madre esta en variantes, y con MAS informacion."""
+
+    def test_el_estrato_queda_con_su_ventana(self, db, tracker):
+        """Dos valores: el de los dos primeros cortes y el del ultimo.
+
+        Eso es estrictamente mas que la columna que se quito, que solo decia
+        el ultimo y sin indicar desde cuando.
+        """
+        construir_cohorte_oficial(db, tracker)
+        filas = variantes(db, "C_VIVE", "per_ocu")
+        assert len(filas) == 2
+
+        frecuente, reciente = filas
+        assert frecuente["n_cortes"] == 2
+        assert frecuente["primer_periodo"] == OFICIALES[0]
+        assert frecuente["ultimo_periodo"] == OFICIALES[1]
+        assert reciente["n_cortes"] == 1
+        assert reciente["primer_periodo"] == OFICIALES[2]
+
+    def test_el_contacto_queda_fechado(self, db, tracker):
+        """Antes era un valor sin fecha; ahora se sabe de que corte salio."""
+        construir_cohorte_oficial(db, tracker)
+
+        tel = variantes(db, "C_VIVE", "telefono")
+        assert [(f["valor"], f["primer_periodo"]) for f in tel] == [("3312345678", OFICIALES[0])]
+        correo = variantes(db, "C_VIVE", "correoelec")
+        assert [(f["valor"], f["primer_periodo"]) for f in correo] == [("sol@x.mx", OFICIALES[1])]
+
+    def test_ninguno_de_esos_campos_tiene_canonico(self, db, tracker):
+        """La madre no publico ninguno, asi que no hay nada que marcar."""
+        construir_cohorte_oficial(db, tracker)
+        for campo in ("per_ocu", "telefono", "correoelec", "raz_social", "tipounieco"):
+            for fila in variantes(db, "C_VIVE", campo):
+                assert fila["es_canonico"] is False, f"{campo}={fila['valor']}"
+
+    def test_la_categoria_de_tamano_se_deriva_del_catalogo(self, db, tracker):
+        """Es la razon por la que no entra a variantes: seria repetirlo.
+
+        Esta consulta es el camino de recuperacion documentado en AGENTS.md
+        §N5, y probarla aqui es lo que garantiza que siga funcionando.
+        """
+        construir_cohorte_oficial(db, tracker)
+        with db.connect() as conn:
+            filas = (
+                conn.execute(
+                    text("""
+                    SELECT va.primer_periodo, ep.categoria, ep.empleados_min
+                    FROM gold.negocios_clee_oficial_variantes va
+                    JOIN silver.denue_estratos_personal ep ON ep.per_ocu = va.valor
+                    WHERE va.clee = 'C_VIVE' AND va.campo = 'per_ocu'
+                    ORDER BY va.primer_periodo
+                    """)
+                )
+                .mappings()
+                .all()
+            )
+        assert [f["categoria"] for f in filas] == ["Micro", "Small"]
+        assert [f["empleados_min"] for f in filas] == [0, 11]
 
 
 @pytest.mark.unit
