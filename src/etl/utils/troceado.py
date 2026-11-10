@@ -851,7 +851,14 @@ def _validar(engine: Engine, ag: Agregado) -> None:
     """
     ag.logger.info(f"   ▶ validando invariantes de {ag.schema}.{ag.tabla}...")
     inicio = time.monotonic()
-    with engine.connect() as conn:
+    # `begin()` y no `connect()` aunque esto solo lea: `SET LOCAL` necesita una
+    # transaccion para existir, y sin el ajuste serial los invariantes corren
+    # con los 8 workers por gather del servidor. Un anti-join sobre 9.6M filas
+    # asi pide memoria compartida a /dev/shm y muere con DiskFull -- medido el
+    # 2026-11-09, despues de 99 minutos de construccion ya exitosa.
+    with engine.begin() as conn:
+        conn.execute(text(SET_WORK_MEM))
+        conn.execute(text(SET_SIN_PARALELISMO))
         with latido(conn, "invariantes", ag.logger):
             violaciones = ag.validar(conn)
     segundos = time.monotonic() - inicio

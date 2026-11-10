@@ -370,3 +370,21 @@ class TestMemoriaCompartida:
 
         assert "4GB" in SET_WORK_MEM
         assert SET_WORK_MEM.startswith("SET LOCAL")
+
+    def test_los_invariantes_tambien_corren_sin_paralelismo(self):
+        """Lo que se me olvido: el ajuste iba solo en los bloques.
+
+        Los invariantes hacen anti-joins sobre millones de filas. Con los
+        8 workers por gather del servidor, eso pide memoria compartida y
+        muere con DiskFull -- despues de haber construido la tabla entera,
+        que es el peor momento posible para fallar.
+        """
+        import inspect
+
+        from src.etl.utils import troceado
+
+        fuente = inspect.getsource(troceado._validar)
+        assert "SET_SIN_PARALELISMO" in fuente
+        assert "SET_WORK_MEM" in fuente
+        # `begin()` y no `connect()`: SET LOCAL necesita una transaccion.
+        assert "engine.begin()" in fuente
