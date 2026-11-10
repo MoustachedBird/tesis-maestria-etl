@@ -35,6 +35,16 @@ from src.shared.db.models.meta import (
     ProcessTask,
 )
 from src.shared.enums import ErrorType, JobStatus, TaskStatus
+from src.shared.logging import get_logger
+
+logger = get_logger(__name__)
+"""Logger estructurado, no de stage: `meta` no es una etapa del pipeline.
+
+Casi todo lo que hace el tracker es escribir filas que ya SON el registro, asi
+que no tiene nada que loguear. La excepcion es cuando corrige el pasado
+--cerrar corridas que quedaron huerfanas-- porque eso no deja rastro en
+ninguna fila nueva y hay que poder enterarse.
+"""
 
 #: Tipo de tarea que se escribe en `download_tasks.task_type`. Unico valor
 #: en uso: la tabla nacio preparada para VALIDATE y CLEANUP que nunca se
@@ -136,6 +146,7 @@ class MetadataTracker:
         run_id = str(uuid.uuid4())
         now = _now()
         with self._session() as session:
+            huerfanas = self._cerrar_huerfanas(session, job_name, now)
             session.add(
                 JobRun(
                     run_id=run_id,
@@ -149,7 +160,93 @@ class MetadataTracker:
                     config=json.dumps(config) if config else None,
                 )
             )
+        if huerfanas:
+            logger.warning(
+                "corridas huerfanas cerradas al arrancar",
+                job_name=job_name,
+                corridas=huerfanas,
+            )
         return run_id
+
+    def _cerrar_huerfanas(self, session: Session, job_name: str, ahora: datetime) -> list[str]:
+        """Marca FAILED las corridas del mismo job que quedaron en RUNNING.
+
+        **El criterio es exacto, no un umbral de tiempo.** Una corrida que
+        sigue en `RUNNING` cuando otra del MISMO `job_name` arranca es
+        necesariamente basura: estas etapas escriben la misma tabla destino y
+        dos a la vez se bloquean entre si --medido el 2026-11-09, dos
+        corridas de Gold peleando por la PK de `negocios_clee_oficial`-- asi
+        que concurrentes nunca son validas. Si la vieja estuviera viva, esta
+        no deberia arrancar; y si esta arranca, la vieja esta muerta.
+
+        Eso evita tener que adivinar un timeout. Un umbral por antiguedad
+        tendria que ser mas largo que la corrida legitima mas lenta (la
+        permanencia tarda horas, Gold tardo 99.6 min) y aun asi se
+        equivocaria el dia que algo tarde mas de lo previsto.
+
+        **Por que hacia falta:** un proceso que muere --lo matan, se queda sin
+        memoria, le borran el contenedor-- no alcanza a cerrar su tarea, y la
+        fila se queda en `RUNNING` para siempre. `/ops/health/pipeline`
+        reporta entonces una corrida en curso que no existe, y cualquier
+        conteo de "que esta corriendo" sale mal. Matar al cliente tampoco
+        aborta la sentencia del servidor, asi que el caso es facil de
+        provocar sin darse cuenta.
+
+        Cierra tambien las tareas de las tres familias que cuelgan de esas
+        corridas: una resolucion CLEE interrumpida deja sus regiones en
+        RUNNING igual que la corrida.
+
+        Args:
+            session: sesion abierta; el llamador controla la transaccion.
+            job_name: job que esta por arrancar.
+            ahora: instante de cierre, el mismo que abre la corrida nueva.
+
+        Returns:
+            list[str]: run_id de las corridas cerradas, para el log.
+        """
+        viejas = (
+            session.execute(
+                select(JobRun).where(
+                    JobRun.job_name == job_name,
+                    JobRun.status == JobStatus.RUNNING.value,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not viejas:
+            return []
+
+        motivo = (
+            "no cerro: el proceso murio sin registrar el final. Detectada al "
+            f"arrancar otra corrida de {job_name}"
+        )
+        for vieja in viejas:
+            vieja.status = JobStatus.FAILED.value
+            vieja.error_summary = vieja.error_summary or motivo
+            if vieja.end_time is None:
+                vieja.end_time = ahora
+
+            for modelo in (DownloadTask, ProcessTask, CleeResolutionTask):
+                tareas = (
+                    session.execute(
+                        select(modelo).where(
+                            modelo.run_id == vieja.run_id,
+                            modelo.status.in_((TaskStatus.RUNNING.value, TaskStatus.PENDING.value)),
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for tarea in tareas:
+                    tarea.status = TaskStatus.FAILED.value
+                    tarea.error_message = tarea.error_message or motivo
+                    if tarea.end_time is None:
+                        tarea.end_time = ahora
+                    if tarea.start_time and tarea.duration_seconds is None:
+                        tarea.duration_seconds = (ahora - tarea.start_time).total_seconds()
+
+        return [v.run_id for v in viejas]
 
     def complete_run(
         self,

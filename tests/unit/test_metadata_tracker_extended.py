@@ -7,7 +7,7 @@ necesitan un PostgreSQL de pruebas: se saltan solos si no hay servidor
 
 import pytest
 
-from src.shared.enums import TaskStatus
+from src.shared.enums import JobStatus, TaskStatus
 
 pytestmark = pytest.mark.postgres
 
@@ -175,3 +175,110 @@ def test_clee_resolution_metrics(tracker):
     """Test getting CLEE resolution metrics."""
     metrics = tracker.get_clee_resolution_metrics()
     assert isinstance(metrics, list)
+
+
+def _tarea(tracker, task_id: str) -> dict:
+    """La fila de `process_tasks`, leida directo del ORM.
+
+    El tracker no expone un getter para una tarea suelta --nadie en el
+    pipeline lo necesita-- y agregar API publica solo para un test seria
+    peor. La sesion sale de la misma fabrica que usa el tracker, asi que
+    apunta a la base de pruebas.
+    """
+    from src.shared.db.models.meta import ProcessTask
+
+    with tracker._session() as session:
+        fila = session.get(ProcessTask, task_id)
+        return {c.name: getattr(fila, c.name) for c in fila.__table__.columns}
+
+
+@pytest.mark.unit
+class TestCorridasHuerfanas:
+    """Un proceso que muere deja su corrida en RUNNING para siempre.
+
+    Es facil de provocar sin querer: matar al cliente no aborta la sentencia
+    del servidor, y borrar el contenedor tampoco. La consecuencia es que
+    `/ops/health/pipeline` reporta una corrida en curso que no existe.
+
+    El criterio de deteccion es EXACTO y no un umbral: estas etapas escriben
+    la misma tabla destino y dos corridas del mismo job a la vez se bloquean
+    entre si, asi que una RUNNING que sobrevive al arranque de otra del mismo
+    `job_name` es necesariamente basura.
+    """
+
+    def test_la_corrida_vieja_queda_fallida(self, tracker):
+        vieja = tracker.create_run(job_name="gold_x", job_type="GOLD")
+        tracker.create_run(job_name="gold_x", job_type="GOLD")
+
+        cerrada = tracker.get_run(vieja)
+        assert cerrada["status"] == JobStatus.FAILED.value
+        assert cerrada["end_time"] is not None
+        assert "no cerro" in cerrada["error_summary"]
+
+    def test_sus_tareas_tambien(self, tracker):
+        """Si la corrida esta muerta, sus tareas no estan corriendo."""
+        vieja = tracker.create_run(job_name="gold_y", job_type="GOLD")
+        task_id = tracker.create_process_task(
+            run_id=vieja, task_name="t", source_path="s", target_table="t"
+        )
+        tracker.start_process_task(task_id)
+
+        tracker.create_run(job_name="gold_y", job_type="GOLD")
+
+        tarea = _tarea(tracker, task_id)
+        assert tarea["status"] == TaskStatus.FAILED.value
+        assert tarea["end_time"] is not None
+        assert tarea["duration_seconds"] is not None
+
+    def test_no_toca_corridas_de_OTRO_job(self, tracker):
+        """El barrido es por `job_name`: permanencia y gold son independientes.
+
+        Si tocara a los demas, arrancar gold mataria el registro de una
+        permanencia que SI esta corriendo, que es justo lo contrario de lo
+        que se quiere.
+        """
+        otra = tracker.create_run(job_name="permanencia_radio", job_type="PERMANENCIA")
+        tracker.create_run(job_name="gold_z", job_type="GOLD")
+
+        assert tracker.get_run(otra)["status"] == JobStatus.RUNNING.value
+
+    def test_no_toca_corridas_ya_terminadas(self, tracker):
+        """Una SUCCESS no se reescribe como FAILED."""
+        exitosa = tracker.create_run(job_name="gold_w", job_type="GOLD")
+        tracker.complete_run(exitosa, JobStatus.SUCCESS)
+
+        tracker.create_run(job_name="gold_w", job_type="GOLD")
+
+        assert tracker.get_run(exitosa)["status"] == JobStatus.SUCCESS.value
+
+    def test_conserva_el_error_original_si_lo_habia(self, tracker):
+        """Un mensaje real vale mas que el generico del barrido.
+
+        El error se escribe con el ORM y no con `complete_process_task`
+        porque ese metodo cierra la tarea --le pone estado final y duracion--
+        y lo que hace falta montar aqui es lo contrario: una tarea que
+        alcanzo a registrar su error y NO alcanzo a cerrarse.
+        """
+        from src.shared.db.models.meta import ProcessTask
+
+        vieja = tracker.create_run(job_name="gold_v", job_type="GOLD")
+        task_id = tracker.create_process_task(
+            run_id=vieja, task_name="t", source_path="s", target_table="t"
+        )
+        tracker.start_process_task(task_id)
+        with tracker._session() as session:
+            session.get(ProcessTask, task_id).error_message = "DiskFull de verdad"
+
+        tracker.create_run(job_name="gold_v", job_type="GOLD")
+
+        cerrada = _tarea(tracker, task_id)
+        assert cerrada["error_message"] == "DiskFull de verdad"
+        assert cerrada["status"] == TaskStatus.FAILED.value
+
+    def test_varias_huerfanas_se_cierran_todas(self, tracker):
+        """Tres corridas muertas seguidas no dejan ninguna en RUNNING."""
+        viejas = [tracker.create_run(job_name="gold_u", job_type="GOLD") for _ in range(3)]
+        tracker.create_run(job_name="gold_u", job_type="GOLD")
+
+        for v in viejas:
+            assert tracker.get_run(v)["status"] == JobStatus.FAILED.value
