@@ -1459,6 +1459,7 @@ son incrementales).
 | `docker compose up -d migrate` | `alembic upgrade head`. Lo hace solo `docker compose up -d` |
 | `docker compose run --rm tools alembic current --verbose` | Revisión aplicada + historial. **Úsalo en vez de consultar la tabla**: `alembic_version` vive en `meta` (ver `alembic/env.py:39`), así que un `SELECT ... FROM alembic_version` sin calificar falla con *relation does not exist* y parece una base sin migrar |
 | `docker compose run --rm tools alembic downgrade -1` | Revierte una revisión |
+| `docker compose run --rm --no-deps tools alembic ...` | Lo mismo cuando `migrate` **no puede** pasar (revisión huérfana en `meta.alembic_version`): `tools` depende de `migrate` y sin `--no-deps` muere con *exit 255* antes de ejecutar nada. Ver `ARRANQUE.md` §10 |
 | `docker compose exec postgres psql -U etl_rw -d mipymes` | Sesión psql |
 | `docker compose exec postgres createdb -U etl_rw mipymes_test` | Base de pruebas (idempotente: falla si ya existe) |
 

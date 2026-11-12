@@ -318,21 +318,31 @@ revision*. Se resuelve declarando la base en `b0008` y subiendo desde ahí. Es
 seguro porque lo único que `b0009` tira es `gold`, que se reconstruye; Silver
 y `meta` no se tocan.
 
+**Con `--no-deps`, y no es opcional:** `tools` depende de que `migrate`
+termine bien, y `migrate` es justamente el `alembic upgrade head` que falla
+con la revisión huérfana. Sin `--no-deps`, cualquier `docker compose run
+tools` muere con *service "migrate" didn't complete successfully: exit 255*
+antes de ejecutar nada. Postgres sí tiene que estar arriba (`docker compose
+up -d postgres`).
+
 ```bash
 cd ~/tesis-maestria-etl
 git pull
 docker compose --profile manual --profile tools build
-docker compose run --rm tools alembic current 2>&1 | tail -1
+docker compose run --rm --no-deps tools alembic current 2>&1 | tail -1
 ```
 
 Si lo anterior dice `b0010verificacion_agente (head)`, la base ya está al
 día. Si dice *Can't locate revision* (o `b0009gold_cohorte_oficial`):
 
 ```bash
-docker compose run --rm tools alembic stamp --purge b0008clee_celda_h3_7
-docker compose run --rm tools alembic upgrade head
-docker compose run --rm tools alembic current
+docker compose run --rm --no-deps tools alembic stamp --purge b0008clee_celda_h3_7
+docker compose run --rm --no-deps tools alembic upgrade head
+docker compose run --rm --no-deps tools alembic current
 ```
+
+A partir de aquí `migrate` vuelve a pasar solo y `tools` deja de necesitar
+`--no-deps`.
 
 Esperado del `upgrade`: `gold: negocios_clee_oficial creada (38 columnas,
 vacia)` y `verificacion: 4 tablas creadas`.
