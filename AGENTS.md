@@ -1132,6 +1132,40 @@ Log del stage: `data/etl_gold.log`.
 
 ---
 
+## N6: Verificación — el schema `verificacion` y el agente
+
+`cerrado` es una hipótesis; aquí se guarda la prueba. El diseño completo
+—criterio, muestra, protocolo del agente, métricas— está en
+`verificacion_cierre.md`; esto es lo que hay que saber para no romperlo.
+
+```
+verificacion.muestras           una tirada: tamaño, semilla, estratos, filtro, reglas de gold
+verificacion.muestra_negocios   los negocios que salieron, con cerrado_gold CONGELADO
+verificacion.veredictos         activo | cerrado | indeterminado + confianza + razonamiento
+verificacion.evidencias         una fila por pieza: fuente, url, fecha, extracto, señal
+```
+
+- **Es un schema aparte porque no es derivable.** Un veredicto costó
+  búsquedas y la web cambia; tiene que sobrevivir a cualquier `--force` de
+  `gold`. Por eso **no hay FK hacia `gold`** (impediría truncarla): el join
+  es lógico, por `clee`. `b0010` es la única migración de la cadena que no
+  tira antes de crear.
+- **La hipótesis se congela al muestrear** (`cerrado_gold`,
+  `meses_sin_aparecer_gold`, `huecos_gold`). No es un snapshot prohibido:
+  es el objeto de estudio. Otra versión de la regla se verifica con otra
+  muestra; `muestras.nombre` es único por eso.
+- **El vocabulario es cerrado** y los `CHECK` salen de los enums de
+  `src/shared/enums/verificacion.py`. `indeterminado` es un resultado
+  legítimo, no un fallo del agente.
+- **El agente no recibe `cerrado_gold`**: el veredicto es ciego a lo que se
+  mide. Sí recibe `ultimo_periodo`, que es dato del DENUE.
+- Lo escribe el agente, no el ETL. Lo lee `api_ro`, igual que `gold`.
+
+Todavía no existe ni el comando de muestreo ni el agente: la primera
+muestra se saca con el SQL de `verificacion_cierre.md` §4.3.
+
+---
+
 ## Fase 7: Evaluación con CLEE enmascarado (`scripts/evaluate_masked_clee.py`)
 
 Mide precision/recall de la cascada de matching usando el `clee` OFICIAL
@@ -1234,8 +1268,8 @@ Línea base medida el 2026-07-30 (post nearest-first) en
 - **Language:** Python 3.12+
 - **Package Manager:** uv
 - **Frameworks:** FastAPI (API), Typer (CLI), SQLAlchemy 2.0 (ORM), Alembic (migrations)
-- **Base de datos:** PostgreSQL 17 — una base, tres schemas (`silver`,
-  `gold`, `meta`); driver psycopg3, escrituras masivas con `COPY`
+- **Base de datos:** PostgreSQL 17 — una base, cuatro schemas (`silver`,
+  `gold`, `meta`, `verificacion`); driver psycopg3, escrituras masivas con `COPY`
 - **DataFrames:** Polars
 - **Almacenamiento:** `silver.establecimientos` particionada por `period`;
   los seeds de catálogos, en Parquet versionado
@@ -1269,8 +1303,9 @@ etl-core/
 │   │       ├── clee.py            # clee_radio / clee_h3 (identidad resuelta)
 │   │       ├── permanencia.py     # permanencia_radio / permanencia_h3
 │   │       ├── meta.py            # job_runs, download/process/clee tasks, lineage
-│   │       └── gold.py            # Sin tablas todavia
-│   └── enums/                     # jobs, sections, clee, layer, sources
+│   │       ├── gold.py            # negocios_clee_oficial: edad y veredicto de cierre
+│   │       └── verificacion.py    # muestras / muestra_negocios / veredictos / evidencias (el agente)
+│   └── enums/                     # jobs, sections, clee, layer, sources, verificacion
 │
 ├── src/etl/
 │   ├── main.py                    # CLI (Typer): extract, sync-bronze, transform, pipeline
@@ -1328,7 +1363,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 8 revisiones, b0000 (baseline) -> b0007
+├── alembic/versions/              # 11 revisiones, b0000 (baseline) -> b0010
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -1599,7 +1634,7 @@ avance y rehaz". Tabla canónica:
 | `clee-celda-h3-7` | Idem para `silver.clee_celda_h3_7` | ~1 noche; **exige `h3_cell_7` poblada** o corre sobre nada |
 | `h3-cell-7` | **Nada: lo ignora.** Solo toca filas en NULL y el padre de una celda no cambia, así que reescribir los 82.9M daría los mismos valores a cambio de un rewrite completo por MVCC | — |
 | `permanencia-radio` / `-h3` | Descarta el avance y reconstruye `silver.permanencia_<metodo>` | Horas. Rara vez necesario: si la identidad cambió, la etapa lo detecta y rehace sola |
-| `gold` | Trunca `gold.negocios_clee_oficial` y la reconstruye | Horas. Rara vez necesario: si la ventana oficial cambió, la etapa lo detecta y rehace sola. No toca Silver ni `meta` |
+| `gold` | Trunca `gold.negocios_clee_oficial` y la reconstruye | Horas (~1h40 medido). Rara vez necesario: si la ventana oficial cambió, la etapa lo detecta y rehace sola. No toca Silver, `meta` ni `verificacion` |
 | `sesnsp` | Re-procesa el CSV consolidado | Minutos |
 
 **Regla práctica**: un `--force` global (`transform --force`) arrastra al
@@ -1931,8 +1966,8 @@ No declarar en `__table_args__` un índice de una sola columna que ya trae
 
 ### Backend Configuration
 
-Un solo motor: **PostgreSQL**, una base con tres schemas. No hay flag de
-backend que elegir.
+Un solo motor: **PostgreSQL**, una base con cuatro schemas (`silver`,
+`gold`, `meta`, `verificacion`). No hay flag de backend que elegir.
 
 ```bash
 POSTGRES_HOST=localhost
@@ -1951,7 +1986,7 @@ base.
 ### Migraciones: un baseline y lo que cambió después
 
 **Estándar del proyecto: la base se crea desde cero.** `b0000` es el
-baseline de PostgreSQL —reemplazó la cadena histórica de DuckDB— y las siete
+baseline de PostgreSQL —reemplazó la cadena histórica de DuckDB— y las diez
 que siguen son los cambios reales de esquema desde entonces:
 
 | Revisión | Qué hace |
@@ -1964,6 +1999,9 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0005permanencia_por_metodo` | Cambia `entidades_economicas` por `permanencia_radio` / `permanencia_h3` |
 | `b0006sin_vistas_de_permanencia` | Elimina las cuatro vistas `estatus_<metodo>` / `variantes_<metodo>`: eran consultas, no esquema |
 | `b0007permanencia_sin_snapshots` | Recrea las dos tablas de permanencia sin el valor "del corte mas reciente" de ningun campo oficial: en su lugar, banderas `tiene_*` de cobertura |
+| `b0008clee_celda_h3_7` | Agrega `establecimientos.h3_cell_7` y crea `silver.clee_celda_h3_7` (la celda como criterio, no como índice) |
+| `b0009gold_cohorte_oficial` | Crea `gold.negocios_clee_oficial`: edad y veredicto de cierre de la cohorte con CLEE oficial. **Reescrita en sitio** el 2026-11-11 (tira y recrea: su contenido es derivable); la `b0010gold_sin_snapshots` que la seguía se retiró de la cadena. Una base que aplicó cualquiera de las dos necesita `alembic stamp --purge b0008clee_celda_h3_7` antes de `upgrade head` (`ARRANQUE.md` §10) |
+| `b0010verificacion_agente` | Crea el schema `verificacion` (muestras, muestra_negocios, veredictos, evidencias) para el agente que busca los negocios en línea. **No tira antes de crear**: su contenido no es derivable |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2020,7 +2058,7 @@ No hay `DATABASE_BACKEND` ni variables de DuckDB: el motor es PostgreSQL y
 nada más, y ningún módulo de `src/` lee una `DUCKDB_*`.
 
 ```bash
-# PostgreSQL: una sola base, tres schemas (silver, gold, meta).
+# PostgreSQL: una sola base, cuatro schemas (silver, gold, meta, verificacion).
 # Driver psycopg3 (`postgresql+psycopg`), no psycopg2: `shared/db/copy.py`
 # necesita COPY ... FROM STDIN y psycopg2 esta en modo mantenimiento.
 POSTGRES_HOST=localhost
@@ -2075,6 +2113,13 @@ SESNSP_RESOURCE_NAME=Incidencia delictiva municipal
 # y cada cuanto emitir el latido de progreso (0 lo apaga).
 PERMANENCIA_BLOQUES=32
 PERMANENCIA_LATIDO_SEGUNDOS=60
+
+# Gold: cobertura minima de clee para que un corte sea oficial; umbral de
+# cierre EN MESES (la regla que verificacion_cierre.md existe para validar);
+# version de las reglas, que queda grabada en cada fila.
+GOLD_COBERTURA_CLEE_MINIMA=0.999
+CIERRE_MESES_AUSENTE=12
+GOLD_VERSION_REGLAS=v1
 ```
 
 ---
@@ -2186,7 +2231,7 @@ declarado es error, no un typo silencioso).
 
 | Fixture | Qué da |
 |---|---|
-| `pg_engine` | Engine al Postgres de pruebas, con los tres schemas creados. Scope de sesión |
+| `pg_engine` | Engine al Postgres de pruebas, con los schemas de `Layer` creados (`silver`, `gold`, `meta`, `verificacion`). Scope de sesión |
 | `silver_engine` | `DROP SCHEMA silver CASCADE` + `create_all` de las tablas de la capa: cada test parte de un `silver` limpio |
 | `tracker` | `MetadataTracker` sobre un `meta` recién recreado y vacío |
 

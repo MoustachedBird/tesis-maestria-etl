@@ -1,6 +1,10 @@
 # `gold.negocios_clee_oficial` — la cohorte con CLEE oficial (2021+)
 
-**Estado:** propuesto, nada implementado. Escrito el 2026-11-07.
+**Estado:** implementado (`b0009`, `transform --only gold`), con dos cambios
+respecto a lo propuesto aquí: **no hay tabla de variantes** (los valores
+distintos salen de `silver.establecimientos` por `clee`) y **la regla de
+cierre quedó decidida y grabada en `gold`**, en meses y no en cortes
+(`verificacion_cierre.md` §1). Escrito el 2026-11-07.
 
 **Qué entrega:** el alcance de la capa de consumo, el criterio de corte
 verificado contra el repo, por qué Gold **no** puede copiar
@@ -391,8 +395,9 @@ cortes, la ventana no alcanza y hay que volver a la propagación.
 
 - **No duplica las reglas por campo**: están en `normalizacion_gold.md`
   §§4–6 y aquí solo se declara lo que cambia en esta cohorte.
-- **No decide la regla de cierre.** Sigue siendo preliminar y se aplica en
-  la consulta (`AGENTS.md` §N3).
+- **No decide la regla de cierre.** Quedó decidida después, en
+  `verificacion_cierre.md` §1: `cerrado ⟺ meses_sin_aparecer ≥ 12`, grabada
+  en `gold` y verificable con el schema `verificacion`.
 - **No cancela `alternativas_clee_propagation.md`.** Lo reubica: de
   prerrequisito a extensión.
 - **No implementa nada.**

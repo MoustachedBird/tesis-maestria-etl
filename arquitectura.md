@@ -94,7 +94,7 @@ flowchart TB
         direction TB
 
         subgraph datos["Plano de datos"]
-            PG[("postgres:17 oficial<br/><b>una sola base: mipymes</b><br/>schemas: silver · gold · meta")]
+            PG[("postgres:17 oficial<br/><b>una sola base: mipymes</b><br/>schemas: silver · gold · meta · verificacion")]
         end
 
         subgraph trabajo["Plano de ejecución (misma imagen)"]
@@ -151,9 +151,9 @@ no existe y vuelves al problema 1.3. Y por qué Prometheus aparte: porque
 retener series temporales es un problema resuelto y meterlo en Postgres
 sería reinventarlo peor.
 
-### 2.3 Los tres schemas
+### 2.3 Los cuatro schemas
 
-Una base `mipymes`, tres schemas, tres contratos distintos:
+Una base `mipymes`, cuatro schemas, cuatro contratos distintos:
 
 ```
 silver.*     datos limpios, granularidad de origen, append por periodo
@@ -177,6 +177,13 @@ meta.*       observabilidad y control
   job_runs, download_tasks, process_tasks, normalize_tasks,
   clee_resolution_tasks, data_lineage      ← hoy en metadata.duckdb
   schedules, run_requests                  ← nuevos (§2.5)
+
+verificacion.*  lo que se observa FUERA de los datos (agregado 2026-11-11)
+  muestras, muestra_negocios, veredictos, evidencias
+             El agente que busca en línea una muestra de negocios de gold y
+             dice si siguen activos. NO es derivable: sobrevive a cualquier
+             TRUNCATE de gold, y por eso no tiene FK hacia gold. Lo escribe
+             el agente, no el ETL. Ver verificacion_cierre.md
 ```
 
 Ganancias concretas de usar schemas y no prefijos:
@@ -187,8 +194,8 @@ pg_dump -n gold mipymes > gold.sql         -- respaldo de una capa sola
 SET search_path = gold;                    -- UN schema a la vez (§2.3.1)
 ```
 
-El API corre con un rol `api_ro` que **solo** tiene `SELECT` en `gold` y
-`meta`. Un bug en un endpoint no puede tocar Silver. Eso con prefijos en
+El API corre con un rol `api_ro` que **solo** tiene `SELECT` en `gold`,
+`meta` y `verificacion`. Un bug en un endpoint no puede tocar Silver. Eso con prefijos en
 `public` no se puede expresar.
 
 #### 2.3.1 Regla de nombres: `silver.establecimientos` vs `gold.establecimientos`
@@ -432,7 +439,7 @@ src/
   shared/              # ← sin dependencias sobre etl/api/scheduler
     enums/
       __init__.py      # re-exporta todo
-      layer.py         # Layer: SILVER | GOLD | META
+      layer.py         # Layer: SILVER | GOLD | META | VERIFICACION
       jobs.py          # JobType, JobStatus, TaskStatus, TriggerType, ErrorType
       sources.py       # SourceSystem: DENUE | SESNSP
       sections.py      # Section (hoy enum local en src_etl/main.py)
@@ -441,7 +448,7 @@ src/
     db/
       base.py          # DeclarativeBase + naming_convention
       session.py       # engine, sessionmaker, get_db
-      models/          # ORM por schema: silver.py, gold.py, meta.py
+      models/          # ORM por schema: silver.py, clee.py, permanencia.py, gold.py, meta.py, verificacion.py
   etl/                 # extractors, transformers, loaders, utils
   api/                 # routers, schemas, deps
   scheduler/           # cron + consumidor de cola

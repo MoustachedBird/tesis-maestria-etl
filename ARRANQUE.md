@@ -40,10 +40,10 @@ queda con la imagen vieja sin avisar.
 Lo que escribieron corridas anteriores quedó con dueño root. El contenedor
 de arriba también es root, así que borra sin `sudo`.
 
-Esperado (la cadena son ocho revisiones; `b0000` crea y las demás ajustan):
+Esperado (la cadena son once revisiones; `b0000` crea y las demás ajustan):
 
 ```
-   Schemas creados: silver, gold, meta
+   Schemas creados: silver, gold, meta, verificacion
    silver: 11 tablas
    meta: 5 tablas
    Rol api_ro: SELECT en gold, meta (sin acceso a silver)
@@ -57,11 +57,18 @@ Esperado (la cadena son ocho revisiones; `b0000` crea y las demás ajustan):
    silver: 4 vistas de permanencia eliminadas
    silver: 2 tablas de permanencia recreadas con 45 columnas, sin valores de un corte concreto (permanencia_radio, permanencia_h3)
    hay que reconstruirlas: transform --only permanencia --force
+   silver: silver.establecimientos.h3_cell_7 agregada (NULL en lo ya cargado)
+   silver: clee_celda_h3_7 creada (metodo `celda_h3_7`, sin particiones)
+   gold: negocios_clee_oficial creada (38 columnas, vacia)
+   verificacion: 4 tablas creadas, vacias (muestras, muestra_negocios, veredictos, evidencias)
+   verificacion: SELECT para api_ro
 ```
 
-Al final: **15 tablas en `silver`** (11 del baseline + 2 de CLEE + 2 de
-permanencia), **5 en `meta`** (más `alembic_version`, que es de Alembic) y
-`gold` vacío: todavía no hay tabla que promover.
+Al final: **16 tablas en `silver`** (11 del baseline + 3 de CLEE + 2 de
+permanencia), **5 en `meta`** (más `alembic_version`, que es de Alembic),
+**1 en `gold`** (`negocios_clee_oficial`, vacía hasta `transform --only
+gold`) y **4 en `verificacion`** (vacías hasta que corran el muestreo y el
+agente).
 
 ## 2. Descargar Bronze
 
@@ -301,10 +308,45 @@ con agentes para validar la premisa *"dejó de aparecer en el DENUE ⇒ quebró"
 **No depende de la resolución CLEE** —lee el `clee` de los propios hechos— así
 que se puede correr sin haber terminado las propagaciones.
 
+### Antes de la primera tanda: la base tiene que estar en `b0010`
+
+`b0009` se reescribió en sitio y `b0010gold_sin_snapshots` se retiró de la
+cadena (las dos generaban el DDL desde un modelo que ya no existe). Una base
+que aplicó cualquiera de las dos tiene en `meta.alembic_version` una revisión
+que Alembic ya no encuentra, y `upgrade head` falla con *Can't locate
+revision*. Se resuelve declarando la base en `b0008` y subiendo desde ahí. Es
+seguro porque lo único que `b0009` tira es `gold`, que se reconstruye; Silver
+y `meta` no se tocan.
+
+```bash
+cd ~/tesis-maestria-etl
+git pull
+docker compose --profile manual --profile tools build
+docker compose run --rm tools alembic current 2>&1 | tail -1
+```
+
+Si lo anterior dice `b0010verificacion_agente (head)`, la base ya está al
+día. Si dice *Can't locate revision* (o `b0009gold_cohorte_oficial`):
+
+```bash
+docker compose run --rm tools alembic stamp --purge b0008clee_celda_h3_7
+docker compose run --rm tools alembic upgrade head
+docker compose run --rm tools alembic current
+```
+
+Esperado del `upgrade`: `gold: negocios_clee_oficial creada (38 columnas,
+vacia)` y `verificacion: 4 tablas creadas`.
+
+### La tanda
+
+Con `--force`: la tabla de trabajo de una corrida anterior puede seguir en
+`gold` con otra forma, y `--force` la tira antes de empezar. La corrida
+anterior (misma máquina, 32 bloques) tardó **~1 h 40 min**.
+
 ```bash
 cd ~/tesis-maestria-etl
 nohup docker compose run --rm etl \
-  transform --only gold > gold.log 2>&1 &
+  transform --only gold --force > gold.log 2>&1 &
 sleep 10
 tail -f gold.log
 ```
@@ -375,16 +417,25 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
    AND e.nom_estab <> ''"
 ```
 
-Una muestra para verificar en línea, estratificada por donde la regla es más
-frágil:
+Los tamaños de los estratos de la muestra que se verifica en línea
+(`verificacion_cierre.md` §4.2), que es lo que decide si las cuotas de 100
+alcanzan y con qué peso se repondera cada uno:
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT clee, nombre, ultimo_periodo, meses_sin_aparecer, huecos, local_reocupado
+"SELECT CASE WHEN cerrado AND local_reocupado THEN 'cerrado|reocupado'
+             WHEN cerrado                     THEN 'cerrado|no_reocupado'
+             WHEN huecos > 0                  THEN 'activo|intermitente'
+             ELSE                                  'activo|continuo' END AS estrato,
+        count(*) AS negocios
  FROM gold.negocios_clee_oficial
- WHERE cerrado AND NOT cluster_sospechoso AND nombre IS NOT NULL
- ORDER BY random() LIMIT 20"
+ WHERE NOT cluster_sospechoso AND nombre IS NOT NULL AND cve_geo_final IS NOT NULL
+ GROUP BY 1 ORDER BY 1"
 ```
+
+La muestra en sí **no** es un `ORDER BY random() LIMIT 20`: es una tirada
+estratificada y reproducible que queda escrita en `verificacion.muestras`
+con su semilla. El SQL completo está en `verificacion_cierre.md` §4.3.
 
 Con qué ventana se construyó cada corrida, sin abrir un log. El `::jsonb` no
 es adorno: `meta.job_runs.config` es `text` con JSON dentro, así que
