@@ -1043,10 +1043,21 @@ cualquiera", son los dos extremos de la vida.
 El DENUE **no reporta cierres**: solo deja de listar. La columna es la
 conjetura que la tabla existe para validar.
 
-- El umbral es `CIERRE_CORTES_AUSENTE` (default **1**) y queda en
-  `version_reglas`.
-- **Los ingredientes se conservan**: `cortes_tras_ultimo` y `huecos`. Cambiar
-  el umbral recalcula la columna sin reconstruir los 9.58M de filas.
+- **La regla es en meses, no en cortes**: `cerrado ⟺ meses_sin_aparecer ≥
+  CIERRE_MESES_AUSENTE` (default **12**). Los cortes no son equidistantes
+  (6, 6, 6, **12**, 6, 6, 6, **12** meses), así que "un corte ausente" vale
+  el doble de evidencia para unos negocios que para otros; 12 meses son dos
+  ciclos de la cadencia semestral, que es la regla preliminar del protocolo
+  ("dos cortes consecutivos") expresada en tiempo. El umbral queda en
+  `version_reglas` y en `meta.job_runs.config`.
+- Un negocio ausente por **menos** meses que el umbral queda en
+  `cerrado = FALSE`: todavía no se afirma nada de él
+  (`cortes_tras_ultimo > 0 AND NOT cerrado`). Con la ventana de hoy ese
+  grupo está vacío, porque el último intervalo son 12 meses; aparecerá en
+  cuanto entre un corte a 6 meses del anterior.
+- **Los ingredientes se conservan**: `meses_sin_aparecer`, `cortes_tras_ultimo`
+  y `huecos`. Cambiar el umbral recalcula la columna sin reconstruir los
+  9.58M de filas.
 - **`huecos > 0` mide el error de la regla con los propios datos**: son los
   negocios que ya desaparecieron **y volvieron**, o sea casos probados de que
   ausencia ≠ cierre. Es por donde conviene estratificar el muestreo, y está
@@ -1106,11 +1117,12 @@ llave que nunca existió.
 
 ### Invariantes que fallan la corrida
 
-Diez chequeos corren con la tabla escrita y **antes** de que `meta` la
+Once chequeos corren con la tabla escrita y **antes** de que `meta` la
 declare exitosa. Los que importan más son los del propósito: ninguna edad
-negativa, `cerrado` coherente con el umbral de la corrida, y **ningún negocio
-presente en el último corte marcado como cerrado** — esa contradicción
-metería en la muestra negocios que el propio DENUE sigue listando.
+negativa, ningún mes de ausencia negativo, `cerrado` coherente con el umbral
+de meses de la corrida, y **ningún negocio presente en el último corte
+marcado como cerrado** — esa contradicción metería en la muestra negocios
+que el propio DENUE sigue listando.
 
 Se reportan **todas** y no la primera, y **la tabla se deja como está**: lo
 que hace falta cuando un invariante falla es mirar las filas que lo violan.

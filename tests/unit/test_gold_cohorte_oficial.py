@@ -110,8 +110,21 @@ class TestElVeredictoDeCierre:
         """
         from src.shared.config import get_settings
 
-        umbral = get_settings().CIERRE_CORTES_AUSENTE
-        assert f">= {umbral} AS cerrado" in madre
+        umbral = get_settings().CIERRE_MESES_AUSENTE
+        assert f"v.meses_sin_aparecer >= {umbral} AS cerrado" in madre
+
+    def test_la_regla_es_en_meses_no_en_cortes(self, madre, pasos):
+        """Contar cortes no es contar tiempo, y la ventana lo demuestra.
+
+        Con los intervalos en 6, 6, 6, 12, 6, 6, 6, 12 meses, "un corte
+        ausente" vale 12 meses de evidencia para unos negocios y 6 para
+        otros. La regla se aplica sobre los meses, y ninguna comparacion con
+        `cortes_tras_ultimo` o con los `idx` puede colarse en el veredicto.
+        """
+        assert "cortes_tras_ultimo >=" not in madre
+        assert "v.idx_ultimo) >=" not in madre
+        reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
+        assert "idx_ultimo" not in reocupado
 
     def test_se_mide_contra_el_ultimo_corte_oficial(self, madre):
         """`cortes_tras_ultimo` con el idx 8, que es el noveno corte."""
@@ -124,19 +137,20 @@ class TestElVeredictoDeCierre:
         que ya desaparecieron y volvieron, o sea casos probados de que
         ausencia no implica cierre.
         """
+        assert "v.meses_sin_aparecer," in madre
         assert "AS cortes_tras_ultimo" in madre
         assert "AS huecos" in madre
 
     def test_el_umbral_es_configurable_sin_tocar_codigo(self, monkeypatch):
         from src.shared.config import get_settings
 
-        monkeypatch.setenv("CIERRE_CORTES_AUSENTE", "3")
+        monkeypatch.setenv("CIERRE_MESES_AUSENTE", "18")
         get_settings.cache_clear()
         try:
             ag = CohorteOficial()
             ag._ventana = list(VENTANA)
             sql = next(p.sql for p in ag.pasos_bloque(0, 8) if p.nombre == TABLA)
-            assert ">= 3 AS cerrado" in sql
+            assert "v.meses_sin_aparecer >= 18 AS cerrado" in sql
         finally:
             get_settings.cache_clear()
 
@@ -368,7 +382,8 @@ class TestLosInvariantes:
         """Si la edad o el cierre están mal, la muestra no significa nada."""
         todo = " ".join(self._consultas(cohorte))
         assert "edad_anios < 0" in todo
-        assert "cerrado <> (cortes_tras_ultimo >=" in todo
+        assert "cerrado <> (meses_sin_aparecer >=" in todo
+        assert "meses_sin_aparecer < 0" in todo
         assert "cortes_tras_ultimo = 0 AND cerrado" in todo
 
     def test_valida_la_coherencia_de_la_ventana(self, cohorte):
@@ -404,7 +419,7 @@ class TestLosInvariantes:
                 return R()
 
         violaciones = cohorte.validar(ConnRota())
-        assert len(violaciones) == 10
+        assert len(violaciones) == 11
         assert all("14ABC0001" in v for v in violaciones)
 
 
@@ -444,7 +459,7 @@ class TestTroceoYMeta:
         contexto = cohorte.contexto_meta(conn=None)
         assert contexto["n_cortes_oficiales"] == 9
         assert contexto["ventana_cortes"] == [c.isoformat() for c in VENTANA]
-        assert "cierre_cortes_ausente" in contexto
+        assert "cierre_meses_ausente" in contexto
         assert "version_reglas" in contexto
 
     def test_el_contexto_es_serializable_a_json(self, cohorte):
@@ -508,19 +523,23 @@ class TestLaAusenciaEnMeses:
         assert meses == [6, 6, 6, 12, 6, 6, 6, 12]
         assert len(set(meses)) > 1
 
-    def test_se_mide_contra_el_ultimo_corte_de_la_ventana(self, madre):
-        assert f"DATE '{VENTANA[-1].isoformat()}'" in madre
-        assert "AS meses_sin_aparecer" in madre
+    def test_se_mide_contra_el_ultimo_corte_de_la_ventana(self, pasos):
+        """Se calcula UNA vez, en `ventana`, y de ahí lo leen el veredicto y
+        la búsqueda del local reocupado: dos cálculos podrían discrepar."""
+        ventana = next(p.sql for p in pasos if p.nombre == "ventana")
+        assert f"DATE '{VENTANA[-1].isoformat()}'" in ventana
+        assert "AS meses_sin_aparecer" in ventana
 
-    def test_es_una_diferencia_de_calendario_no_de_dias(self, madre):
+    def test_es_una_diferencia_de_calendario_no_de_dias(self, pasos):
         """Los cortes caen el día 1, así que la diferencia en meses es exacta.
 
         Dividir días entre 30 daría 5.9 o 6.1 meses según el mes, y eso
         volvería ruidoso un eje que debería ser limpio.
         """
-        assert "EXTRACT(YEAR FROM" in madre
-        assert "EXTRACT(MONTH FROM" in madre
-        assert "/ 30" not in madre
+        ventana = next(p.sql for p in pasos if p.nombre == "ventana")
+        assert "EXTRACT(YEAR FROM" in ventana
+        assert "EXTRACT(MONTH FROM" in ventana
+        assert "/ 30" not in ventana
 
 
 @pytest.mark.unit
@@ -534,7 +553,7 @@ class TestElLocalReocupado:
         búsqueda por cada uno de los 9.58M.
         """
         reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
-        assert "v.idx_ultimo) >=" in reocupado
+        assert "v.meses_sin_aparecer >=" in reocupado
         assert "ELSE NULL END AS local_reocupado" in madre
 
     def test_busca_otro_clee_en_un_corte_posterior(self, pasos):

@@ -259,7 +259,7 @@ class CohorteOficial(Agregado):
             "cobertura_clee_minima": ajustes.GOLD_COBERTURA_CLEE_MINIMA,
             "metodo_base": METODO_BASE,
             "version_reglas": ajustes.GOLD_VERSION_REGLAS,
-            "cierre_cortes_ausente": ajustes.CIERRE_CORTES_AUSENTE,
+            "cierre_meses_ausente": ajustes.CIERRE_MESES_AUSENTE,
         }
 
     @property
@@ -330,10 +330,14 @@ class CohorteOficial(Agregado):
                 f"SELECT count(*), min(clee) FROM {tabla} WHERE edad_anios < 0",
             ),
             (
-                "`cerrado` no coincide con el umbral de la corrida",
+                "`cerrado` no coincide con el umbral de meses de la corrida",
                 f"SELECT count(*), min(clee) FROM {tabla} "
-                f"WHERE cerrado <> (cortes_tras_ultimo >= "
-                f"{get_settings().CIERRE_CORTES_AUSENTE})",
+                f"WHERE cerrado <> (meses_sin_aparecer >= "
+                f"{get_settings().CIERRE_MESES_AUSENTE})",
+            ),
+            (
+                "hay meses de ausencia negativos, o sea un ultimo_periodo posterior a la ventana",
+                f"SELECT count(*), min(clee) FROM {tabla} WHERE meses_sin_aparecer < 0",
             ),
             (
                 "hay negocios presentes en el ultimo corte marcados como cerrados",
@@ -481,17 +485,39 @@ WHERE e.period = {literal}
         n_cortes = ultimo_idx + 1
         ventana_sql = self._ventana_literal()
         ajustes = get_settings()
-        ausente = ajustes.CIERRE_CORTES_AUSENTE
+        meses = ajustes.CIERRE_MESES_AUSENTE
 
         return [
             self._paso_ventana(bloque),
             self._paso_primera(bloque),
             self._paso_ultima(bloque),
-            self._paso_reocupado(ausente),
+            self._paso_reocupado(meses),
             self._paso_nombres(bloque),
             self._paso_canonico(),
             self._paso_insert(ultimo_idx, n_cortes, ventana_sql, ajustes),
         ]
+
+    def _sql_meses_sin_aparecer(self, ultimo_observado: str) -> str:
+        """Meses entre el ultimo corte en que aparecio y el ultimo de la ventana.
+
+        Es una diferencia de CALENDARIO y no de dias entre 30: los cortes caen
+        el dia 1, asi que la resta de anios y meses es exacta, mientras que
+        dividir dias daria 5.9 o 6.1 segun el mes y volveria ruidoso el eje
+        sobre el que se aplica la regla de cierre.
+
+        Args:
+            ultimo_observado: expresion SQL de tipo `date` con el ultimo corte
+                en que el negocio aparecio.
+
+        Returns:
+            str: expresion entera; 0 si aparecio en el corte final.
+        """
+        ultimo_corte = self._ventana[-1].isoformat()
+        return (
+            f"((EXTRACT(YEAR FROM DATE '{ultimo_corte}') - EXTRACT(YEAR FROM {ultimo_observado})) * 12"
+            f" + (EXTRACT(MONTH FROM DATE '{ultimo_corte}')"
+            f" - EXTRACT(MONTH FROM {ultimo_observado})))::int"
+        )
 
     def _ventana_literal(self) -> str:
         """La ventana como literal SQL, para grabarla en cada fila.
@@ -524,6 +550,12 @@ SELECT
     MAX(period) AS ultimo_periodo,
     MIN(idx) AS idx_primer,
     MAX(idx) AS idx_ultimo,
+    -- Meses de ausencia, no cortes: los intervalos de la ventana son 6, 6,
+    -- 6, 12, 6, 6, 6, 12 meses, asi que un mismo `cortes_tras_ultimo` puede
+    -- significar el doble de evidencia. Es el ingrediente de la regla de
+    -- cierre, y se calcula aqui una vez para que el veredicto y la busqueda
+    -- del local reocupado lean el MISMO numero.
+    {self._sql_meses_sin_aparecer("MAX(period)")} AS meses_sin_aparecer,
     COUNT(DISTINCT idx) AS cortes_observados,
     MIN(fecha_alta_date) AS fecha_alta_date,
     -- Los cortes EXACTOS en que aparecio: es lo que se publica en `periodos`,
@@ -605,7 +637,7 @@ ORDER BY clee, period DESC, id
 """,
         )
 
-    def _paso_reocupado(self, ausente: int) -> Paso:
+    def _paso_reocupado(self, meses: int) -> Paso:
         """Si OTRO negocio aparecio en la misma celda H3 despues del ultimo.
 
         Es evidencia **corroborante** del cierre, no prueba: en una celda res
@@ -614,9 +646,10 @@ ORDER BY clee, period DESC, id
         humano buscaria, y sirve para estratificar la muestra: donde esto es
         True, la hipotesis de cierre es mas creible.
 
-        **Solo se evalua para los que la regla declara cerrados.** Para los
-        activos no significa nada --el vecino existe y los dos siguen ahi-- y
-        evaluarlo costaria una busqueda por cada uno de los 9.58M.
+        **Solo se evalua para los que la regla declara cerrados** (los que
+        llevan `meses` o mas sin aparecer). Para los activos no significa nada
+        --el vecino existe y los dos siguen ahi-- y evaluarlo costaria una
+        busqueda por cada uno de los 9.58M.
 
         El `EXISTS` es un semi-join: se detiene en la primera coincidencia en
         vez de contar todos los vecinos, que en una celda densa serian
@@ -638,7 +671,7 @@ SELECT u.clee
 FROM ultima u
 JOIN ventana v USING (clee)
 WHERE u.h3_cell_9 IS NOT NULL
-  AND ({len(self._ventana or []) - 1} - v.idx_ultimo) >= {ausente}
+  AND v.meses_sin_aparecer >= {meses}
   AND EXISTS (
       SELECT 1 FROM {self.origen_schema}.establecimientos e
       WHERE e.h3_cell_9 = u.h3_cell_9
@@ -710,9 +743,7 @@ ORDER BY clee, n_cortes DESC, ultimo_idx DESC, nom_estab
     ) -> Paso:
         """La fila del negocio: ventana, edad, veredicto y los dos extremos."""
         version = ajustes.GOLD_VERSION_REGLAS
-        ausente = ajustes.CIERRE_CORTES_AUSENTE
-        # El ultimo corte de la ventana, para medir la ausencia en meses.
-        ultimo_corte = self._ventana[-1].isoformat()
+        meses = ajustes.CIERRE_MESES_AUSENTE
 
         # Distancia entre los dos extremos REALES del recorrido. Respeta el
         # orden temporal, asi que contesta "termino en otro lado?" y no
@@ -779,20 +810,15 @@ SELECT
     CASE WHEN v.fecha_alta_date IS NULL THEN NULL
          ELSE (v.primer_periodo - v.fecha_alta_date) END AS dias_alta_a_primera,
     -- VEREDICTO. Es una HIPOTESIS: el DENUE no reporta cierres, solo deja de
-    -- listar. El umbral queda en `version_reglas` y los ingredientes
-    -- (`cortes_tras_ultimo`, `huecos`) se conservan para recalcularla sin
-    -- reconstruir la tabla.
-    -- Meses de ausencia, no cortes: los intervalos de la ventana son 6, 6,
-    -- 6, 12, 6, 6, 6, 12 meses, asi que un mismo `cortes_tras_ultimo` puede
-    -- significar el doble de evidencia. Esta es la columna comparable.
-    ((EXTRACT(YEAR FROM DATE '{ultimo_corte}') - EXTRACT(YEAR FROM v.ultimo_periodo)) * 12
-     + (EXTRACT(MONTH FROM DATE '{ultimo_corte}') - EXTRACT(MONTH FROM v.ultimo_periodo))
-    )::int AS meses_sin_aparecer,
-    -- NULL para los activos: ahi la pregunta no significa nada, el vecino
-    -- existe y los dos siguen abiertos.
-    CASE WHEN ({ultimo_idx} - v.idx_ultimo) >= {ausente}
+    -- listar. La regla es EN MESES, no en cortes (ver `ventana`); el umbral
+    -- queda en `version_reglas` y los ingredientes (`meses_sin_aparecer`,
+    -- `huecos`) se conservan para recalcularla sin reconstruir la tabla.
+    v.meses_sin_aparecer,
+    -- NULL para los que no se declaran cerrados: ahi la pregunta no
+    -- significa nada, el vecino existe y los dos siguen abiertos.
+    CASE WHEN v.meses_sin_aparecer >= {meses}
          THEN (ro.clee IS NOT NULL) ELSE NULL END AS local_reocupado,
-    ({ultimo_idx} - v.idx_ultimo) >= {ausente} AS cerrado,
+    v.meses_sin_aparecer >= {meses} AS cerrado,
     -- LOS DOS EXTREMOS de la trayectoria. `permanencia` los consume para
     -- calcular su delta y los tira; aqui se quedan, que es la mitad de la
     -- razon de ser de esta tabla.

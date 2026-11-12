@@ -197,9 +197,10 @@ class NegocioCleeOficial(Base):
         nullable=False,
         comment=(
             "Cortes oficiales publicados despues del ultimo en que aparecio. 0 = "
-            "presente en el corte final, o sea censurado por la derecha. Es el "
-            "ingrediente sobre el que se aplica la regla de cierre, y se conserva "
-            "para poder recalcular `cerrado` con otro umbral sin reconstruir"
+            "presente en el corte final, o sea censurado por la derecha. La regla de "
+            "cierre NO se aplica sobre esto sino sobre `meses_sin_aparecer`, porque "
+            "contar cortes no es contar tiempo; se conserva porque es el patron de "
+            "presencia que el analisis quiere ver junto a los meses"
         ),
     )
 
@@ -242,8 +243,9 @@ class NegocioCleeOficial(Base):
             "TIEMPO: los intervalos de la ventana son 6, 6, 6, 12, 6, 6, 6, 12 meses "
             "(faltan 2023-05 y 2025-11), asi que `cortes_tras_ultimo = 1` significa "
             "12 meses de evidencia para quien desaparecio en 2022-11 y solo 6 para "
-            "quien desaparecio en 2024-05. Esta es la columna comparable, y la que un "
-            "modelo de supervivencia quiere como tiempo"
+            "quien desaparecio en 2024-05. Es la columna comparable, el INGREDIENTE "
+            "sobre el que se aplica la regla de cierre (`>= CIERRE_MESES_AUSENTE`), "
+            "y la que un modelo de supervivencia quiere como tiempo"
         ),
     )
     local_reocupado: Mapped[bool | None] = mapped_column(
@@ -262,11 +264,14 @@ class NegocioCleeOficial(Base):
         Boolean,
         nullable=False,
         comment=(
-            "True si lleva al menos `CIERRE_CORTES_AUSENTE` cortes sin aparecer. ES "
-            "UNA HIPOTESIS, no un hecho observado: el DENUE no reporta cierres, solo "
-            "deja de listar. Validar esta columna con una muestra verificada en linea "
-            "es el proposito de la tabla, asi que el umbral queda en `version_reglas` "
-            "y los ingredientes (`cortes_tras_ultimo`, `huecos`) se conservan"
+            "True si lleva al menos `CIERRE_MESES_AUSENTE` meses sin aparecer (12 por "
+            "default: dos ciclos semestrales del DENUE). ES UNA HIPOTESIS, no un hecho "
+            "observado: el DENUE no reporta cierres, solo deja de listar. Validar esta "
+            "columna con una muestra verificada en linea (schema `verificacion`) es el "
+            "proposito de la tabla, asi que el umbral queda en `version_reglas` y los "
+            "ingredientes (`meses_sin_aparecer`, `huecos`) se conservan. Un negocio "
+            "ausente pero por menos meses que el umbral queda en False: no se afirma "
+            "nada de el todavia (`cortes_tras_ultimo > 0 AND NOT cerrado`)"
         ),
     )
 

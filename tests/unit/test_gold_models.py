@@ -74,6 +74,7 @@ def _negocio(clee: str = "14TAC0001", **extra) -> NegocioCleeOficial:
         "cortes_observados": 9,
         "huecos": 0,
         "cortes_tras_ultimo": 0,
+        "meses_sin_aparecer": 0,
         "fecha_alta": date(2015, 3, 1),
         "edad_anios": 11.17,
         "dias_alta_a_primera": 2253,

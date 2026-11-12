@@ -86,16 +86,20 @@ class Settings(BaseSettings):
     # para el dia en que INEGI publique un corte a medias.
     GOLD_COBERTURA_CLEE_MINIMA: float = 0.999
 
-    # Cortes consecutivos SIN APARECER tras los que se considera que un
-    # negocio cerro. Es la regla que la tabla de Gold existe para VALIDAR: el
-    # DENUE no reporta cierres, solo deja de listar, asi que `cerrado` es una
+    # MESES sin aparecer en el DENUE a partir de los cuales Gold declara que
+    # un negocio cerro. Es la regla que la tabla existe para VALIDAR: el DENUE
+    # no reporta cierres, solo deja de listar, asi que `cerrado` es una
     # hipotesis y la muestra verificada con agentes es la prueba.
-    # En 1 basta un corte ausente (lo mas sensible: mas cierres detectados y
-    # mas falsos positivos). Subirlo exige mas evidencia antes de declarar el
-    # cierre, a cambio de perder los cierres recientes por censura.
-    # `cortes_tras_ultimo` y `huecos` quedan en la tabla, asi que cambiar esto
-    # permite recalcular la columna sin reconstruir.
-    CIERRE_CORTES_AUSENTE: int = 1
+    # Se mide en meses y no en cortes porque los cortes no son equidistantes
+    # (6, 6, 6, 12, 6, 6, 6, 12 meses): "un corte ausente" vale el doble de
+    # evidencia para unos negocios que para otros. 12 meses son dos ciclos
+    # de la cadencia semestral del DENUE, que es la regla preliminar del
+    # protocolo ("dos cortes consecutivos") expresada en tiempo. Bajarlo
+    # detecta mas cierres con mas falsos positivos; subirlo exige mas
+    # evidencia a cambio de perder los cierres recientes por censura.
+    # `meses_sin_aparecer` y `huecos` quedan en la tabla, asi que cambiar esto
+    # permite recalcular la columna sin reconstruir los 9.58M de filas.
+    CIERRE_MESES_AUSENTE: int = 12
 
     # Version de las reglas de normalizacion con que se construye Gold. Queda
     # en cada fila (`version_reglas`): cambiar una regla cambia los numeros que

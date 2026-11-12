@@ -15,7 +15,9 @@ El escenario está armado para que cada regla tenga un caso que la obligue:
     sospechoso     4 nombres en 3 cortes, que es IMPOSIBLE -> sin nombre
                    canonico y marcado
     misma_rama     dos SCIAN que comparten los 5 primeros digitos -> el
-                   ancestro comun es determinista
+                   ancestro comun es determinista. Y sale en el corte 2 de 3:
+                   6 meses ausente, MENOS que el umbral -> NO esta cerrado
+    cerro          solo en el primer corte: 12 meses ausente -> cerrado
     cruza_rama     dos SCIAN de ramas distintas -> NULL, no un valor
                    inventado
     solo_viejo     solo en el corte sin CLEE -> no entra a la cohorte
@@ -197,6 +199,21 @@ OBSERVACIONES = [
     # --- misma_rama: 311811 y 311812 comparten los 5 primeros digitos ---
     ("m1", OFICIALES[0], "C_RAMA", "PAN UNO", "311811", "14", "039", 20.7, -103.3, "", "", MICRO),
     ("m2", OFICIALES[1], "C_RAMA", "PAN UNO", "311812", "14", "039", 20.7, -103.3, "", "", MICRO),
+    # --- cerro: una sola aparicion, 12 meses antes del ultimo corte ---
+    (
+        "c1",
+        OFICIALES[0],
+        "C_CERRO",
+        "PAPELERIA FIN",
+        "311811",
+        "14",
+        "039",
+        20.75,
+        -103.25,
+        "",
+        "",
+        MICRO,
+    ),
     # --- cruza_rama: panaderia y taqueria no comparten rama ---
     ("x1", OFICIALES[0], "C_CRUZA", "MIXTO", "311811", "14", "039", 20.8, -103.2, "", "", MICRO),
     ("x2", OFICIALES[1], "C_CRUZA", "MIXTO", "722513", "14", "039", 20.8, -103.2, "", "", MICRO),
@@ -553,18 +570,33 @@ class TestElVeredictoDeCierre:
         assert fila["cortes_tras_ultimo"] == 0
         assert fila["cerrado"] is False
 
-    def test_ausente_del_ultimo_corte_es_cerrado(self, db, tracker):
-        """C_RAMA no aparece en 2022-05: un corte ausente con el umbral en 1."""
+    def test_doce_meses_ausente_es_cerrado(self, db, tracker):
+        """C_CERRO aparece solo en 2021-05 y la ventana termina en 2022-05."""
         construir_cohorte_oficial(db, tracker)
-        fila = negocios(db)["C_RAMA"]
-        assert fila["cortes_tras_ultimo"] == 1
+        fila = negocios(db)["C_CERRO"]
+        assert fila["meses_sin_aparecer"] == 12
+        assert fila["cortes_tras_ultimo"] == 2
         assert fila["cerrado"] is True
 
-    def test_los_ingredientes_quedan_para_recalcular(self, db, tracker):
-        """Con otro umbral, C_RAMA dejaria de estar cerrado sin reconstruir."""
+    def test_seis_meses_ausente_todavia_no_se_afirma_nada(self, db, tracker):
+        """C_RAMA no aparece en 2022-05, pero son 6 meses: menos que el umbral.
+
+        Es la diferencia entre contar cortes y contar tiempo. Con "un corte
+        ausente" C_RAMA y C_CERRO serian iguales; en meses uno lleva la
+        mitad de evidencia que el otro, y la regla no lo declara cerrado.
+        """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_RAMA"]
         assert fila["cortes_tras_ultimo"] == 1
+        assert fila["meses_sin_aparecer"] == 6
+        assert fila["cerrado"] is False
+        assert fila["local_reocupado"] is None
+
+    def test_los_ingredientes_quedan_para_recalcular(self, db, tracker):
+        """Con el umbral en 6, C_RAMA pasaria a cerrado sin reconstruir."""
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_RAMA"]
+        assert fila["meses_sin_aparecer"] == 6
         assert fila["huecos"] == 0
 
     def test_huecos_marca_donde_la_regla_es_fragil(self, db, tracker):

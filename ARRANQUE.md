@@ -319,7 +319,7 @@ contando `clee` por corte), y la deja en el log y en `meta`. Esperado:
 Si da otro número, algo cambió en los datos y **todas las tasas de la tesis
 cambian con él**: hay que entenderlo antes de seguir.
 
-Al terminar corre diez invariantes; si alguno falla, la corrida queda `FAILED`
+Al terminar corre once invariantes; si alguno falla, la corrida queda `FAILED`
 en `meta` con el detalle y **la tabla se deja como está** para poder mirar las
 filas que lo violan.
 
@@ -337,18 +337,19 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
 ```
 
 **Las dos consultas que deciden el umbral de cierre.** La primera dice cuánto
-cuesta cada valor de `CIERRE_CORTES_AUSENTE`; la segunda da el piso del error
-de la regla con los propios datos, sin gastar una sola búsqueda con agentes
-(`huecos > 0` son negocios que desaparecieron **y volvieron**):
+cuesta cada valor de `CIERRE_MESES_AUSENTE` (la regla es en meses: `cerrado ⟺
+meses_sin_aparecer ≥ 12`); la segunda da el piso del error de la regla con
+los propios datos, sin gastar una sola búsqueda con agentes (`huecos > 0` son
+negocios que desaparecieron **y volvieron**):
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT cortes_tras_ultimo AS cortes_ausente,
-        min(meses_sin_aparecer) AS meses_min,
-        max(meses_sin_aparecer) AS meses_max,
+"SELECT meses_sin_aparecer AS meses_ausente,
+        cortes_tras_ultimo AS cortes_ausente,
         count(*) AS negocios,
+        count(*) FILTER (WHERE cerrado) AS cerrados,
         round(100.0 * count(*) / sum(count(*)) OVER (), 2) AS pct
- FROM gold.negocios_clee_oficial GROUP BY 1 ORDER BY 1"
+ FROM gold.negocios_clee_oficial GROUP BY 1, 2 ORDER BY 1, 2"
 
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
 "SELECT count(*) FILTER (WHERE huecos > 0) AS volvieron,
@@ -357,9 +358,10 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
  FROM gold.negocios_clee_oficial WHERE cortes_observados > 1"
 ```
 
-En la primera, fíjate en `meses_min` / `meses_max` de la misma fila: son los
-intervalos irregulares de la ventana (6, 6, 6, **12**, 6, 6, 6, **12** meses),
-así que un mismo conteo de cortes puede valer el doble de evidencia.
+En la primera, fíjate en que un mismo `cortes_ausente` aparece con dos
+`meses_ausente` distintos: son los intervalos irregulares de la ventana (6,
+6, 6, **12**, 6, 6, 6, **12** meses), y es por lo que la regla cuenta meses y
+no cortes.
 
 Los valores distintos de un negocio salen de **Silver**, no de Gold — es el
 insumo del LLM que unifica el nombre y de los agentes que lo buscan en línea:
