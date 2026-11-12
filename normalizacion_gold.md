@@ -431,8 +431,8 @@ comparar cadenas. Con ella, "el canónico y sus alternativas" es una
 consulta, y la decisión —venga de una regla o del LLM— queda auditable en
 el mismo lugar que su evidencia.
 
-**Pero aplica solo a los campos que la madre publica**, y desde `b0010` son
-dos de los ocho: `nom_estab` y `codigo_act`. Para `raz_social`, `per_ocu`,
+**Pero aplica solo a los campos que la madre publica**, y son dos de los
+trece: `nom_estab` y `codigo_act`. Para `raz_social`, `per_ocu`,
 `tipounieco`, `telefono`, `correoelec` y `www` todas las filas quedan en
 `es_canonico = FALSE`, porque la madre no eligió ninguno — cambian entre
 cortes y lo que afirma de ellos es solo `tiene_*`. No es un hueco: la

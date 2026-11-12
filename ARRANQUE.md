@@ -291,12 +291,15 @@ Si una segunda corrida sale en `SKIPPED` es correcto: la tabla ya está
 construida con la identidad vigente. Si la resolución CLEE se re-corrió
 después, reconstruye sola.
 
-## 10. Gold: la cohorte con CLEE oficial (2021+)
+## 10. Gold: la edad del negocio y si cerró
 
-La capa de consumo: una fila por negocio de los cortes en que INEGI publica
-el CLEE (9 cortes, 2021-05 → 2026-05). **No depende de la resolución CLEE**
-—lee el `clee` de los propios hechos— así que se puede correr sin haber
-terminado las propagaciones.
+La capa de consumo, y existe para una sola cosa: calcular la **edad** de cada
+negocio y decidir si **cerró**, sobre los cortes en que INEGI publica el CLEE
+(9 cortes, 2021-05 → 2026-05). De ahí sale la muestra que se verifica en línea
+con agentes para validar la premisa *"dejó de aparecer en el DENUE ⇒ quebró"*.
+
+**No depende de la resolución CLEE** —lee el `clee` de los propios hechos— así
+que se puede correr sin haber terminado las propagaciones.
 
 ```bash
 cd ~/tesis-maestria-etl
@@ -316,40 +319,69 @@ contando `clee` por corte), y la deja en el log y en `meta`. Esperado:
 Si da otro número, algo cambió en los datos y **todas las tasas de la tesis
 cambian con él**: hay que entenderlo antes de seguir.
 
-Al terminar corre siete invariantes; si alguno falla, la corrida queda
-`FAILED` en `meta` con el detalle y **la tabla se deja como está** para poder
-mirar las filas que lo violan.
+Al terminar corre diez invariantes; si alguno falla, la corrida queda `FAILED`
+en `meta` con el detalle y **la tabla se deja como está** para poder mirar las
+filas que lo violan.
+
+La foto de la cohorte:
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
 "SELECT count(*) AS negocios,
+        count(*) FILTER (WHERE cerrado)            AS cerrados,
+        count(*) FILTER (WHERE huecos > 0)         AS volvieron_tras_ausencia,
+        count(*) FILTER (WHERE local_reocupado)    AS con_local_reocupado,
         count(*) FILTER (WHERE cluster_sospechoso) AS sospechosos,
-        count(*) FILTER (WHERE nombre IS NULL)     AS sin_nombre,
-        count(*) FILTER (WHERE codigo_act IS NULL AND tiene_actividad) AS scian_cruza_rama,
-        count(*) FILTER (WHERE cortes_tras_ultimo = 0) AS presentes_al_final
+        round(avg(edad_anios), 1)                  AS edad_media_anios
  FROM gold.negocios_clee_oficial"
 ```
 
-El canónico y sus alternativas, para un negocio cualquiera:
+**Las dos consultas que deciden el umbral de cierre.** La primera dice cuánto
+cuesta cada valor de `CIERRE_CORTES_AUSENTE`; la segunda da el piso del error
+de la regla con los propios datos, sin gastar una sola búsqueda con agentes
+(`huecos > 0` son negocios que desaparecieron **y volvieron**):
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT campo, valor, n_cortes, primer_periodo, ultimo_periodo, es_canonico
- FROM gold.negocios_clee_oficial_variantes
- WHERE clee = (SELECT clee FROM gold.negocios_clee_oficial
-               WHERE n_nombres > 1 AND NOT cluster_sospechoso LIMIT 1)
- ORDER BY campo, n_cortes DESC"
+"SELECT cortes_tras_ultimo AS cortes_ausente,
+        min(meses_sin_aparecer) AS meses_min,
+        max(meses_sin_aparecer) AS meses_max,
+        count(*) AS negocios,
+        round(100.0 * count(*) / sum(count(*)) OVER (), 2) AS pct
+ FROM gold.negocios_clee_oficial GROUP BY 1 ORDER BY 1"
+
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT count(*) FILTER (WHERE huecos > 0) AS volvieron,
+        count(*) AS con_mas_de_un_corte,
+        round(100.0 * count(*) FILTER (WHERE huecos > 0) / count(*), 2) AS pct
+ FROM gold.negocios_clee_oficial WHERE cortes_observados > 1"
 ```
 
-Búsqueda difusa, que es para lo que existe el índice trigram — "¿qué negocio
-es *tacos paco*?":
+En la primera, fíjate en `meses_min` / `meses_max` de la misma fila: son los
+intervalos irregulares de la ventana (6, 6, 6, **12**, 6, 6, 6, **12** meses),
+así que un mismo conteo de cortes puede valer el doble de evidencia.
+
+Los valores distintos de un negocio salen de **Silver**, no de Gold — es el
+insumo del LLM que unifica el nombre y de los agentes que lo buscan en línea:
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT clee, valor, round(similarity(valor, 'TACOS PACO')::numeric, 3) AS sim
- FROM gold.negocios_clee_oficial_variantes
- WHERE campo = 'nom_estab' AND valor % 'TACOS PACO'
- ORDER BY sim DESC LIMIT 10"
+"SELECT DISTINCT e.nom_estab, e.telefono, e.www
+ FROM silver.establecimientos e
+ WHERE e.clee = (SELECT clee FROM gold.negocios_clee_oficial
+                 WHERE n_nombres > 1 AND NOT cluster_sospechoso LIMIT 1)
+   AND e.nom_estab <> ''"
+```
+
+Una muestra para verificar en línea, estratificada por donde la regla es más
+frágil:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT clee, nombre, ultimo_periodo, meses_sin_aparecer, huecos, local_reocupado
+ FROM gold.negocios_clee_oficial
+ WHERE cerrado AND NOT cluster_sospechoso AND nombre IS NOT NULL
+ ORDER BY random() LIMIT 20"
 ```
 
 Con qué ventana se construyó cada corrida, sin abrir un log. El `::jsonb` no

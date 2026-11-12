@@ -1005,136 +1005,116 @@ Log del stage: `data/etl_h3_7.log`.
 
 ---
 
-## N5: Gold — `gold.negocios_clee_oficial` (la cohorte 2021+)
+## N5: Gold — `gold.negocios_clee_oficial` (edad y cierre)
 
-La capa de consumo, y el único lugar del proyecto donde **se materializan
-valores** en vez de agregados. El alcance está en `gold_cohorte_2021.md` y
-las reglas por campo en `normalizacion_gold.md` §§4-6.
+La capa de consumo, y existe **para una sola cosa**: calcular la **edad** de
+un negocio y decidir si **cerró**, con los extremos de su trayectoria al lado
+para poder interpretarlo. De ahí se saca una muestra aleatoria y se verifica
+con agentes si la premisa *"dejó de aparecer en el DENUE ⇒ quebró"* es
+defendible. Lo que no sirva a eso no va aquí.
 
 ```bash
 docker compose run --rm etl transform --only gold            # reanuda
 docker compose run --rm etl transform --only gold --force    # rehace
 ```
 
-### El grano cambia dos veces, y por eso los nombres no se parecen
+### Lo que NO es: una copia de `permanencia`
 
+Fue el error del primer diseño, y era literal: ventana, censura,
+`cortes_idx`, `fecha_alta_date`, `cambio_tamano`, `delta_empleados_min`,
+`n_nombres`, `n_direcciones`, `cambio_municipio`, el rectángulo envolvente y
+quince banderas `tiene_*` existían **todas** en
+`silver.permanencia_<metodo>`. Gold agregaba la renumeración de la ventana
+oficial y poco más.
+
+Lo que sí la justifica son tres cosas que `permanencia` no tiene:
+
+| | |
+|---|---|
+| **Los extremos** | `permanencia` consume el primer y el último estado para su delta y después los tira. Aquí se quedan: empleados y tamaño inicial y final, posición inicial y final |
+| **La edad** | Nadie la calculaba. De `fecha_alta` al último corte observado — para un negocio activo, una edad **censurada por la derecha**, que es lo que el modelo consume |
+| **El veredicto** | `cerrado`, grabado y versionado. No se puede muestrear y verificar un veredicto que no se escribió |
+
+Los extremos no contradicen `b0007`: no son "el valor de un corte
+cualquiera", son los dos extremos de la vida.
+
+### `cerrado` es una HIPÓTESIS, no un hecho
+
+El DENUE **no reporta cierres**: solo deja de listar. La columna es la
+conjetura que la tabla existe para validar.
+
+- El umbral es `CIERRE_CORTES_AUSENTE` (default **1**) y queda en
+  `version_reglas`.
+- **Los ingredientes se conservan**: `cortes_tras_ultimo` y `huecos`. Cambiar
+  el umbral recalcula la columna sin reconstruir los 9.58M de filas.
+- **`huecos > 0` mide el error de la regla con los propios datos**: son los
+  negocios que ya desaparecieron **y volvieron**, o sea casos probados de que
+  ausencia ≠ cierre. Es por donde conviene estratificar el muestreo, y está
+  indexado para eso.
+
+```sql
+-- El piso del error de la regla, gratis y sin agentes
+SELECT count(*) FILTER (WHERE huecos > 0) AS volvieron_tras_ausencia,
+       count(*)                           AS total
+FROM gold.negocios_clee_oficial;
 ```
-silver.establecimientos        82,896,807   una OBSERVACION (negocio, corte)
-silver.permanencia_<metodo>        ~15.6M   un negocio, ventana de 20 cortes
-gold.negocios_clee_oficial            (?)   un negocio de la cohorte OFICIAL
+
+### La edad se mide al último corte, no a "hoy"
+
+Con "hoy" la tabla dejaría de ser reproducible: la misma fila daría una edad
+distinta cada vez que se consultara. Y sale de `fecha_alta` (el `MIN` sobre
+los cortes) y no del primer corte observado, porque la fecha de alta es el
+único proxy de antigüedad **independiente de la ventana de observación**.
+
+`dias_alta_a_primera` es el diagnóstico: **negativo** significa que el
+negocio apareció antes de darse de alta, y esas filas no deberían entrar a un
+análisis de antigüedad.
+
+### No hay tabla de variantes, ni banderas `tiene_*`
+
+Un diseño intermedio tuvo una tabla de variantes con trece campos y ~100M
+filas. Se eliminó: los valores distintos de cualquier campo salen de
+`silver.establecimientos` filtrando por `clee`, que los tiene de los nueve
+cortes y mejor tipados. Es el insumo del LLM que unifica el nombre y de los
+agentes que buscan el negocio en línea:
+
+```sql
+SELECT DISTINCT nom_estab, telefono, www
+FROM silver.establecimientos
+WHERE clee = '14...' AND nom_estab <> '';
 ```
 
-No se llama `gold.establecimientos`: con nombres distintos, confundir la N de
-82.9M observaciones con la de los negocios deja de ser posible.
+Las quince `tiene_*` tampoco están: con los valores concretos
+materializados, un `NULL` dice lo mismo.
 
-### La cohorte: solo los cortes en que INEGI publica el CLEE
-
-Un corte es *oficial* si ≥99.9% de sus observaciones traen `clee` no vacío
-(`GOLD_COBERTURA_CLEE_MINIMA`). **El loader lo mide al arrancar**, no lo
-supone, y la ventana queda en el log y en `meta.job_runs.config`. Medido el
-2026-11-08: **9 cortes (2021-05 → 2026-05), 51.5M de 82.9M observaciones**,
-frente a 11 cortes al 0%.
-
-**Gold no lee ninguna `silver.clee_<metodo>`.** La identidad es el `clee` de
-los propios hechos, que es lo que "oficial" significa — así que no hay `NEW_*`
-que consolidar ni error de propagación que arrastrar, y por eso `metodo_base`
-dice `inegi` y no `radio`.
-
-De ahí que su **reloj de frescura sea la ventana** y no `max(resuelto_en)`: lo
-que invalida esta tabla es que un corte entre o salga de la lista de
-oficiales. Lo detecta comparando la ventana vigente contra la que quedó
-grabada en `ventana_cortes`, y reconstruye solo.
-
-### No copia `permanencia`, y no es una optimización perdida
-
-`permanencia` agrega sobre los **20** cortes, y una fila suya mezcla los dos
-regímenes: un negocio visto en 2019 (identidad propagada) y en 2021 (oficial)
-comparte `clee_resuelto`. Filtrar por `cortes_directo > 0` daría la cohorte
-correcta con **la ventana contaminada**. Y los `idx` se renumeran dentro de la
-ventana oficial: heredar los de la secuencia de 20 rompería
-`presente_desde_el_inicio` y `duracion_periodos` **sin un solo error
-visible**.
-
-### Las reglas que producen los valores canónicos
-
-**La frontera (`b0010`): un agregado sobre la vida completa sí; el valor de
-un corte no.** Es `b0007` aplicado a Gold. Solo dos columnas de valor
-sobreviven, y las dos son agregados:
+### Reglas que producen las columnas derivadas
 
 | Campo | Regla |
 |---|---|
-| `nombre` | La **moda** sobre los nueve cortes, desempatada por el más reciente (baseline 1 de §6.4). Es un agregado, no el nombre del último corte. Un LLM solo lo reemplaza si *gana* en una muestra etiquetada |
-| `codigo_act` | **Ancestro común** por prefijo de todas las actividades que tuvo (la jerarquía **es** el código: sector=2, subsector=3, rama=4). Por eso puede ser un prefijo de 4 dígitos y no un código de clase. Si cruza rama, **NULL** |
-| Bloque de ubicación | **TODO del mismo corte de referencia.** Es el único snapshot que se queda, porque es la llave de los cruces (`cve_mun`→SESNSP, `ageb`→marginación) y porque `corte_referencia` dice de cuándo es. Armarlo por partes —CP de 2017, colonia de 2019, punto de 2024— produce un domicilio que nunca existió |
+| `nombre` | La **moda** sobre los cortes, desempatada por el más reciente. `nombre_origen` dice `moda`; cuando exista la etapa del LLM, sobrescribe y pone `llm` |
+| `codigo_act` | **Ancestro común** por prefijo (la jerarquía *es* el código: sector=2, subsector=3, rama=4). **NULL** si cruza rama: ahí hay que juzgar |
+| `cve_geo_inicial`/`_final` | `cve_ent‖cve_mun‖cve_loc‖ageb`, **cortada en el primer nivel ausente**. El largo dice el nivel: 2 entidad, 5 municipio, 9 localidad. `LEFT(cve_geo_final, 5)` es la llave del cruce con SESNSP |
+| `se_mudo` | Compara las dos llaves **a nivel municipio**, no las coordenadas: el ruido de GPS mueve el punto sin cambiar el municipio |
+| `cluster_sospechoso` | `n_nombres > cortes de la ventana`, que es **imposible** para un cluster correcto. Esas filas no reciben nombre y no deben entrar a la muestra |
 
-Y lo que **no** se materializa, con su razón:
-
-| Campo | Dónde vive ahora |
-|---|---|
-| `razon_social`, `per_ocu`, `tipounieco`, `telefono`, `correoelec`, `www` | En `..._variantes`, **con su ventana**. En la madre solo queda `tiene_*` |
-| `categoria_tamano`, `empleados_min/max` | En ningún lado: se **derivan** de `per_ocu` uniendo `silver.denue_estratos_personal` (consulta abajo) |
-
-Las tres de contacto eran el peor caso: "el más reciente no vacío" produce un
-valor **sin fecha**, imposible de situar en el tiempo. Y el tamaño es, para el
-modelo de supervivencia, una covariable **variable en el tiempo** — variantes
-la entrega con `primer_periodo`/`ultimo_periodo`, que es justo lo que un Cox
-con covariables dependientes del tiempo necesita. Lo que sí es propiedad de la
-vida completa (`cambio_tamano`, `delta_empleados_min`) se queda en la madre.
-
-**Recuperar el tamaño con su categoría y su ventana:**
-
-```sql
-SELECT va.clee, va.primer_periodo, va.ultimo_periodo, va.n_cortes,
-       va.valor AS per_ocu, ep.categoria, ep.empleados_min, ep.empleados_max
-FROM gold.negocios_clee_oficial_variantes va
-JOIN silver.denue_estratos_personal ep ON ep.per_ocu = va.valor
-WHERE va.campo = 'per_ocu'
-ORDER BY va.clee, va.primer_periodo;
-```
-
-**Dos cosas se niega a afirmar.** Un cluster con más nombres que cortes
-—imposible para un cluster correcto, porque un establecimiento aparece a lo
-más una vez por corte— queda **sin nombre canónico** y marcado en
-`cluster_sospechoso`; sus variantes siguen ahí, que es el mejor diagnóstico de
-una fusión indebida que existe. Y un SCIAN que cruza rama queda **NULL**: ahí
-hay que juzgar, y un valor inventado es peor que la ausencia (`tiene_actividad`
-lo distingue de "nunca tuvo").
-
-### La tabla de variantes es la evidencia, y no puede discrepar
-
-`gold.negocios_clee_oficial_variantes` guarda una fila por `(negocio, campo,
-valor)` con su ventana, su conteo y `es_canonico`. Cubre **ocho** campos:
-`nom_estab`, `raz_social`, `codigo_act`, `per_ocu`, `tipounieco`, `telefono`,
-`correoelec`, `www`.
-
-`es_canonico` se decide **comparando contra la fila ya escrita**, no
-recalculando la regla: así, por construcción, la hija no puede afirmar un
-canónico que la madre no publicó. El índice único parcial
-`(clee, campo) WHERE es_canonico` lo vuelve estructural.
-
-**Solo dos de los ocho campos tienen canónico** —`nom_estab` y `codigo_act`,
-los que la madre publica— y para los otros seis todas las filas quedan en
-`es_canonico = FALSE`. No es un hueco: la madre no eligió ninguno porque
-cambian entre cortes, y `tiene_*` ya dice si el dato existió.
-
-Las dos tablas las escribe el **mismo bloque** y por tanto la misma
-transacción: o quedan las dos o ninguna. Y al rehacer se truncan juntas,
-porque PostgreSQL rechaza truncar una tabla referenciada por una FK sola.
+**Por qué la llave va concatenada:** `cve_mun` no es único a nivel nacional
+sin `cve_ent`, ni `cve_loc` sin los dos. Con los componentes sueltos,
+comparar la geografía inicial contra la final podría emparejar el municipio
+039 de un estado con el de otro. Y el `CASE` corta en el primer hueco porque
+concatenar a ciegas pondría el AGEB en la posición de la localidad — una
+llave que nunca existió.
 
 ### Invariantes que fallan la corrida
 
-Siete chequeos de `gold_cohorte_2021.md` §5.1 corren con la tabla ya escrita y
-**antes** de que `meta` la declare exitosa: ninguna identidad `NEW_*`,
-`cortes_observados` dentro de la ventana, ninguna fila con otra
-`ventana_cortes`, `presente_desde_el_inicio` coherente, ninguna variante
-huérfana, a lo más un canónico por `(negocio, campo)`, y el nombre publicado
-marcado canónico en las variantes.
+Diez chequeos corren con la tabla escrita y **antes** de que `meta` la
+declare exitosa. Los que importan más son los del propósito: ninguna edad
+negativa, `cerrado` coherente con el umbral de la corrida, y **ningún negocio
+presente en el último corte marcado como cerrado** — esa contradicción
+metería en la muestra negocios que el propio DENUE sigue listando.
 
-Se reportan **todas** y no la primera: con una sola, cada arreglo cuesta otra
-corrida de horas para descubrir la siguiente. **La tabla se deja como está** —
-lo que hace falta cuando un invariante falla es mirar las filas que lo violan,
-y la corrida ya quedó `FAILED` en `meta` con las violaciones en
-`error_message`.
+Se reportan **todas** y no la primera, y **la tabla se deja como está**: lo
+que hace falta cuando un invariante falla es mirar las filas que lo violan.
+La corrida queda `FAILED` en `meta` con el detalle en `error_message`.
 
 Log del stage: `data/etl_gold.log`.
 
@@ -1297,7 +1277,7 @@ etl-core/
 │   │   └── sesnsp.py              # CSV ancho -> largo + catalogo de delitos
 │   ├── loaders/
 │   │   ├── permanencia.py         # silver.permanencia_<metodo> (SQL; la forma la pone troceado.py)
-│   │   ├── gold_cohorte_oficial.py # gold.negocios_clee_oficial + variantes (cohorte 2021+)
+│   │   ├── gold_cohorte_oficial.py # gold.negocios_clee_oficial: edad y cierre (cohorte 2021+)
 │   │   ├── relleno_h3_7.py        # Rellena establecimientos.h3_cell_7 en cortes pre-b0008
 │   │   ├── seeds.py               # Orquestador de la siembra
 │   │   ├── geography.py           # entidades / municipios / localidades
@@ -1468,7 +1448,7 @@ cómo arranca **sin** pasar nada.
 | | `--h3-cell-7/--no-h3-cell-7` | ON | Rellena `h3_cell_7` en cortes pre-`b0008`; **ignora `--force`** |
 | | `--permanencia-radio/--no-…` | ON | `silver.permanencia_radio` |
 | | `--permanencia-h3/--no-…` | ON | `silver.permanencia_h3` |
-| | `--gold/--no-gold` | ON | `gold.negocios_clee_oficial` + variantes |
+| | `--gold/--no-gold` | ON | `gold.negocios_clee_oficial`: edad del negocio y si cerró |
 | | `--sesnsp/--no-sesnsp` | ON | Transform SESNSP |
 | | `--period MM_YYYY` (repetible) | — | Carga SOLO esos cortes (solo afecta al ingest) |
 | | `--only <token>` (repetible) | — | Allowlist (gana sobre los `--no-*`) |
@@ -1607,7 +1587,7 @@ avance y rehaz". Tabla canónica:
 | `clee-celda-h3-7` | Idem para `silver.clee_celda_h3_7` | ~1 noche; **exige `h3_cell_7` poblada** o corre sobre nada |
 | `h3-cell-7` | **Nada: lo ignora.** Solo toca filas en NULL y el padre de una celda no cambia, así que reescribir los 82.9M daría los mismos valores a cambio de un rewrite completo por MVCC | — |
 | `permanencia-radio` / `-h3` | Descarta el avance y reconstruye `silver.permanencia_<metodo>` | Horas. Rara vez necesario: si la identidad cambió, la etapa lo detecta y rehace sola |
-| `gold` | Trunca las **dos** tablas de `gold` y reconstruye | Horas. Rara vez necesario: si la ventana oficial cambió, la etapa lo detecta y rehace sola. No toca Silver ni `meta` |
+| `gold` | Trunca `gold.negocios_clee_oficial` y la reconstruye | Horas. Rara vez necesario: si la ventana oficial cambió, la etapa lo detecta y rehace sola. No toca Silver ni `meta` |
 | `sesnsp` | Re-procesa el CSV consolidado | Minutos |
 
 **Regla práctica**: un `--force` global (`transform --force`) arrastra al

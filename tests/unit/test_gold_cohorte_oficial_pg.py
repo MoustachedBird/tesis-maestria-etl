@@ -38,7 +38,6 @@ from src.etl.loaders.dominios import build_rows
 from src.etl.loaders.estratos import build_rows as build_estrato_rows
 from src.etl.loaders.gold_cohorte_oficial import (
     TABLA,
-    TABLA_VARIANTES,
     CohorteOficial,
     construir_cohorte_oficial,
 )
@@ -280,8 +279,7 @@ def db(silver_engine):
     """Silver sembrado y `gold` recién creado desde el modelo.
 
     Los catálogos van primero porque `establecimientos` tiene FK hacia ellos
-    y el `COPY` las hace valer. `pg_trgm` se instala porque el índice GIN de
-    `valor` no se puede crear sin ella.
+    y el `COPY` las hace valer.
     """
     from src.shared.db.base import Base, tables_for
 
@@ -309,7 +307,6 @@ def db(silver_engine):
         sesion.commit()
 
     with silver_engine.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         conn.execute(text("DROP SCHEMA IF EXISTS gold CASCADE"))
         conn.execute(text("CREATE SCHEMA gold"))
         for corte in CORTES:
@@ -351,14 +348,25 @@ def negocios(db) -> dict[str, dict]:
         return {f["clee"]: dict(f) for f in conn.execute(select(tabla)).mappings()}
 
 
-def variantes(db, clee: str, campo: str) -> list[dict]:
-    """Las variantes de un negocio en un campo, de la más usada a la menos."""
-    tabla = get_table(TABLA_VARIANTES, schema="gold")
+def valores_en_silver(db, clee: str, campo: str) -> list[str]:
+    """Los valores distintos de un campo, leidos de Silver por `clee`.
+
+    Es el camino que reemplaza a la tabla de variantes: el insumo del LLM que
+    unifica el nombre y de los agentes que buscan el negocio en linea. Probarlo
+    aqui es lo que garantiza que siga funcionando.
+    """
     with db.connect() as conn:
-        filas = conn.execute(
-            select(tabla).where(tabla.c.clee == clee, tabla.c.campo == campo)
-        ).mappings()
-        return sorted((dict(f) for f in filas), key=lambda f: -f["n_cortes"])
+        return sorted(
+            conn.execute(
+                text(f"""
+                SELECT DISTINCT {campo} FROM silver.establecimientos
+                WHERE clee = :clee AND {campo} IS NOT NULL AND {campo} <> ''
+                """),
+                {"clee": clee},
+            )
+            .scalars()
+            .all()
+        )
 
 
 @pytest.mark.unit
@@ -403,13 +411,32 @@ class TestLosIdxSeRenumeran:
         assert fila["cortes_observados"] == 3
         assert fila["primer_periodo"] == OFICIALES[0]
 
-    def test_idx_primer_cero_es_el_primer_corte_OFICIAL(self, db, tracker):
+    def test_los_periodos_son_los_oficiales_y_nada_mas(self, db, tracker):
+        """C_VIVE tiene una observacion en 2020-11 que NO debe aparecer.
+
+        `idx_primer`, `idx_ultimo`, `duracion_periodos` y
+        `presente_desde_el_inicio` ya no son columnas: eran los indices de
+        `permanencia` renumerados, y lo que el analisis necesita --los cortes
+        exactos-- esta en `periodos`, de donde todo eso se deriva.
+        """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
-        assert fila["idx_primer"] == 0
-        assert fila["idx_ultimo"] == 2
-        assert fila["duracion_periodos"] == 2
-        assert fila["presente_desde_el_inicio"] is True
+        assert fila["periodos"] == OFICIALES
+        assert VIEJO not in fila["periodos"]
+        assert len(fila["periodos"]) == fila["cortes_observados"]
+
+    def test_la_edad_no_hereda_el_corte_viejo(self, db, tracker):
+        """Es el efecto concreto de renumerar, y el que importa.
+
+        Si el corte de 2020-11 contara, `ultimo_periodo` seria el mismo pero
+        `primer_periodo` saldria seis meses antes, y con el la censura. La
+        edad sale de `fecha_alta`, asi que no se mueve -- pero el diagnostico
+        `dias_alta_a_primera` si, y es el que delata el error.
+        """
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_VIVE"]
+        esperado = (OFICIALES[0] - date(2015, 1, 1)).days
+        assert fila["dias_alta_a_primera"] == esperado
 
     def test_la_censura_se_mide_en_la_ventana_oficial(self, db, tracker):
         """C_RAMA sale en el corte 1 de 3, asi que le queda uno despues."""
@@ -419,26 +446,26 @@ class TestLosIdxSeRenumeran:
 
 
 @pytest.mark.unit
-class TestElNombreCanonico:
+class TestElNombre:
     def test_la_moda_gana_al_mas_reciente(self, db, tracker):
         """TACOS PACO x2 contra TAQUERIA DON PACO x1, que es el ultimo."""
         construir_cohorte_oficial(db, tracker)
-        assert negocios(db)["C_REBRAND"]["nombre"] == "TACOS PACO"
+        fila = negocios(db)["C_REBRAND"]
+        assert fila["nombre"] == "TACOS PACO"
+        assert fila["nombre_origen"] == "moda"
+        assert fila["n_nombres"] == 2
 
-    def test_las_variantes_guardan_las_dos_con_su_ventana(self, db, tracker):
+    def test_las_variantes_se_recuperan_de_silver(self, db, tracker):
+        """El camino que reemplaza a la tabla de variantes.
+
+        Es el insumo del LLM que unifica el nombre y de los agentes que
+        buscan el negocio en linea, asi que tiene que seguir funcionando.
+        """
         construir_cohorte_oficial(db, tracker)
-        filas = variantes(db, "C_REBRAND", "nom_estab")
-        assert [(f["valor"], f["n_cortes"]) for f in filas] == [
-            ("TACOS PACO", 2),
-            ("TAQUERIA DON PACO", 1),
+        assert valores_en_silver(db, "C_REBRAND", "nom_estab") == [
+            "TACOS PACO",
+            "TAQUERIA DON PACO",
         ]
-        assert filas[0]["primer_periodo"] == OFICIALES[0]
-        assert filas[0]["ultimo_periodo"] == OFICIALES[1]
-
-    def test_exactamente_una_variante_es_canonica(self, db, tracker):
-        construir_cohorte_oficial(db, tracker)
-        filas = variantes(db, "C_REBRAND", "nom_estab")
-        assert [f["es_canonico"] for f in filas] == [True, False]
 
     def test_un_cluster_sospechoso_no_recibe_nombre(self, db, tracker):
         """4 nombres en 3 cortes es imposible para un cluster correcto."""
@@ -446,15 +473,13 @@ class TestElNombreCanonico:
         fila = negocios(db)["C_SOSP"]
         assert fila["cluster_sospechoso"] is True
         assert fila["nombre"] is None
+        assert fila["nombre_origen"] is None
         assert fila["n_nombres"] == 4
 
-    def test_pero_sus_variantes_siguen_ahi(self, db, tracker):
+    def test_pero_sus_nombres_siguen_en_silver(self, db, tracker):
         """Es el mejor diagnostico de un mal cluster que existe."""
         construir_cohorte_oficial(db, tracker)
-        filas = variantes(db, "C_SOSP", "nom_estab")
-        assert len(filas) == 4
-        # Ninguna es canonica: la madre no publico ninguna.
-        assert not any(f["es_canonico"] for f in filas)
+        assert len(valores_en_silver(db, "C_SOSP", "nom_estab")) == 4
 
     def test_un_negocio_sano_no_queda_marcado(self, db, tracker):
         construir_cohorte_oficial(db, tracker)
@@ -463,166 +488,147 @@ class TestElNombreCanonico:
 
 @pytest.mark.unit
 class TestElScianCanonico:
+    """El ancestro comun por prefijo, que sigue vigente."""
+
     def test_misma_rama_da_el_ancestro_comun(self, db, tracker):
         """311811 y 311812 comparten los 5 primeros digitos."""
         construir_cohorte_oficial(db, tracker)
-        assert negocios(db)["C_RAMA"]["codigo_act"] == "31181"
+        fila = negocios(db)["C_RAMA"]
+        assert fila["codigo_act"] == "31181"
+        assert fila["cambio_actividad"] is True
 
     def test_cruzar_rama_queda_en_null(self, db, tracker):
         """Ahi hay que juzgar; un valor inventado seria peor que la ausencia."""
         construir_cohorte_oficial(db, tracker)
-        fila = negocios(db)["C_CRUZA"]
-        assert fila["codigo_act"] is None
-        # Y se distingue de "nunca tuvo actividad":
-        assert fila["tiene_actividad"] is True
+        assert negocios(db)["C_CRUZA"]["codigo_act"] is None
 
     def test_una_sola_actividad_se_queda_completa(self, db, tracker):
         construir_cohorte_oficial(db, tracker)
-        assert negocios(db)["C_VIVE"]["codigo_act"] == "311811"
+        fila = negocios(db)["C_VIVE"]
+        assert fila["codigo_act"] == "311811"
+        assert fila["cambio_actividad"] is False
 
 
 @pytest.mark.unit
-class TestLaMadreSoloGuardaAgregados:
-    """La regla de `b0010`: el valor de UN corte no se materializa aqui."""
+class TestLaEdad:
+    """La mitad de la razon de ser de la tabla."""
 
-    def test_la_tabla_no_tiene_columnas_de_snapshot(self):
-        """Su ausencia ES la decision, no un olvido."""
-        columnas = {c.name for c in get_table(TABLA, schema="gold").columns}
-        assert not columnas & {
-            "razon_social",
-            "per_ocu",
-            "categoria_tamano",
-            "empleados_min",
-            "empleados_max",
-            "tipounieco",
-            "telefono",
-            "correoelec",
-            "www",
-        }
+    def test_se_mide_de_la_fecha_de_alta_al_ultimo_corte(self, db, tracker):
+        """El escenario pone fecha_alta 2015-01-01 y ultimo corte 2022-05-01.
 
-    def test_pero_si_guarda_los_agregados_de_tamano(self, db, tracker):
-        """C_VIVE pasa de MICRO a PEQUENA: eso SI es propiedad de la vida.
-
-        "Cambio de tamano" y "cuanto crecio" no son el valor de un corte, son
-        afirmaciones sobre la trayectoria completa.
+        Son 2678 dias, o 7.33 anios julianos. Medido contra "hoy" el numero
+        cambiaria cada dia y la tabla dejaria de ser reproducible.
         """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
+        assert fila["fecha_alta"] == date(2015, 1, 1)
+        assert fila["ultimo_periodo"] == OFICIALES[2]
+        esperado = (OFICIALES[2] - date(2015, 1, 1)).days / 365.25
+        assert float(fila["edad_anios"]) == pytest.approx(esperado, abs=0.01)
+
+    def test_un_negocio_que_desaparecio_tiene_edad_mas_corta(self, db, tracker):
+        """C_RAMA sale en el corte 1 de 3; C_VIVE llega al final.
+
+        La edad de los dos arranca igual, asi que la diferencia es exactamente
+        lo que el modelo de supervivencia mide.
+        """
+        construir_cohorte_oficial(db, tracker)
+        filas = negocios(db)
+        assert filas["C_RAMA"]["edad_anios"] < filas["C_VIVE"]["edad_anios"]
+
+    def test_el_diagnostico_de_la_fecha_de_alta(self, db, tracker):
+        """`dias_alta_a_primera` positivo: se dio de alta antes de aparecer."""
+        construir_cohorte_oficial(db, tracker)
+        assert negocios(db)["C_VIVE"]["dias_alta_a_primera"] > 0
+
+
+@pytest.mark.unit
+class TestElVeredictoDeCierre:
+    """La otra mitad, y es la HIPOTESIS que hay que validar con agentes."""
+
+    def test_presente_en_el_ultimo_corte_es_activo(self, db, tracker):
+        """Censurado por la derecha: no sabemos si cerro despues."""
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_VIVE"]
+        assert fila["cortes_tras_ultimo"] == 0
+        assert fila["cerrado"] is False
+
+    def test_ausente_del_ultimo_corte_es_cerrado(self, db, tracker):
+        """C_RAMA no aparece en 2022-05: un corte ausente con el umbral en 1."""
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_RAMA"]
+        assert fila["cortes_tras_ultimo"] == 1
+        assert fila["cerrado"] is True
+
+    def test_los_ingredientes_quedan_para_recalcular(self, db, tracker):
+        """Con otro umbral, C_RAMA dejaria de estar cerrado sin reconstruir."""
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_RAMA"]
+        assert fila["cortes_tras_ultimo"] == 1
+        assert fila["huecos"] == 0
+
+    def test_huecos_marca_donde_la_regla_es_fragil(self, db, tracker):
+        """Son los que ya desaparecieron y VOLVIERON.
+
+        En el escenario ninguno lo hace, y ese 0 es la aserción correcta: si
+        apareciera uno sin que el escenario lo monte, el calculo de huecos
+        estaria mal.
+        """
+        construir_cohorte_oficial(db, tracker)
+        assert all(f["huecos"] == 0 for f in negocios(db).values())
+
+
+@pytest.mark.unit
+class TestLosExtremosDeLaTrayectoria:
+    """Lo que `permanencia` consume y tira; aqui se queda."""
+
+    def test_el_empleo_y_el_tamano_en_los_dos_extremos(self, db, tracker):
+        """C_VIVE pasa de MICRO (0 empleados) a PEQUENA (11)."""
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_VIVE"]
+        assert fila["empleados_inicial"] == 0
+        assert fila["empleados_final"] == 11
+        assert fila["tamano_inicial"] == "Micro"
+        assert fila["tamano_final"] == "Small"
         assert fila["cambio_tamano"] is True
-        assert fila["delta_empleados_min"] == 11
-        assert fila["tiene_estrato_personal"] is True
 
-    def test_y_las_banderas_de_cobertura_del_contacto(self, db, tracker):
-        """El telefono vino en el corte 1 y el correo en el 2.
+    def test_la_llave_geografica_va_concatenada_y_jerarquica(self, db, tracker):
+        """El escenario no tiene cve_loc ni ageb: la llave corta en municipio.
 
-        La madre no dice cuales fueron, pero si que existieron -- que es lo
-        que decide si el negocio entra a un analisis que dependa de ellos.
+        Es la prueba de que el CASE no concatena a ciegas -- con un hueco en
+        medio habria puesto el AGEB donde va la localidad.
         """
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
-        assert fila["tiene_telefono"] is True
-        assert fila["tiene_correo"] is True
-        assert fila["tiene_sitio"] is False
+        assert fila["cve_geo_inicial"] == "14039"
+        assert fila["cve_geo_final"] == "14039"
+        assert len(fila["cve_geo_final"]) == 5  # el largo dice el nivel
 
-    def test_la_geografia_si_se_queda_con_su_fecha(self, db, tracker):
-        """El unico snapshot que sobrevive, porque es la llave de los cruces.
-
-        Y no finge ser atemporal: `corte_referencia` dice de que corte salio.
-        """
+    def test_un_negocio_que_no_se_movio(self, db, tracker):
         construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_VIVE"]
-        assert fila["corte_referencia"] == OFICIALES[2]
-        assert fila["cve_ent"] == "14"
-        assert fila["cve_mun"] == "039"
+        assert fila["se_mudo"] is False
+        assert fila["distancia_mudanza_m"] == pytest.approx(0, abs=1)
+        assert fila["n_posiciones"] == 1
 
+    def test_el_jitter_no_cuenta_como_mudanza(self, db, tracker):
+        """C_JITTER oscila ~89 m y vuelve, dentro del mismo municipio.
 
-@pytest.mark.unit
-class TestLaInformacionNoSePierde:
-    """Lo que salio de la madre esta en variantes, y con MAS informacion."""
-
-    def test_el_estrato_queda_con_su_ventana(self, db, tracker):
-        """Dos valores: el de los dos primeros cortes y el del ultimo.
-
-        Eso es estrictamente mas que la columna que se quito, que solo decia
-        el ultimo y sin indicar desde cuando.
+        La mudanza se mide a nivel municipio justamente para esto: comparar
+        coordenadas marcaria como mudanza cualquier re-geocodificacion.
         """
         construir_cohorte_oficial(db, tracker)
-        filas = variantes(db, "C_VIVE", "per_ocu")
-        assert len(filas) == 2
-
-        frecuente, reciente = filas
-        assert frecuente["n_cortes"] == 2
-        assert frecuente["primer_periodo"] == OFICIALES[0]
-        assert frecuente["ultimo_periodo"] == OFICIALES[1]
-        assert reciente["n_cortes"] == 1
-        assert reciente["primer_periodo"] == OFICIALES[2]
-
-    def test_el_contacto_queda_fechado(self, db, tracker):
-        """Antes era un valor sin fecha; ahora se sabe de que corte salio."""
-        construir_cohorte_oficial(db, tracker)
-
-        tel = variantes(db, "C_VIVE", "telefono")
-        assert [(f["valor"], f["primer_periodo"]) for f in tel] == [("3312345678", OFICIALES[0])]
-        correo = variantes(db, "C_VIVE", "correoelec")
-        assert [(f["valor"], f["primer_periodo"]) for f in correo] == [("sol@x.mx", OFICIALES[1])]
-
-    def test_ninguno_de_esos_campos_tiene_canonico(self, db, tracker):
-        """La madre no publico ninguno, asi que no hay nada que marcar."""
-        construir_cohorte_oficial(db, tracker)
-        for campo in ("per_ocu", "telefono", "correoelec", "raz_social", "tipounieco"):
-            for fila in variantes(db, "C_VIVE", campo):
-                assert fila["es_canonico"] is False, f"{campo}={fila['valor']}"
-
-    def test_la_categoria_de_tamano_se_deriva_del_catalogo(self, db, tracker):
-        """Es la razon por la que no entra a variantes: seria repetirlo.
-
-        Esta consulta es el camino de recuperacion documentado en AGENTS.md
-        §N5, y probarla aqui es lo que garantiza que siga funcionando.
-        """
-        construir_cohorte_oficial(db, tracker)
-        with db.connect() as conn:
-            filas = (
-                conn.execute(
-                    text("""
-                    SELECT va.primer_periodo, ep.categoria, ep.empleados_min
-                    FROM gold.negocios_clee_oficial_variantes va
-                    JOIN silver.denue_estratos_personal ep ON ep.per_ocu = va.valor
-                    WHERE va.clee = 'C_VIVE' AND va.campo = 'per_ocu'
-                    ORDER BY va.primer_periodo
-                    """)
-                )
-                .mappings()
-                .all()
-            )
-        assert [f["categoria"] for f in filas] == ["Micro", "Small"]
-        assert [f["empleados_min"] for f in filas] == [0, 11]
-
-
-@pytest.mark.unit
-class TestJitterDeGPS:
-    """La excepcion a "todo del corte de referencia", y su limite real.
-
-    OJO: con tres cortes la regla casi no puede cambiar el resultado, y es
-    aritmetica, no un defecto de esta implementacion. La regla pide neto ~0,
-    o sea que el ULTIMO punto esta cerca del PRIMERO -- y entonces la mediana
-    de tres valores cae practicamente encima del ultimo. El caso en que el
-    ultimo punto SI es el malo produce un neto grande, asi que la regla no
-    dispara. Esta anotado como hallazgo sobre `normalizacion_gold.md` §4.
-    """
-
-    def test_con_los_umbrales_de_default_el_ultimo_punto_se_queda(self, db, tracker):
-        """89 m de oscilacion es ruido tolerable bajo el umbral de 200 m."""
-        construir_cohorte_oficial(db, tracker)
         fila = negocios(db)["C_JITTER"]
-        assert fila["desplazamiento_neto_m"] == pytest.approx(0, abs=1)
-        assert fila["dispersion_max_m"] > 0
-        # Vuelve al punto de partida, asi que el ultimo y la mediana coinciden.
-        assert fila["latitud"] == pytest.approx(20.6000, abs=1e-4)
+        assert fila["n_posiciones"] == 2
+        assert fila["se_mudo"] is False
+        assert fila["distancia_mudanza_m"] == pytest.approx(0, abs=1)
 
-    def test_la_dispersion_es_cota_superior_del_movimiento(self, db, tracker):
+    def test_las_posiciones_de_los_dos_extremos(self, db, tracker):
         construir_cohorte_oficial(db, tracker)
-        fila = negocios(db)["C_JITTER"]
-        assert fila["dispersion_max_m"] > fila["desplazamiento_neto_m"]
+        fila = negocios(db)["C_VIVE"]
+        assert fila["lat_inicial"] == pytest.approx(20.67)
+        assert fila["lat_final"] == pytest.approx(20.67)
+        assert fila["h3_cell_9_final"] is None  # el escenario no calcula h3
 
 
 @pytest.mark.unit
@@ -634,19 +640,28 @@ class TestLosInvariantesCorrenDeVerdad:
         with db.connect() as conn:
             assert CohorteOficial().validar(conn) == []
 
-    def test_un_canonico_inventado_a_mano_rompe_el_invariante(self, db, tracker):
-        """Prueba que los invariantes DETECTAN, no solo que corren."""
+    def test_un_veredicto_alterado_a_mano_rompe_el_invariante(self, db, tracker):
+        """Prueba que los invariantes DETECTAN, no solo que corren.
+
+        Se marca como cerrado un negocio presente en el ultimo corte, que es
+        la contradiccion mas grave posible en esta tabla: haria que la muestra
+        a verificar incluyera negocios que el propio DENUE sigue listando.
+        """
         construir_cohorte_oficial(db, tracker)
         with db.begin() as conn:
-            conn.execute(
-                text(
-                    f"UPDATE gold.{TABLA} SET nombre = 'NOMBRE QUE NADIE PUBLICO' "
-                    "WHERE clee = 'C_VIVE'"
-                )
-            )
+            conn.execute(text(f"UPDATE gold.{TABLA} SET cerrado = TRUE WHERE clee = 'C_VIVE'"))
         with db.connect() as conn:
             violaciones = CohorteOficial().validar(conn)
-        assert any("no esta marcado canonico" in v for v in violaciones)
+        assert any("presentes en el ultimo corte marcados como cerrados" in v for v in violaciones)
+
+    def test_una_edad_negativa_rompe_el_invariante(self, db, tracker):
+        """Fecha de alta posterior al ultimo corte: imposible."""
+        construir_cohorte_oficial(db, tracker)
+        with db.begin() as conn:
+            conn.execute(text(f"UPDATE gold.{TABLA} SET edad_anios = -1 WHERE clee = 'C_VIVE'"))
+        with db.connect() as conn:
+            violaciones = CohorteOficial().validar(conn)
+        assert any("edades NEGATIVAS" in v for v in violaciones)
 
 
 @pytest.mark.unit
@@ -676,7 +691,7 @@ class TestLoQueQuedaEnMetaDeVerdad:
         assert config["ventana_cortes"] == [c.isoformat() for c in OFICIALES]
 
     def test_hay_una_tarea_por_tabla_destino(self, db, tracker):
-        """La madre y la evidencia, cada una con su conteo."""
+        """Una sola tabla, una sola tarea, con su conteo."""
         construir_cohorte_oficial(db, tracker)
         with db.connect() as conn:
             tareas = {
@@ -685,10 +700,9 @@ class TestLoQueQuedaEnMetaDeVerdad:
                     text("SELECT target_table, status, rows_loaded FROM meta.process_tasks")
                 ).mappings()
             }
-        assert set(tareas) == {TABLA, TABLA_VARIANTES}
+        assert set(tareas) == {TABLA}
         assert tareas[TABLA]["status"] == TaskStatus.SUCCESS.value
         assert tareas[TABLA]["rows_loaded"] == len(negocios(db))
-        assert tareas[TABLA_VARIANTES]["rows_loaded"] > 0
 
 
 @pytest.mark.unit
@@ -718,9 +732,8 @@ class TestReanudarYRehacer:
             assert antes[clee]["nombre"] == despues[clee]["nombre"]
             assert antes[clee]["codigo_act"] == despues[clee]["codigo_act"]
 
-    def test_las_variantes_no_quedan_duplicadas_al_rehacer(self, db, tracker):
-        """El TRUNCATE tiene que tomar las dos tablas o la FK lo rechaza."""
-        construir_cohorte_oficial(db, tracker)
-        con_una = len(variantes(db, "C_REBRAND", "nom_estab"))
+    def test_rehacer_no_duplica_filas(self, db, tracker):
+        """El TRUNCATE del `--force` deja la tabla limpia antes de reconstruir."""
+        primera = construir_cohorte_oficial(db, tracker)
         construir_cohorte_oficial(db, tracker, force=True)
-        assert len(variantes(db, "C_REBRAND", "nom_estab")) == con_una
+        assert len(negocios(db)) == primera

@@ -1,9 +1,10 @@
 """El SQL de la cohorte oficial: lo que afirma y lo que se niega a afirmar.
 
 Sin base de datos. Lo que se revisa aquí son las decisiones que, si se
-rompen, producen una tabla que **parece** correcta: un domicilio armado por
-partes, una ventana heredada de la secuencia de 20 cortes, un nombre
-canónico inventado para un cluster que agrupó dos negocios. Ninguna de esas
+rompen, producen una tabla que **parece** correcta: una edad medida contra
+"hoy" en vez de contra el último corte, un veredicto de cierre que no
+corresponde al umbral de la corrida, una ventana heredada de los 20 cortes,
+un nombre inventado para un cluster que agrupó dos negocios. Ninguna de esas
 levanta un error en tiempo de ejecución — y por eso tienen test.
 """
 
@@ -12,14 +13,14 @@ from datetime import date
 import pytest
 
 from src.etl.loaders.gold_cohorte_oficial import (
-    COLUMNA_CANONICA,
+    DIAS_POR_ANIO,
     METODO_BASE,
+    SQL_CVE_GEO,
     TABLA,
-    TABLA_VARIANTES,
     CohorteOficial,
 )
 from src.shared.db.base import get_table
-from src.shared.db.models.gold import CAMPOS_CON_VARIANTES
+from src.shared.db.models.gold import ORIGEN_NOMBRE_LLM, ORIGEN_NOMBRE_MODA
 
 VENTANA = [
     date(2021, 5, 1),
@@ -54,470 +55,419 @@ def pasos(cohorte):
     return cohorte.pasos_bloque(bloque=7, ultimo_idx=len(VENTANA) - 1)
 
 
+@pytest.fixture
+def madre(pasos):
+    """El SQL que escribe la tabla."""
+    return next(p.sql for p in pasos if p.nombre == TABLA)
+
+
 @pytest.mark.unit
-class TestLaCohorteNoEsSilverFiltrado:
-    """La diferencia que justifica que Gold recalcule en vez de copiar."""
+class TestLaEdad:
+    """Es la mitad de la razón de ser de la tabla; nadie la calculaba antes."""
 
-    def test_no_lee_ninguna_tabla_de_identidad(self, cohorte):
-        """La identidad es el `clee` de los hechos, no un `clee_resuelto`.
+    def test_se_mide_al_ultimo_corte_y_no_a_hoy(self, madre):
+        """Con "hoy" la tabla dejaría de ser reproducible.
 
-        Si este SQL uniera `clee_radio`, Gold heredaría el error de
-        propagación que la cohorte oficial existe para no tener.
+        La misma fila daría una edad distinta cada vez que se consultara, y
+        dos corridas del mismo día ya no serían comparables.
         """
-        sql = cohorte.sql_llenar_obs(VENTANA[0], 0, 32)
-        assert "clee_radio" not in sql
-        assert "clee_h3" not in sql
-        assert "clee_resuelto" not in sql
-        assert "e.clee IS NOT NULL" in sql
+        assert "v.ultimo_periodo - v.fecha_alta_date" in madre
+        for prohibido in ("now()", "CURRENT_DATE", "localtimestamp"):
+            assert prohibido not in madre
 
-    def test_solo_entran_observaciones_con_clee(self, cohorte):
-        """Una fila sin `clee` en un corte oficial no tiene identidad observada.
+    def test_sale_de_la_fecha_de_alta_no_del_primer_corte(self, madre):
+        """La fecha de alta es el único proxy INDEPENDIENTE de la ventana.
 
-        Es de la cohorte y no una optimización: ese <=0.1% que el umbral
-        tolera no puede entrar, y el negocio sí entra si aparece con `clee` en
-        otro corte oficial (`gold_cohorte_2021.md` §2).
+        Medir desde el primer corte observado daría la antigüedad *en el
+        directorio*, que es una propiedad de cuándo INEGI empezó a mirar, no
+        del negocio.
         """
-        sql = cohorte.sql_llenar_obs(VENTANA[3], 3, 32)
-        assert "e.clee <> ''" in sql
+        assert "fecha_alta_date" in madre
+        assert "v.primer_periodo - v.fecha_alta_date" in madre  # solo el diagnostico
 
-    def test_el_metodo_base_no_es_un_metodo_de_propagacion(self):
-        """Decir `radio` seria falso justo en la columna que dice de donde vino."""
-        assert METODO_BASE not in {"radio", "h3", "celda_h3_7"}
+    def test_usa_el_anio_juliano(self, madre):
+        """365 inflaría las edades ~0.07% por año.
 
-    def test_la_llave_del_destino_se_llama_clee(self, cohorte):
-        """`clee_resuelto` seria mentira: aqui no se resolvio nada."""
-        assert cohorte.llave_destino == "clee"
+        Importa porque la edad entra al modelo como variable continua.
+        """
+        assert str(DIAS_POR_ANIO) in madre
+        assert DIAS_POR_ANIO == 365.25
+
+    def test_sin_fecha_de_alta_la_edad_es_NULL(self, madre):
+        """No se inventa una edad con el primer corte como sustituto."""
+        assert "CASE WHEN v.fecha_alta_date IS NULL THEN NULL" in madre
+
+
+@pytest.mark.unit
+class TestElVeredictoDeCierre:
+    """La otra mitad: es la hipótesis que la tabla existe para validar."""
+
+    def test_el_umbral_sale_de_la_config(self, madre):
+        """No es un literal escondido en el SQL: es calibración.
+
+        Que viva en `.env` y quede en `version_reglas` es lo que permite
+        cambiarlo y saber con qué umbral se construyó cada versión.
+        """
+        from src.shared.config import get_settings
+
+        umbral = get_settings().CIERRE_CORTES_AUSENTE
+        assert f">= {umbral} AS cerrado" in madre
+
+    def test_se_mide_contra_el_ultimo_corte_oficial(self, madre):
+        """`cortes_tras_ultimo` con el idx 8, que es el noveno corte."""
+        assert "8 - v.idx_ultimo AS cortes_tras_ultimo" in madre
+
+    def test_los_ingredientes_se_conservan(self, madre):
+        """Con ellos, cambiar el umbral no exige reconstruir 9.58M filas.
+
+        `huecos` además mide el error de la propia regla: son los negocios
+        que ya desaparecieron y volvieron, o sea casos probados de que
+        ausencia no implica cierre.
+        """
+        assert "AS cortes_tras_ultimo" in madre
+        assert "AS huecos" in madre
+
+    def test_el_umbral_es_configurable_sin_tocar_codigo(self, monkeypatch):
+        from src.shared.config import get_settings
+
+        monkeypatch.setenv("CIERRE_CORTES_AUSENTE", "3")
+        get_settings.cache_clear()
+        try:
+            ag = CohorteOficial()
+            ag._ventana = list(VENTANA)
+            sql = next(p.sql for p in ag.pasos_bloque(0, 8) if p.nombre == TABLA)
+            assert ">= 3 AS cerrado" in sql
+        finally:
+            get_settings.cache_clear()
+
+
+@pytest.mark.unit
+class TestLosExtremosDeLaTrayectoria:
+    """Lo que `permanencia` consume y tira; aquí se queda.
+
+    No contradice `b0007`: el primer y el último estado no son "el valor de
+    un corte cualquiera", son los dos extremos de la vida.
+    """
+
+    def test_los_dos_extremos_vienen_de_una_sola_observacion_cada_uno(self, pasos):
+        """`DISTINCT ON` y no agregados por campo: así son coherentes.
+
+        El estado inicial sale todo de la MISMA primera observación, no el
+        empleo de una y la geografía de otra.
+        """
+        for nombre in ("primera", "ultima"):
+            sql = next(p.sql for p in pasos if p.nombre == nombre)
+            assert "DISTINCT ON (clee)" in sql
+        primera = next(p.sql for p in pasos if p.nombre == "primera")
+        ultima = next(p.sql for p in pasos if p.nombre == "ultima")
+        assert "period ASC" in primera
+        assert "period DESC" in ultima
+
+    def test_el_empleo_y_el_tamano_en_los_dos_extremos(self, madre):
+        for columna in (
+            "empleados_inicial",
+            "empleados_final",
+            "tamano_inicial",
+            "tamano_final",
+        ):
+            assert columna in madre
+
+    def test_la_geografia_en_los_dos_extremos(self, madre):
+        for columna in ("cve_geo_inicial", "cve_geo_final", "lat_inicial", "lat_final"):
+            assert columna in madre
+
+    def test_la_distancia_respeta_el_orden_temporal(self, madre):
+        """Es entre el primer y el último punto, no la diagonal del rectángulo.
+
+        La diagonal contestaría "cuánto deambuló"; esto contesta "terminó en
+        otro lado", que es lo que `se_mudo` necesita como respaldo.
+        """
+        assert "u.latitud - p.latitud" in madre
+        assert "lat_min" not in madre  # el rectangulo se queda en permanencia
+
+
+@pytest.mark.unit
+class TestLaLlaveGeografica:
+    def test_va_concatenada_y_jerarquica(self):
+        """`cve_mun` no es único a nivel nacional sin `cve_ent`.
+
+        Con los componentes sueltos, comparar la geografía inicial contra la
+        final podría emparejar el municipio 039 de un estado con el de otro.
+        """
+        assert "cve_ent || cve_mun || cve_loc || ageb" in SQL_CVE_GEO
+
+    def test_se_corta_en_el_primer_nivel_ausente(self):
+        """Concatenar a ciegas con un hueco produce una llave FALSA.
+
+        Entidad + municipio + AGEB, sin localidad, pondría el AGEB en la
+        posición de la localidad. El `CASE` garantiza que el valor sea
+        siempre un prefijo válido, y su largo dice hasta dónde llega.
+        """
+        assert SQL_CVE_GEO.count("WHEN") == 4
+
+    def test_la_mudanza_se_mide_a_nivel_municipio(self, madre):
+        """El ruido de GPS mueve el punto sin cambiar el municipio.
+
+        Comparar coordenadas marcaría como mudanza cualquier
+        re-geocodificación de INEGI.
+        """
+        assert "LEFT(p.cve_geo, 5) <> LEFT(u.cve_geo, 5)" in madre
+
+    def test_no_se_afirma_una_mudanza_con_la_llave_ausente(self, madre):
+        """Con una nula, `IS DISTINCT FROM` diría que se mudó.
+
+        Y lo que pasa es que falta el dato, no que se movió.
+        """
+        assert "p.cve_geo IS NOT NULL AND u.cve_geo IS NOT NULL" in madre
+
+
+@pytest.mark.unit
+class TestNoEsUnaCopiaDePermanencia:
+    """El error del primer diseño, que este rediseño corrige."""
+
+    def test_no_repite_las_banderas_tiene(self, madre):
+        """Quince columnas que `permanencia` ya tenía.
+
+        Con los valores concretos materializados, un NULL dice lo mismo.
+        """
+        assert "tiene_" not in madre
+
+    def test_no_repite_el_rectangulo_ni_la_dispersion(self, madre):
+        for columna in ("lat_min", "lat_max", "dispersion_max_m", "n_direcciones"):
+            assert columna not in madre
+
+    def test_no_hay_tabla_de_variantes(self, cohorte, pasos):
+        """Los valores distintos salen de silver filtrando por `clee`."""
+        assert cohorte.tablas_destino == (TABLA,)
+        assert [p.nombre for p in pasos].count(TABLA) == 1
+
+    def test_la_tabla_no_tiene_columnas_de_cobertura(self):
+        columnas = {c.name for c in get_table(TABLA, schema="gold").columns}
+        assert not {c for c in columnas if c.startswith("tiene_")}
+
+    def test_lo_que_si_aporta_sobre_permanencia(self):
+        """Edad, veredicto y extremos: lo que justifica la tabla."""
+        columnas = {c.name for c in get_table(TABLA, schema="gold").columns}
+        assert {
+            "edad_anios",
+            "cerrado",
+            "empleados_inicial",
+            "empleados_final",
+            "tamano_inicial",
+            "tamano_final",
+            "cve_geo_inicial",
+            "cve_geo_final",
+        } <= columnas
+
+
+@pytest.mark.unit
+class TestElNombre:
+    def test_la_moda_sale_de_una_pasada_y_no_de_una_lateral(self, pasos, madre):
+        """Es una diferencia de complejidad, no de estilo.
+
+        Un `LEFT JOIN LATERAL` con `LIMIT 1` fuerza un nested loop: una
+        búsqueda por identidad, cada una recorriendo la temporal completa
+        porque no tiene índice. Medido: dejó el `INSERT` del bloque 1
+        corriendo 21 minutos sin terminar (~11 horas para los 32).
+        """
+        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
+        assert "DISTINCT ON (clee)" in canonico
+        assert "LATERAL" not in madre
+        assert "LEFT JOIN canonico nom USING (clee)" in madre
+
+    def test_los_conteos_del_nombre_van_antes(self, pasos):
+        """La moda necesita saber en cuántos cortes se usó cada nombre."""
+        orden = [p.nombre for p in pasos]
+        assert orden.index("nombres") < orden.index("canonico")
+
+    def test_el_desempate_hace_reproducible_la_eleccion(self, pasos):
+        """Sin él, dos nombres empatados dependerían del plan."""
+        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
+        assert canonico.rstrip().endswith("nom_estab")
+
+    def test_la_fila_dice_quien_eligio_el_nombre(self, madre):
+        """Sin esto, un nombre generado y uno observado son indistinguibles.
+
+        Es lo que vuelve auditable el resultado del LLM cuando esa etapa
+        exista.
+        """
+        assert f"'{ORIGEN_NOMBRE_MODA}' END AS nombre_origen" in madre
+        assert ORIGEN_NOMBRE_LLM != ORIGEN_NOMBRE_MODA
+
+    def test_un_cluster_sospechoso_no_recibe_nombre(self, madre):
+        """Con [TACOS PACO, FARMACIA PACO] cualquier nombre es falso.
+
+        Más nombres que cortes es IMPOSIBLE para un cluster correcto --un
+        establecimiento aparece a lo más una vez por corte-- así que ahí la
+        identidad agrupó más de un negocio.
+        """
+        assert "CASE WHEN v.n_nombres > 9 THEN NULL ELSE nom.nombre END AS nombre" in madre
+        assert "v.n_nombres > 9 AS cluster_sospechoso" in madre
+
+    def test_y_tampoco_recibe_origen(self, madre):
+        """Un `nombre_origen` sin nombre sería basura."""
+        assert "v.n_nombres > 9 OR nom.nombre IS NULL THEN NULL" in madre
 
 
 @pytest.mark.unit
 class TestLaVentanaEsLaOficial:
-    """Lo que hace que `idx_primer = 0` signifique algo distinto que en Silver."""
-
     def test_el_idx_es_la_posicion_en_la_ventana_oficial(self, cohorte):
         """El corte 2022-05 es el idx 2 de la ventana, no el 13 de los 20.
 
-        Heredar los índices de la secuencia completa rompería
-        `presente_desde_el_inicio` y `duracion_periodos` sin un solo error
-        visible.
+        Heredar los índices de la secuencia completa rompería la edad y la
+        censura sin un solo error visible.
         """
         sql = cohorte.sql_llenar_obs(VENTANA[2], 2, 32)
         assert "    2,\n" in sql
 
-    def test_la_ventana_queda_grabada_en_cada_fila(self, cohorte, pasos):
-        """Sin esto la fila no es citable: la N cambia y nada lo explica."""
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
+    def test_la_ventana_queda_grabada_en_cada_fila(self, madre):
+        """Si mañana entra un corte, la N y todas las edades cambian."""
         for corte in VENTANA:
-            assert f"DATE '{corte.isoformat()}'" in sql
-        assert "::date[]" in sql
+            assert f"DATE '{corte.isoformat()}'" in madre
+        assert "::date[]" in madre
 
-    def test_la_censura_se_mide_contra_el_ultimo_corte_oficial(self, cohorte, pasos):
-        """`cortes_tras_ultimo` con el idx 8, que es el noveno corte."""
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "8 - v.idx_ultimo AS cortes_tras_ultimo" in sql
+    def test_los_periodos_exactos_se_publican(self, pasos, madre):
+        """De ahí sale cualquier patrón de presencia, y los años."""
+        ventana = next(p.sql for p in pasos if p.nombre == "ventana")
+        assert "ARRAY_AGG(DISTINCT period ORDER BY period) AS periodos" in ventana
+        assert "v.periodos" in madre
 
-    def test_la_huella_es_la_ventana_y_no_una_fecha(self, cohorte):
-        """Un corte puede ENTRAR a la ventana y tambien salir de ella.
+    def test_no_lee_ninguna_tabla_de_identidad(self, cohorte):
+        """La identidad es el `clee` de los hechos, no un `clee_resuelto`."""
+        sql = cohorte.sql_llenar_obs(VENTANA[0], 0, 32)
+        assert "clee_radio" not in sql
+        assert "clee_resuelto" not in sql
+        assert "e.clee IS NOT NULL" in sql
 
-        Con un `>` sobre timestamps solo se vería uno de los dos cambios, y
-        una tabla construida con otra ventana se seguiría sirviendo.
-        """
-        huella = cohorte.huella_origen(conn=None)
-        assert huella.startswith("ventana=")
-        assert "2021-05-01" in huella and "2026-05-01" in huella
-        assert "resuelto_en" not in huella
-
-
-@pytest.mark.unit
-class TestCoherenciaDelDomicilio:
-    """`normalizacion_gold.md` §5: un domicilio no se arma por partes."""
-
-    def test_el_bloque_de_ubicacion_sale_de_una_sola_observacion(self, pasos):
-        """`DISTINCT ON` y no un agregado por campo.
-
-        Tomar el CP del corte más reciente que lo tenga, la colonia de otro y
-        las coordenadas del último produce un domicilio que nunca existió.
-        """
-        referencia = next(p for p in pasos if p.nombre == "referencia")
-        assert "DISTINCT ON (clee)" in referencia.sql
-        assert "ORDER BY clee, period DESC, id" in referencia.sql
-        for campo in ("cve_ent", "cve_mun", "cve_loc", "ageb", "cod_postal", "tipo_asent"):
-            assert campo in referencia.sql
-
-    def test_las_llaves_geograficas_salen_del_corte_de_referencia(self, pasos):
-        """De `r.`, nunca de un agregado: es lo que las mantiene coherentes."""
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        for campo in ("cve_ent", "cve_mun", "cve_loc", "ageb", "cod_postal", "tipo_asent"):
-            assert f"r.{campo}" in sql
-
-    def test_el_corte_de_referencia_se_materializa(self, pasos):
-        """Es lo que vuelve verificable la coherencia desde fuera."""
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "r.corte_referencia" in sql
-
-    def test_el_contacto_no_se_materializa_en_la_madre(self, pasos):
-        """Cambia entre cortes, asi que no hay un valor que publicar.
-
-        La version anterior elegia "el mas reciente no vacio" de cada uno, que
-        era el peor caso posible: un valor **sin fecha**, imposible de situar
-        en el tiempo. Ahora viven en variantes con su ventana, y de la madre
-        solo queda la bandera de si existieron.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        for campo in ("telefono", "correoelec", "www"):
-            assert f"v.{campo}" not in sql
-            assert f"r.{campo}" not in sql
-        # Pero la cobertura si se afirma.
-        for bandera in ("tiene_telefono", "tiene_correo", "tiene_sitio"):
-            assert bandera in sql
-
-    def test_el_tamano_tampoco_se_materializa(self, pasos):
-        """Es la covariable que CAMBIA, asi que congelar una es lo peor.
-
-        Para el modelo de supervivencia el tamano es una covariable variable
-        en el tiempo, y variantes la entrega con su ventana. Lo que si es
-        agregado --si cambio y cuanto-- se queda.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        for campo in ("per_ocu", "categoria_tamano", "empleados_max", "tipounieco"):
-            assert f"r.{campo}" not in sql
-        assert "cambio_tamano" in sql
-        assert "delta_empleados_min" in sql
-
-    def test_empleados_min_se_consume_pero_no_se_publica(self, pasos):
-        """La temporal lo necesita para el delta; la tabla no lo guarda."""
-        referencia = next(p.sql for p in pasos if p.nombre == "referencia")
-        assert "empleados_min" in referencia
-
-        madre = next(p.sql for p in pasos if p.nombre == TABLA)
-        bloque = madre[madre.index("(") + 1 : madre.index(")\nSELECT")]
-        columnas = {c.strip() for c in bloque.replace("\n", "").split(",")}
-        assert "empleados_min" not in columnas
+    def test_el_metodo_base_no_es_un_metodo_de_propagacion(self):
+        assert METODO_BASE not in {"radio", "h3", "celda_h3_7"}
 
 
 @pytest.mark.unit
-class TestLoQueSeNiegaAAfirmar:
-    """Donde el valor correcto es NULL, y no un valor plausible."""
+class TestLosInvariantes:
+    """Lo que, si no se cumple, debe FALLAR la corrida."""
 
-    def test_un_cluster_sospechoso_no_recibe_nombre(self, pasos):
-        """Con [TACOS PACO, FARMACIA PACO] cualquier canonico es falso.
+    def _consultas(self, cohorte):
+        """Las consultas que `validar` corre, sin ejecutarlas."""
+        vistas: list[str] = []
 
-        Más nombres que cortes es IMPOSIBLE para un cluster correcto --un
-        establecimiento aparece a lo más una vez por corte-- así que ahí la
-        identidad agrupó más de un negocio y no hay nombre que lo represente.
+        class ConnFalsa:
+            def execute(self, sentencia, *a, **kw):
+                vistas.append(str(sentencia))
+
+                class R:
+                    def one(self_inner):
+                        return (0, None)
+
+                return R()
+
+        assert cohorte.validar(ConnFalsa()) == []
+        return vistas
+
+    def test_valida_la_edad_y_el_veredicto(self, cohorte):
+        """Si la edad o el cierre están mal, la muestra no significa nada."""
+        todo = " ".join(self._consultas(cohorte))
+        assert "edad_anios < 0" in todo
+        assert "cerrado <> (cortes_tras_ultimo >=" in todo
+        assert "cortes_tras_ultimo = 0 AND cerrado" in todo
+
+    def test_valida_la_coherencia_de_la_ventana(self, cohorte):
+        todo = " ".join(self._consultas(cohorte))
+        assert "ventana_cortes <>" in todo
+        assert "cardinality(periodos) <> cortes_observados" in todo
+
+    def test_rechaza_identidades_sinteticas(self, cohorte):
+        """Redundante por construcción, y por eso atrapa un error de alcance.
+
+        Solo la fase 2 de propagación crea `NEW_*`; una aquí querría decir
+        que alguien amplió la cohorte sin darse cuenta.
         """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "CASE WHEN v.n_nombres > 9 THEN NULL ELSE nom.nombre END AS nombre" in sql
-        assert "v.n_nombres > 9 AS cluster_sospechoso" in sql
+        todo = " ".join(self._consultas(cohorte))
+        assert "STARTS_WITH(clee, 'NEW_')" in todo
+        # Con LIKE, el `_` de NEW_ seria un comodin.
+        assert "LIKE 'NEW" not in todo
 
-    def test_el_scian_queda_null_si_la_discrepancia_cruza_rama(self, pasos):
-        """Ahi hay que juzgar, y un valor inventado es peor que la ausencia.
+    def test_valida_que_el_nombre_tenga_origen(self, cohorte):
+        todo = " ".join(self._consultas(cohorte))
+        assert "nombre IS NOT NULL AND nombre_origen IS NULL" in todo
+        assert "cluster_sospechoso AND nombre IS NOT NULL" in todo
 
-        La jerarquía ES el código (sector=2, subsector=3, rama=4), así que el
-        ancestro común sale por prefijo sin unir el catálogo.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "LEFT(v.act_min, 5) = LEFT(v.act_max, 5)" in sql
-        assert "LEFT(v.act_min, 4) = LEFT(v.act_max, 4)" in sql
-        # Sin un quinto nivel: por encima de rama ya no se decide aqui.
-        assert "LEFT(v.act_min, 3)" not in sql
-        assert "LEFT(v.act_min, 2)" not in sql
+    def test_reporta_todas_las_violaciones_no_la_primera(self, cohorte):
+        """Con una sola, cada arreglo cuesta otra corrida de horas."""
 
-    def test_el_ancestro_se_calcula_con_los_extremos(self, pasos):
-        """El prefijo comun de un conjunto ordenado es el del minimo y el maximo.
+        class ConnRota:
+            def execute(self, sentencia, *a, **kw):
+                class R:
+                    def one(self_inner):
+                        return (3, "14ABC0001")
 
-        Dos escalares en vez de materializar el conjunto por negocio.
-        """
-        ventana = next(p for p in pasos if p.nombre == "ventana")
-        assert "MIN(codigo_act) FILTER (" in ventana.sql
-        assert "MAX(codigo_act) FILTER (" in ventana.sql
+                return R()
 
-    def test_no_se_materializa_el_veredicto_de_cierre(self):
-        """La regla sigue siendo preliminar: la tabla da ingredientes."""
-        columnas = {c.name for c in get_table(TABLA, schema="gold").columns}
-        assert not columnas & {"cerrado", "estatus"}
+        violaciones = cohorte.validar(ConnRota())
+        assert len(violaciones) == 10
+        assert all("14ABC0001" in v for v in violaciones)
 
 
 @pytest.mark.unit
-class TestElNombreCanonicoYSuEvidencia:
-    """§6.4: el baseline obligatorio, y que la evidencia no pueda discrepar."""
-
-    def test_el_nombre_es_la_moda_desempatada_por_el_mas_reciente(self, pasos):
-        """Baseline 1 de §6.4, que el LLM solo reemplaza si GANA."""
-        sql = next(p.sql for p in pasos if p.nombre == "canonico")
-        assert "ORDER BY clee, n_cortes DESC, ultimo_idx DESC, valor" in sql
-
-    def test_la_moda_sale_de_una_pasada_y_no_de_una_lateral(self, pasos):
-        """Es una diferencia de complejidad, no de estilo.
-
-        Un `LEFT JOIN LATERAL` con `LIMIT 1` fuerza un nested loop: una
-        busqueda por identidad, cada una recorriendo la temporal completa
-        porque no tiene indice. Medido: dejo el INSERT del bloque 1 corriendo
-        21 minutos sin terminar (~11 horas proyectadas para los 32).
-        """
-        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
-        assert "DISTINCT ON (clee)" in canonico
-
-        madre = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "LATERAL" not in madre
-        assert "LEFT JOIN canonico nom USING (clee)" in madre
-
-    def test_el_desempate_final_hace_reproducible_la_eleccion(self, pasos):
-        """Sin el `valor`, dos variantes empatadas dependerian del plan."""
-        canonico = next(p.sql for p in pasos if p.nombre == "canonico")
-        assert canonico.rstrip().endswith("valor")
-
-    def test_la_moda_necesita_las_variantes_antes(self, pasos):
-        """De ahi el orden de los pasos: el conteo por valor es su insumo."""
-        orden = [p.nombre for p in pasos]
-        assert orden.index("variantes") < orden.index(TABLA)
-
-    def test_es_canonico_se_lee_de_la_madre_no_se_recalcula(self, pasos):
-        """Recalcular la regla dejaria que las dos copias discreparan.
-
-        Si la hija dedujera su propio canónico, un cambio en una de las dos
-        dejaría la tabla afirmando que el canónico es un valor que la madre
-        nunca publicó. Comparando contra la fila escrita, no pueden discrepar.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA_VARIANTES)
-        assert f"JOIN {'gold'}.{TABLA} n ON n.clee = va.clee" in sql
-        assert "IS NOT DISTINCT FROM n.nombre" in sql
-
-    def test_el_mapa_apunta_a_columnas_que_existen(self):
-        """Cada columna canonica tiene que existir en la tabla madre.
-
-        Esto es lo que faltaba: el mapa se derivaba con una comprension que
-        trataba `nom_estab -> nombre` como la UNICA excepcion, y generaba
-        `n.raz_social`, que no existe (la columna es `razon_social`). El SQL
-        era valido como cadena y solo truena al ejecutarse, asi que ningun
-        test de forma lo veia.
-        """
-        del_modelo = {c.name for c in get_table(TABLA, schema="gold").columns}
-        faltan = {campo: col for campo, col in COLUMNA_CANONICA.items() if col not in del_modelo}
-        assert not faltan, f"columnas canonicas inexistentes: {faltan}"
-
-    def test_solo_los_agregados_tienen_valor_canonico(self):
-        """Dos de los ocho campos, y eso es la decision.
-
-        La madre solo publica agregados sobre la vida completa: la moda del
-        nombre y el ancestro comun del SCIAN. Los otros seis cambian entre
-        cortes, asi que no hay nada que marcar como canonico y sus filas
-        quedan todas en `es_canonico = FALSE`.
-        """
-        assert set(COLUMNA_CANONICA) == {"nom_estab", "codigo_act"}
-        # Subconjunto, no igualdad: lo que cambio respecto al diseño anterior.
-        assert set(COLUMNA_CANONICA) < set(CAMPOS_CON_VARIANTES)
-
-    def test_los_campos_sin_canonico_no_quedan_sin_informacion(self):
-        """`tiene_*` dice si existio y variantes dice que valores tuvo."""
-        from src.shared.db.models.gold import CAMPOS_CON_VARIANTES as campos
-
-        sin_canonico = set(campos) - set(COLUMNA_CANONICA)
-        assert sin_canonico == {
-            "raz_social",
-            "per_ocu",
-            "tipounieco",
-            "telefono",
-            "correoelec",
-            "www",
-        }
-
-    def test_el_case_solo_cubre_los_campos_que_la_madre_publica(self, pasos):
-        """Dos ramas y un `ELSE FALSE`, que es la respuesta correcta.
-
-        `nom_estab` se compara contra la columna `nombre` --en la madre es el
-        valor canonico, no el campo crudo del DENUE-- y `codigo_act` contra
-        la suya. Para los otros seis no hay rama porque no hay canonico.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA_VARIANTES)
-        assert "va.campo = 'nom_estab' THEN va.valor IS NOT DISTINCT FROM n.nombre" in sql
-        assert "va.campo = 'codigo_act' THEN va.valor IS NOT DISTINCT FROM n.codigo_act" in sql
-        assert sql.count("WHEN va.campo") == 2
-        assert "ELSE FALSE" in sql
-        assert "n.razon_social" not in sql
-
-    def test_se_listan_exactamente_los_campos_documentados(self, pasos):
-        """Agregar uno es una decision de diseño (§6.1), no un descuido."""
-        variantes = next(p for p in pasos if p.nombre == "variantes")
-        for campo in CAMPOS_CON_VARIANTES:
-            assert f"'{campo}' AS campo" in variantes.sql
-        assert variantes.sql.count("UNION ALL") == len(CAMPOS_CON_VARIANTES) - 1
-
-
-@pytest.mark.unit
-class TestTroceoYEscritura:
-    def test_ningun_paso_lee_la_tabla_de_trabajo_completa(self, pasos):
-        """Si a uno se le olvidara el filtro, agregaria los 51.5M.
-
-        Y peor que lento: los conteos saldrían del universo entero y no del
-        bloque. El filtro se exige de los pasos que leen la tabla de trabajo;
-        `canonico` no la toca --lee `variantes`, que ya viene acotada-- y los
-        dos `INSERT` leen solo temporales.
-        """
+class TestTroceoYMeta:
+    def test_ningun_paso_lee_la_tabla_de_trabajo_completa(self, pasos, cohorte):
+        """Si a uno se le olvidara el filtro, agregaría los 51.5M."""
         for paso in pasos:
-            if self.obs_nombre not in paso.sql:
-                continue
-            assert "bloque = 7" in paso.sql, paso.nombre
-
-    #: La tabla de trabajo, para reconocer qué pasos la leen.
-    obs_nombre = "negocios_clee_oficial_obs"
-
-    def test_los_pasos_que_derivan_leen_solo_temporales(self, pasos):
-        """`canonico` y los dos INSERT no vuelven a la tabla de trabajo.
-
-        Es lo que vuelve baratos los pasos finales: la tabla de trabajo tiene
-        51.5M filas y las temporales del bloque unas cientos de miles.
-        """
-        derivados = ("canonico", TABLA, TABLA_VARIANTES)
-        for paso in pasos:
-            if paso.nombre in derivados:
-                assert self.obs_nombre not in paso.sql, paso.nombre
+            if cohorte.obs in paso.sql:
+                assert "bloque = 7" in paso.sql, paso.nombre
 
     def test_las_temporales_mueren_con_la_transaccion(self, pasos):
-        """`ON COMMIT DROP`: un bloque que falla no deja basura."""
         for paso in pasos:
-            if paso.nombre in (TABLA, TABLA_VARIANTES):
+            if paso.nombre == TABLA:
                 continue
             assert "ON COMMIT DROP" in paso.sql, paso.nombre
 
-    def test_la_madre_se_escribe_antes_que_la_hija(self, pasos):
-        """La FK lo exige, y van en la misma transaccion del bloque."""
-        orden = [p.nombre for p in pasos]
-        assert orden.index(TABLA) < orden.index(TABLA_VARIANTES)
-        assert orden[-1] == TABLA_VARIANTES
-
-    def test_las_dos_tablas_se_truncan_juntas(self, cohorte):
-        """PostgreSQL rechaza truncar una tabla referenciada por una FK sola."""
-        assert cohorte.tablas_destino == (TABLA, TABLA_VARIANTES)
-
     def test_la_tabla_de_trabajo_es_unlogged(self, cohorte):
-        """Una temporal moriria en el primer COMMIT, y el troceo commitea."""
+        """Una temporal moriría en el primer COMMIT, y el troceo commitea."""
         ddl = cohorte.sql_crear_obs()
         assert "UNLOGGED" in ddl
         assert "CREATE TEMP" not in ddl
 
-    def test_la_tabla_de_trabajo_no_lleva_columna_origen(self, cohorte):
-        """Seria una constante en 51.5M filas: aqui todo es DIRECTO."""
-        assert "origen" not in cohorte.sql_crear_obs()
-
-    @pytest.mark.parametrize("tabla", [TABLA, TABLA_VARIANTES])
-    def test_el_insert_cuadra_columnas_con_el_modelo(self, pasos, tabla):
+    def test_el_insert_cuadra_columnas_con_el_modelo(self, madre):
         """Agregar una columna al ORM y olvidarla en el INSERT.
 
         Es el error que, sin esto, se descubre nueve cortes y varias horas
-        más tarde, cuando corre el primer `INSERT` de verdad.
+        más tarde.
         """
-        sql = next(p.sql for p in pasos if p.nombre == tabla)
-        bloque = sql[sql.index("(") + 1 : sql.index(")\nSELECT")]
+        bloque = madre[madre.index("(") + 1 : madre.index(")\nSELECT")]
         escritas = {c.strip() for c in bloque.replace("\n", "").split(",") if c.strip()}
-
-        # `construida_en` la pone la base (server_default).
-        del_modelo = {c.name for c in get_table(tabla, schema="gold").columns}
+        del_modelo = {c.name for c in get_table(TABLA, schema="gold").columns}
         assert escritas == del_modelo - {"construida_en"}
 
-
-@pytest.mark.unit
-class TestJitterDeGPS:
-    """La unica excepcion a "todo del corte de referencia", y por que es segura."""
-
-    def test_la_mediana_solo_entra_con_dispersion_alta_y_neto_bajo(self, pasos):
-        """Dispersion grande SIN desplazamiento es jitter, no una mudanza.
-
-        Las dos condiciones juntas son lo que separa un GPS ruidoso de un
-        negocio que se movió; con solo la dispersión, una mudanza real
-        acabaría con las coordenadas en el punto medio del camino.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "THEN v.lat_mediana ELSE r.latitud END AS latitud" in sql
-        assert "THEN v.lon_mediana ELSE r.longitud END AS longitud" in sql
-
-    def test_las_llaves_geograficas_no_se_mueven_con_el_jitter(self, pasos):
-        """Cambiarlas rompería la coherencia que la regla protege.
-
-        La mediana corrige un punto malo; no autoriza a recombinar el
-        domicilio.
-        """
-        sql = next(p.sql for p in pasos if p.nombre == TABLA)
-        assert "mediana ELSE r.cve_mun" not in sql
-        assert "r.h3_cell_9," in sql
-
-
-@pytest.mark.unit
-class TestLoQueQuedaEnMeta:
-    """El detalle no puede vivir solo en el log: tiene que ser consultable.
-
-    Un log se rota, se trunca y no se puede unir con nada. `meta` contesta
-    "¿cuanto tardo?", "¿termino bien?" y --con esto-- "¿con que ventana se
-    construyo?" con una consulta.
-    """
-
-    def test_la_ventana_queda_en_el_config_de_la_corrida(self, cohorte):
-        """`gold_cohorte_2021.md` §1.1 lo pide: en el log Y en meta.
-
-        Sin esto, "¿por qué la corrida de marzo dio 5.1M y la de abril 5.4M?"
-        solo se contesta abriendo dos logs, cuando la respuesta es que entró
-        un corte.
-        """
+    def test_el_contexto_de_meta_lleva_la_receta(self, cohorte):
+        """ "¿Por qué marzo dio otra tasa de cierre?" se contesta con SQL."""
         contexto = cohorte.contexto_meta(conn=None)
-        assert contexto["ventana_cortes"] == [c.isoformat() for c in VENTANA]
         assert contexto["n_cortes_oficiales"] == 9
-
-    def test_el_config_lleva_las_reglas_con_que_se_construyo(self, cohorte):
-        """Cambiar una regla cambia los numeros: la corrida tiene que decir cuales."""
-        contexto = cohorte.contexto_meta(conn=None)
-        assert contexto["metodo_base"] == METODO_BASE
+        assert contexto["ventana_cortes"] == [c.isoformat() for c in VENTANA]
+        assert "cierre_cortes_ausente" in contexto
         assert "version_reglas" in contexto
-        assert "cobertura_clee_minima" in contexto
-        # Los umbrales del jitter deciden de que corte salen las coordenadas,
-        # asi que son parte de la receta y no un detalle de ejecucion.
-        assert "jitter_dispersion_m" in contexto
-        assert "jitter_neto_m" in contexto
 
     def test_el_contexto_es_serializable_a_json(self, cohorte):
-        """`meta.job_runs.config` es JSON: un `date` suelto lo rompe."""
         import json
 
         json.dumps(cohorte.contexto_meta(conn=None))
 
-    def test_la_tabla_de_variantes_tambien_se_registra(self, cohorte):
-        """Una tarea de `meta.process_tasks` por tabla destino, no solo la madre.
-
-        Sin esto el conteo de la evidencia no queda en ningun lado
-        consultable: habria que contar a mano para saber cuantas variantes
-        produjo la corrida.
-        """
-        assert TABLA_VARIANTES in cohorte.tablas_destino
-
 
 @pytest.mark.unit
 class TestLaSeccionDelCLI:
-    """`--only gold` tiene que aislar Gold sin arrastrar las horas de Silver."""
-
     def test_gold_es_una_seccion_atomica(self):
         from src.shared.enums import DENUE_ATOMIC, Section
 
         assert Section.gold in DENUE_ATOMIC
 
     def test_pedir_gold_no_arrastra_el_ingest_ni_la_resolucion(self):
-        """Es la diferencia entre minutos y un dia de computo."""
         from src.etl.main import _expand_only
         from src.shared.enums import Section
 
         assert _expand_only([Section.gold]) == {Section.gold}
 
-    def test_el_grupo_denue_la_incluye(self):
-        """`--only denue` construye todo DENUE, Gold incluido."""
-        from src.etl.main import _expand_only
-        from src.shared.enums import Section
-
-        assert Section.gold in _expand_only([Section.denue])
-
     def test_gold_va_despues_de_permanencia(self, monkeypatch):
-        """Es la capa de consumo: se construye sobre lo que Silver ya escribio.
-
-        El orden no es por dependencia de datos --Gold no lee permanencia--
-        sino porque un fallo en Silver no debe dejar una Gold recien hecha
-        sobre hechos a medio cargar.
-        """
+        """Una Gold recién hecha sobre Silver a medias mentiría."""
         import src.etl.main as main
 
         orden: list[str] = []
@@ -537,120 +487,86 @@ class TestLaSeccionDelCLI:
         )
         assert orden == ["perm", "gold"]
 
-    def test_un_fallo_en_permanencia_no_construye_gold(self, monkeypatch):
-        """Gold sobre Silver a medias seria una tabla citable que miente."""
-        import src.etl.main as main
 
-        corrio_gold = []
-        monkeypatch.setattr(main, "_run_permanencia", lambda **kw: False)
-        monkeypatch.setattr(main, "_run_gold", lambda **kw: corrio_gold.append(1) or True)
+@pytest.mark.unit
+class TestLaAusenciaEnMeses:
+    """Contar cortes no es contar tiempo, y la ventana lo demuestra."""
 
-        ok = main._run_denue_transform(
-            ingest=False,
-            h3_cell_7=False,
-            clee_resolution_radio=False,
-            clee_resolution_h3=False,
-            clee_resolution_celda_h3_7=False,
-            permanencia_radio=True,
-            permanencia_h3=False,
-            gold=True,
-            force=False,
-        )
-        assert not ok
-        assert corrio_gold == []
+    def test_los_intervalos_de_la_ventana_son_irregulares(self):
+        """6, 6, 6, 12, 6, 6, 6, 12 meses: faltan 2023-05 y 2025-11.
 
-    def test_force_llega_hasta_el_loader(self, monkeypatch):
-        import src.etl.main as main
+        Por eso `cortes_tras_ultimo = 1` significa 12 meses de evidencia para
+        quien desapareció en 2022-11 y solo 6 para quien desapareció en
+        2024-05. El test está aquí para que si la ventana se vuelve regular
+        alguien note que esta columna dejó de hacer falta.
+        """
+        meses = [
+            (b.year - a.year) * 12 + (b.month - a.month)
+            # Los largos difieren a proposito: son pares consecutivos.
+            for a, b in zip(VENTANA, VENTANA[1:], strict=False)
+        ]
+        assert meses == [6, 6, 6, 12, 6, 6, 6, 12]
+        assert len(set(meses)) > 1
 
-        vistos = []
-        monkeypatch.setattr(
-            "src.etl.loaders.gold_cohorte_oficial.construir_cohorte_oficial",
-            lambda engine, tracker, force=False: (vistos.append(force), 1)[1],
-        )
-        monkeypatch.setattr("src.shared.db.session.get_engine", lambda: "engine")
-        monkeypatch.setattr("src.meta.tracker.MetadataTracker", lambda: "tracker")
+    def test_se_mide_contra_el_ultimo_corte_de_la_ventana(self, madre):
+        assert f"DATE '{VENTANA[-1].isoformat()}'" in madre
+        assert "AS meses_sin_aparecer" in madre
 
-        main._run_gold(force=True)
-        assert vistos == [True]
+    def test_es_una_diferencia_de_calendario_no_de_dias(self, madre):
+        """Los cortes caen el día 1, así que la diferencia en meses es exacta.
+
+        Dividir días entre 30 daría 5.9 o 6.1 meses según el mes, y eso
+        volvería ruidoso un eje que debería ser limpio.
+        """
+        assert "EXTRACT(YEAR FROM" in madre
+        assert "EXTRACT(MONTH FROM" in madre
+        assert "/ 30" not in madre
 
 
 @pytest.mark.unit
-class TestLosInvariantes:
-    """§5.1: lo que, si no se cumple, debe FALLAR la corrida.
+class TestElLocalReocupado:
+    """Evidencia corroborante del cierre, no prueba."""
 
-    Aquí se revisa que los chequeos existan y qué miran; que detecten de
-    verdad se prueba contra PostgreSQL, porque es SQL.
-    """
+    def test_solo_se_evalua_para_los_cerrados(self, pasos, madre):
+        """Para un activo la pregunta no significa nada.
 
-    def _consultas(self, cohorte, monkeypatch):
-        """Las consultas que `validar` corre, sin ejecutarlas.
-
-        Se intercepta `conn.execute` y se devuelve "0 violaciones" para cada
-        una, de modo que el método recorra su lista completa.
+        El vecino existe y los dos siguen abiertos; evaluarlo costaría una
+        búsqueda por cada uno de los 9.58M.
         """
-        vistas: list[str] = []
+        reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
+        assert "v.idx_ultimo) >=" in reocupado
+        assert "ELSE NULL END AS local_reocupado" in madre
 
-        class ConnFalsa:
-            def execute(self, sentencia, *a, **kw):
-                vistas.append(str(sentencia))
+    def test_busca_otro_clee_en_un_corte_posterior(self, pasos):
+        reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
+        assert "e.period > v.ultimo_periodo" in reocupado
+        assert "e.clee <> u.clee" in reocupado
 
-                class R:
-                    def one(self_inner):
-                        return (0, None)
+    def test_es_un_semijoin_y_no_un_conteo(self, pasos):
+        """En una celda urbana densa hay cientos de vecinos.
 
-                return R()
-
-        assert cohorte.validar(ConnFalsa()) == []
-        return vistas
-
-    def test_los_siete_chequeos_estan(self, cohorte, monkeypatch):
-        """Seis consultas; el septimo de §5.1 lo garantiza el esquema."""
-        consultas = self._consultas(cohorte, monkeypatch)
-        assert len(consultas) == 7
-
-    def test_rechaza_identidades_sinteticas(self, cohorte, monkeypatch):
-        """Redundante por construccion, y por eso atrapa un error de alcance.
-
-        Solo la fase 2 de propagación crea `NEW_*`; si una apareciera aquí
-        querría decir que alguien amplió la cohorte sin darse cuenta.
+        `EXISTS` se detiene en el primero; contar los recorrería todos sin
+        que el resultado cambie.
         """
-        todo = " ".join(self._consultas(cohorte, monkeypatch))
-        assert "STARTS_WITH(clee, 'NEW_')" in todo
-        # Con LIKE, el `_` de NEW_ seria un comodin y el chequeo seria mas
-        # laxo de lo que dice ser.
-        assert "LIKE 'NEW" not in todo
+        reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
+        assert "EXISTS (" in reocupado
+        assert "count(" not in reocupado.lower()
 
-    def test_rechaza_una_ventana_que_no_es_la_de_la_corrida(self, cohorte, monkeypatch):
-        """Mezclar dos ventanas en la misma tabla hace incomparables sus filas."""
-        todo = " ".join(self._consultas(cohorte, monkeypatch))
-        assert "ventana_cortes <>" in todo
+    def test_entra_por_la_celda_h3_que_si_esta_indexada(self, pasos):
+        """`ix_estab_h3_9` existe en silver; sin él esto sería un scan."""
+        from src.shared.db.base import get_table
 
-    def test_rechaza_dos_canonicos_para_el_mismo_campo(self, cohorte, monkeypatch):
-        """El indice unico parcial ya lo impide; esto lo confirma sobre el dato."""
-        todo = " ".join(self._consultas(cohorte, monkeypatch))
-        assert "WHERE es_canonico" in todo
-        assert "HAVING count(*) > 1" in todo
+        reocupado = next(p.sql for p in pasos if p.nombre == "reocupado")
+        assert "e.h3_cell_9 = u.h3_cell_9" in reocupado
+        indices = {i.name for i in get_table("establecimientos").indexes}
+        assert "ix_estab_h3_9" in indices
 
-    def test_rechaza_un_nombre_sin_su_evidencia(self, cohorte, monkeypatch):
-        """Es lo que vuelve verificable la canonicalizacion sin re-derivarla."""
-        todo = " ".join(self._consultas(cohorte, monkeypatch))
-        assert "va.valor = n.nombre" in todo
+    def test_es_el_unico_paso_que_sale_de_la_tabla_de_trabajo(self, pasos, cohorte):
+        """Y por eso es el candidato a sorprender en rendimiento.
 
-    def test_rechaza_variantes_huerfanas(self, cohorte, monkeypatch):
-        todo = " ".join(self._consultas(cohorte, monkeypatch))
-        assert "WHERE n.clee IS NULL" in todo
-
-    def test_reporta_todas_las_violaciones_no_la_primera(self, cohorte):
-        """Con una sola, cada arreglo cuesta otra corrida de horas."""
-
-        class ConnRota:
-            def execute(self, sentencia, *a, **kw):
-                class R:
-                    def one(self_inner):
-                        return (3, "14ABC0001")
-
-                return R()
-
-        violaciones = cohorte.validar(ConnRota())
-        assert len(violaciones) == 7
-        assert all("14ABC0001" in v for v in violaciones)
+        Si el bloque 1 tarda mucho más que antes, este paso es el sospechoso.
+        """
+        # `FROM` y no el nombre a secas: el paso `ventana` MENCIONA la tabla
+        # en un comentario, y matchear eso daba un falso positivo.
+        fuera = [p.nombre for p in pasos if "FROM silver.establecimientos" in p.sql]
+        assert fuera == ["reocupado"]

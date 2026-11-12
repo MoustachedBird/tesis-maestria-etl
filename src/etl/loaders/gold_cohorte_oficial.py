@@ -46,16 +46,13 @@ from src.etl.utils.troceado import Agregado, Paso, construir, expr_bloque, latid
 from src.meta.tracker import MetadataTracker
 from src.shared.config import Settings, get_settings
 from src.shared.db.base import DEFAULT_SCHEMA
-from src.shared.db.models.gold import CAMPOS_CON_VARIANTES, SCHEMA
+from src.shared.db.models.gold import ORIGEN_NOMBRE_MODA, SCHEMA
 from src.shared.logging import get_stage_logger
 
 logger = get_stage_logger(__name__, Path("./data/etl_gold.log"))
 
 TABLA = "negocios_clee_oficial"
 """La tabla madre: un negocio de la cohorte por fila."""
-
-TABLA_VARIANTES = f"{TABLA}_variantes"
-"""La hija: los valores distintos que tuvo en cada campo, con su ventana."""
 
 JOB_NAME = "gold_negocios_clee_oficial"
 """Nombre de la corrida en `meta.job_runs`."""
@@ -76,29 +73,34 @@ de propagación sería falso justamente en la columna cuyo trabajo es decir de
 dónde vino la identidad.
 """
 
-COLUMNA_CANONICA: dict[str, str] = {
-    "nom_estab": "nombre",
-    "codigo_act": "codigo_act",
-}
-"""Campo de variantes -> columna canónica en la madre, para los que la tienen.
+SQL_CVE_GEO = """
+        CASE
+            WHEN cve_ent IS NULL OR cve_ent = '' THEN NULL
+            WHEN cve_mun IS NULL OR cve_mun = '' THEN cve_ent
+            WHEN cve_loc IS NULL OR cve_loc = '' THEN cve_ent || cve_mun
+            WHEN ageb    IS NULL OR ageb    = '' THEN cve_ent || cve_mun || cve_loc
+            ELSE cve_ent || cve_mun || cve_loc || ageb
+        END"""
+"""Llave geografica jerarquica, cortada en el primer nivel ausente.
 
-**Son dos de los ocho, y eso es la decisión, no una omisión.** La madre solo
-publica AGREGADOS sobre la vida completa: `nombre` es la moda de todas las
-variantes y `codigo_act` el ancestro común de todas las actividades. Los otros
-seis campos --`raz_social`, `per_ocu`, `tipounieco`, `telefono`, `correoelec`,
-`www`-- cambian entre cortes, así que la madre **no publica ninguno** y sus
-filas en variantes quedan todas con `es_canonico = FALSE`.
+El `CASE` no es defensivo: concatenar a ciegas con un nivel nulo en medio
+--entidad + municipio + AGEB, sin localidad-- produciria una llave
+**inventada**, con el AGEB ocupando la posicion de la localidad. Asi el valor
+es siempre un prefijo valido, y su LARGO dice hasta que nivel llega: 2
+entidad, 5 municipio, 9 localidad, mas AGEB.
 
-Que no haya canónico no es un hueco: `tiene_*` dice si el dato existió, y
-variantes dice qué valores tuvo y en qué ventana. Lo que ya no existe es el
-valor sin fecha que antes invitaba a usarlo como si fuera atemporal.
+Guardarla concatenada y no en columnas sueltas tiene la misma razon: `cve_mun`
+no es unico a nivel nacional sin `cve_ent`, ni `cve_loc` sin los dos. Con los
+componentes sueltos, comparar la geografia inicial contra la final podria
+emparejar un municipio de un estado con el de otro.
+"""
 
-El índice único parcial sigue sirviendo igual --a lo más un canónico por
-`(clee, campo)`-- solo que para seis campos el máximo observado será cero.
+DIAS_POR_ANIO = 365.25
+"""Divisor para pasar de dias a anios, con el cuarto de dia de los bisiestos.
 
-`test_el_mapa_apunta_a_columnas_que_existen` lo valida contra el ORM: la
-versión anterior derivaba el mapa con una regla y generaba `n.raz_social`,
-que no existía.
+365 daria edades infladas ~0.07% por anio; 365.25 es la convencion juliana y
+deja el error por debajo de un dia por siglo. Importa porque la edad entra al
+modelo de supervivencia como variable continua.
 """
 
 _EARTH_RADIUS_M = 6_371_000.0
@@ -161,11 +163,6 @@ class CohorteOficial(Agregado):
         self._ventana: list[date] | None = None
 
     # ----- lo que esta capa define distinto de Silver -----
-
-    @property
-    def tablas_destino(self) -> tuple[str, ...]:
-        """La madre y su evidencia. El orden importa: la FK va de la hija a la madre."""
-        return (TABLA, TABLA_VARIANTES)
 
     def cortes(self, conn: Connection) -> list[date]:
         """Los cortes OFICIALES, que son la ventana de esta cohorte.
@@ -262,8 +259,7 @@ class CohorteOficial(Agregado):
             "cobertura_clee_minima": ajustes.GOLD_COBERTURA_CLEE_MINIMA,
             "metodo_base": METODO_BASE,
             "version_reglas": ajustes.GOLD_VERSION_REGLAS,
-            "jitter_dispersion_m": ajustes.GOLD_JITTER_DISPERSION_M,
-            "jitter_neto_m": ajustes.GOLD_JITTER_NETO_M,
+            "cierre_cortes_ausente": ajustes.CIERRE_CORTES_AUSENTE,
         }
 
     @property
@@ -275,71 +271,83 @@ class CohorteOficial(Agregado):
         )
 
     def validar(self, conn: Connection) -> list[str]:
-        """Los invariantes de `gold_cohorte_2021.md` §5.1, contra los datos reales.
+        """Invariantes de `gold_cohorte_2021.md` §5.1, contra los datos reales.
 
         Cada uno cubre una forma concreta de equivocarse en silencio, y
-        ninguno levantaría un error por su cuenta: una tabla con una
-        identidad sintética, o con dos canónicos para el mismo campo, se ve
-        perfectamente bien hasta que alguien la cita.
+        ninguno levantaria un error por su cuenta: una tabla con una identidad
+        sintetica, o con una edad negativa, se ve perfectamente bien hasta que
+        alguien la cita.
 
-        Uno de los siete de §5.1 **no se consulta**: "ninguna observación
-        `(id, period)` contribuye a dos filas" está garantizado por
-        construcción, porque `(id, period)` es la PK de
-        `silver.establecimientos` --así que cada observación tiene UN `clee`--
-        y el agregado es un `GROUP BY clee`. Una consulta ahí gastaría un
-        recorrido de 51.5M filas para confirmar algo que el esquema ya impide.
+        Uno de los de §5.1 **no se consulta**: "ninguna observacion
+        `(id, period)` contribuye a dos filas" esta garantizado por
+        construccion, porque `(id, period)` es la PK de
+        `silver.establecimientos` --asi que cada observacion tiene UN `clee`--
+        y el agregado es un `GROUP BY clee`. Una consulta ahi gastaria un
+        recorrido de 51.5M filas para confirmar lo que el esquema impide.
 
         Args:
-            conn: conexión de lectura, con las dos tablas ya escritas.
+            conn: conexion de lectura, con la tabla ya escrita.
 
         Returns:
-            list[str]: una línea por violación, con el conteo y un ejemplo.
+            list[str]: una linea por violacion, con el conteo y un ejemplo.
         """
-        madre = f"{self.schema}.{self.tabla}"
-        hija = f"{self.schema}.{TABLA_VARIANTES}"
-        n_cortes = len(self.cortes(conn))
-        primer_corte = self.cortes(conn)[0]
+        tabla = f"{self.schema}.{self.tabla}"
+        ventana = self.cortes(conn)
+        n_cortes = len(ventana)
+        primer_corte, ultimo_corte = ventana[0], ventana[-1]
 
         chequeos: list[tuple[str, str]] = [
             (
                 "hay identidades sinteticas NEW_* en una cohorte que solo admite CLEE de INEGI",
                 # STARTS_WITH y no LIKE: el `_` de `NEW_` es un comodin en LIKE.
-                f"SELECT count(*), min(clee) FROM {madre} WHERE STARTS_WITH(clee, 'NEW_')",
+                f"SELECT count(*), min(clee) FROM {tabla} WHERE STARTS_WITH(clee, 'NEW_')",
             ),
             (
                 f"hay negocios con mas cortes observados que los {n_cortes} de la ventana",
-                f"SELECT count(*), min(clee) FROM {madre} WHERE cortes_observados > {n_cortes}",
+                f"SELECT count(*), min(clee) FROM {tabla} WHERE cortes_observados > {n_cortes}",
             ),
             (
                 "hay negocios cuya ventana_cortes no es la de esta corrida",
-                f"SELECT count(*), min(clee) FROM {madre} "
+                f"SELECT count(*), min(clee) FROM {tabla} "
                 f"WHERE ventana_cortes <> {self._ventana_literal()}",
             ),
             (
-                f"`presente_desde_el_inicio` no coincide con aparecer en {primer_corte}",
-                f"SELECT count(*), min(clee) FROM {madre} "
-                f"WHERE presente_desde_el_inicio <> (primer_periodo = DATE "
-                f"'{primer_corte.isoformat()}')",
+                "hay periodos fuera de la ventana oficial",
+                f"SELECT count(*), min(clee) FROM {tabla} "
+                f"WHERE primer_periodo < DATE '{primer_corte.isoformat()}' "
+                f"   OR ultimo_periodo > DATE '{ultimo_corte.isoformat()}'",
             ),
             (
-                "hay variantes cuyo negocio no esta en la tabla madre",
-                f"SELECT count(*), min(va.clee) FROM {hija} va "
-                f"LEFT JOIN {madre} n USING (clee) WHERE n.clee IS NULL",
+                "hay `periodos` cuyo largo no coincide con `cortes_observados`",
+                f"SELECT count(*), min(clee) FROM {tabla} "
+                f"WHERE cardinality(periodos) <> cortes_observados",
+            ),
+            # Los dos que siguen son del proposito de la tabla: si la edad o el
+            # veredicto estan mal, lo que se muestrea y se verifica con agentes
+            # no significa nada.
+            (
+                "hay edades NEGATIVAS, o sea fecha de alta posterior al ultimo corte",
+                f"SELECT count(*), min(clee) FROM {tabla} WHERE edad_anios < 0",
             ),
             (
-                "hay (negocio, campo) con mas de un valor canonico",
-                f"SELECT count(*), min(clee) FROM ("
-                f"  SELECT clee, campo FROM {hija} WHERE es_canonico "
-                f"  GROUP BY clee, campo HAVING count(*) > 1"
-                f") d",
+                "`cerrado` no coincide con el umbral de la corrida",
+                f"SELECT count(*), min(clee) FROM {tabla} "
+                f"WHERE cerrado <> (cortes_tras_ultimo >= "
+                f"{get_settings().CIERRE_CORTES_AUSENTE})",
             ),
             (
-                "la tabla madre publico un nombre que no esta marcado canonico en las variantes",
-                f"SELECT count(*), min(n.clee) FROM {madre} n "
-                f"WHERE n.nombre IS NOT NULL AND NOT EXISTS ("
-                f"  SELECT 1 FROM {hija} va WHERE va.clee = n.clee "
-                f"  AND va.campo = 'nom_estab' AND va.es_canonico "
-                f"  AND va.valor = n.nombre)",
+                "hay negocios presentes en el ultimo corte marcados como cerrados",
+                f"SELECT count(*), min(clee) FROM {tabla} WHERE cortes_tras_ultimo = 0 AND cerrado",
+            ),
+            (
+                "hay clusters sospechosos con nombre, que seria una afirmacion falsa",
+                f"SELECT count(*), min(clee) FROM {tabla} "
+                f"WHERE cluster_sospechoso AND nombre IS NOT NULL",
+            ),
+            (
+                "hay nombres sin decir quien los eligio",
+                f"SELECT count(*), min(clee) FROM {tabla} "
+                f"WHERE nombre IS NOT NULL AND nombre_origen IS NULL",
             ),
         ]
 
@@ -391,6 +399,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS {self.obs_schema}.{self.obs} (
     www              text,
     nom_cencom       text,
     per_ocu          text,
+    categoria_tamano text,
     empleados_min    integer,
     tipounieco       text,
     direccion        text
@@ -427,7 +436,7 @@ INSERT INTO {self.obs_schema}.{self.obs} (
     cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
     latitud, longitud, h3_cell_9,
     fecha_alta_date, telefono, correoelec, www, nom_cencom,
-    per_ocu, empleados_min, tipounieco,
+    per_ocu, categoria_tamano, empleados_min, tipounieco,
     direccion
 )
 SELECT
@@ -439,7 +448,7 @@ SELECT
     e.cve_ent, e.cve_mun, e.cve_loc, e.ageb, e.cod_postal, ta.tipo_asent,
     e.latitud, e.longitud, e.h3_cell_9,
     e.fecha_alta_date, e.telefono, e.correoelec, e.www, e.nom_cencom,
-    ep.per_ocu, ep.empleados_min,
+    ep.per_ocu, ep.categoria, ep.empleados_min,
     tu.tipounieco,
     -- El domicilio como UNA cadena: arrays paralelos por componente
     -- perderian que numero va con que calle.
@@ -458,11 +467,9 @@ WHERE e.period = {literal}
     def pasos_bloque(self, bloque: int, ultimo_idx: int) -> list[Paso]:
         """Los pasos que escriben un bloque de negocios y su evidencia.
 
-        Cinco, y el orden no es negociable en dos puntos: `variantes` tiene
-        que estar antes del nombre canónico (sale de ahí, por moda), y la
-        tabla madre antes de la hija (la FK lo exige). Los cinco van en la
-        misma transacción, así que un negocio y sus variantes quedan juntos o
-        no quedan.
+        Cinco, y el orden no es negociable en un punto: `nombres` tiene que
+        estar antes de `canonico`, porque la moda sale de esos conteos. Los
+        cinco van en la misma transacción del bloque.
 
         Args:
             bloque: qué bloque procesar.
@@ -474,15 +481,16 @@ WHERE e.period = {literal}
         n_cortes = ultimo_idx + 1
         ventana_sql = self._ventana_literal()
         ajustes = get_settings()
+        ausente = ajustes.CIERRE_CORTES_AUSENTE
 
         return [
             self._paso_ventana(bloque),
             self._paso_primera(bloque),
-            self._paso_referencia(bloque),
-            self._paso_variantes(bloque),
+            self._paso_ultima(bloque),
+            self._paso_reocupado(ausente),
+            self._paso_nombres(bloque),
             self._paso_canonico(),
             self._paso_insert(ultimo_idx, n_cortes, ventana_sql, ajustes),
-            self._paso_insert_variantes(),
         ]
 
     def _ventana_literal(self) -> str:
@@ -499,11 +507,10 @@ WHERE e.period = {literal}
     def _paso_ventana(self, bloque: int) -> Paso:
         """Un solo `GROUP BY` con todo lo que es agregado sobre la vida.
 
-        Incluye los "más reciente no vacío" de razón social y contacto, con
-        `(ARRAY_AGG(... ORDER BY idx DESC) FILTER (...))[1]`: el array tiene a
-        lo más tantos elementos como cortes (nueve), así que cuesta menos que
-        un `DISTINCT ON` por campo, y el `FILTER` es lo que vuelve la regla
-        "el más reciente **no vacío**" en vez de "el del último corte".
+        Solo lo que la tabla publica o consume. Los conteos que quedaron sin
+        destino --`n_direcciones`, el rectángulo envolvente, la dispersión--
+        salieron de aquí: ya están en `silver.permanencia_<metodo>`, que es
+        justo la redundancia que este rediseño elimina.
         """
         obs = f"{self.obs_schema}.{self.obs}"
         return Paso(
@@ -519,15 +526,17 @@ SELECT
     MAX(idx) AS idx_ultimo,
     COUNT(DISTINCT idx) AS cortes_observados,
     MIN(fecha_alta_date) AS fecha_alta_date,
-    ARRAY_AGG(DISTINCT idx ORDER BY idx) AS cortes_idx,
-    -- Cuantas variantes hubo. Los valores estan en la tabla hija.
+    -- Los cortes EXACTOS en que aparecio: es lo que se publica en `periodos`,
+    -- y de ahi el analisis deriva cualquier patron de presencia sin volver a
+    -- los 51.5M hechos.
+    ARRAY_AGG(DISTINCT period ORDER BY period) AS periodos,
+    -- Cuantos valores distintos tuvo. Los valores en si salen de
+    -- silver.establecimientos filtrando por clee: aqui solo hace falta el
+    -- conteo, para detectar el cluster sobre-fusionado.
     COUNT(DISTINCT nom_estab) FILTER (
         WHERE nom_estab IS NOT NULL AND nom_estab <> '') AS n_nombres,
     COUNT(DISTINCT codigo_act) FILTER (
         WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS n_actividades,
-    COUNT(DISTINCT cve_ent || cve_mun) FILTER (
-        WHERE cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS n_municipios,
-    COUNT(DISTINCT direccion) FILTER (WHERE direccion IS NOT NULL) AS n_direcciones,
     COUNT(DISTINCT per_ocu) FILTER (
         WHERE per_ocu IS NOT NULL AND per_ocu <> '') AS n_estratos,
     -- Ancestro comun del SCIAN, por los extremos: el prefijo comun de un
@@ -538,38 +547,12 @@ SELECT
         WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS act_min,
     MAX(codigo_act) FILTER (
         WHERE codigo_act IS NOT NULL AND codigo_act <> '') AS act_max,
-    -- Aqui NO se elige "el mas reciente no vacio" de razon social ni de
-    -- contacto: esos valores cambian entre cortes y la madre ya no los
-    -- publica. Viven en variantes con su ventana, y de ellos aqui solo
-    -- queda el BOOL_OR de mas abajo que dice si existieron.
-    -- Cobertura del dato: UNION sobre toda la vida, no el corte de
-    -- referencia. Dice de que negocios se puede afirmar algo sobre cada
-    -- campo, que es lo que decide si entran a un analisis que dependa de el.
-    BOOL_OR(nom_estab IS NOT NULL AND nom_estab <> '') AS tiene_nombre,
-    BOOL_OR(raz_social IS NOT NULL AND raz_social <> '') AS tiene_razon_social,
-    BOOL_OR(codigo_act IS NOT NULL AND codigo_act <> '') AS tiene_actividad,
-    BOOL_OR(cve_ent IS NOT NULL AND cve_mun IS NOT NULL) AS tiene_municipio,
-    BOOL_OR(cve_loc IS NOT NULL AND cve_loc <> '') AS tiene_localidad,
-    BOOL_OR(ageb IS NOT NULL AND ageb <> '') AS tiene_ageb,
-    BOOL_OR(cod_postal IS NOT NULL AND cod_postal <> '') AS tiene_cod_postal,
-    BOOL_OR(tipo_asent IS NOT NULL AND tipo_asent <> '') AS tiene_tipo_asent,
-    BOOL_OR(latitud IS NOT NULL AND longitud IS NOT NULL) AS tiene_coordenadas,
-    BOOL_OR(per_ocu IS NOT NULL AND per_ocu <> '') AS tiene_estrato_personal,
-    BOOL_OR(tipounieco IS NOT NULL AND tipounieco <> '') AS tiene_tipounieco,
-    BOOL_OR(telefono IS NOT NULL AND telefono <> '') AS tiene_telefono,
-    BOOL_OR(correoelec IS NOT NULL AND correoelec <> '') AS tiene_correo,
-    BOOL_OR(www IS NOT NULL AND www <> '') AS tiene_sitio,
-    BOOL_OR(nom_cencom IS NOT NULL AND nom_cencom <> '') AS en_centro_comercial,
-    -- Rectangulo envolvente: cota SUPERIOR del movimiento, ciega al orden.
-    MIN(latitud) AS lat_min, MAX(latitud) AS lat_max,
-    MIN(longitud) AS lon_min, MAX(longitud) AS lon_max,
+    -- NO hay banderas `tiene_*`. Con los valores concretos materializados
+    -- --empleados y tamano inicial y final, las dos posiciones, la llave
+    -- geografica-- un NULL dice lo mismo que decian las quince columnas, y
+    -- la cobertura por campo ya esta en silver.permanencia_<metodo>.
     COUNT(DISTINCT (latitud, longitud)) FILTER (
-        WHERE latitud IS NOT NULL AND longitud IS NOT NULL) AS n_posiciones,
-    -- Mediana de la posicion, para el caso de jitter de GPS. Se calcula
-    -- siempre porque cuesta lo mismo dentro de este GROUP BY; cual se usa lo
-    -- decide el INSERT.
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latitud) AS lat_mediana,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY longitud) AS lon_mediana
+        WHERE latitud IS NOT NULL AND longitud IS NOT NULL) AS n_posiciones
 FROM {obs}
 WHERE bloque = {bloque}
 GROUP BY clee
@@ -587,216 +570,249 @@ GROUP BY clee
 -- valores se guarda: se consumen aqui y lo que persiste es el escalar.
 CREATE TEMP TABLE primera ON COMMIT DROP AS
 SELECT DISTINCT ON (clee)
-       clee, latitud AS lat_primera, longitud AS lon_primera,
-       empleados_min AS empleados_min_primera
+       clee, latitud, longitud, empleados_min, categoria_tamano,
+       {SQL_CVE_GEO} AS cve_geo
 FROM {obs}
 WHERE bloque = {bloque}
 ORDER BY clee, period ASC, id
 """,
         )
 
-    def _paso_referencia(self, bloque: int) -> Paso:
-        """El corte de referencia COMPLETO: el bloque de ubicación coherente.
+    def _paso_ultima(self, bloque: int) -> Paso:
+        """El extremo final del recorrido, solo para los escalares derivados.
 
-        Es la pieza que `normalizacion_gold.md` §5 exige. Tomar el CP del
-        corte más reciente que lo tenga, la colonia de otro y las coordenadas
-        del último produce un domicilio **que nunca existió**: el CP de 2017
-        con la colonia de 2019 y el punto de 2024. Si el corte de referencia
-        tiene el campo vacío, el campo queda vacío --y `tiene_*` ya dice si
-        existió en algún otro, que es la información honesta.
+        Ya no es un "corte de referencia": desde que la geografia vive en
+        variantes, de la ultima observacion no se PUBLICA nada. Lo que se
+        consume aqui son dos cosas que solo tienen sentido contra el primer
+        corte --la posicion, para el desplazamiento neto, y la cota de
+        empleados, para el delta-- y lo que persiste son esos dos escalares.
 
-        Por eso es `DISTINCT ON` de una sola fila y no un agregado por campo:
-        la coherencia la da que todo salga de la MISMA observación.
+        El desempate por `id` mantiene el resultado determinista cuando un
+        negocio tiene dos filas en el mismo corte.
         """
         obs = f"{self.obs_schema}.{self.obs}"
         return Paso(
-            "referencia",
-            "fijando el corte de referencia de cada negocio",
+            "ultima",
+            "tomando el estado con que termino cada negocio",
             f"""
-CREATE TEMP TABLE referencia ON COMMIT DROP AS
+CREATE TEMP TABLE ultima ON COMMIT DROP AS
 SELECT DISTINCT ON (clee)
-       clee,
-       period AS corte_referencia,
-       cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
-       latitud, longitud, h3_cell_9,
-       -- `empleados_min` NO se publica: se consume aqui para calcular
-       -- `delta_empleados_min` contra el primer corte, y lo que persiste es
-       -- ese escalar. El estrato mismo vive en variantes.
-       empleados_min
+       clee, latitud, longitud, empleados_min, categoria_tamano, h3_cell_9,
+       {SQL_CVE_GEO} AS cve_geo
 FROM {obs}
 WHERE bloque = {bloque}
 ORDER BY clee, period DESC, id
 """,
         )
 
-    def _paso_variantes(self, bloque: int) -> Paso:
-        """Los valores distintos por campo, con su ventana y su conteo.
+    def _paso_reocupado(self, ausente: int) -> Paso:
+        """Si OTRO negocio aparecio en la misma celda H3 despues del ultimo.
 
-        Un solo `GROUP BY` sobre el despivoteado de los seis campos. Las tres
-        columnas de ventana y conteo salen del mismo agregado, así que son
-        gratis.
+        Es evidencia **corroborante** del cierre, no prueba: en una celda res
+        9 (~174 m) urbana caben decenas de negocios, asi que otro ocupante no
+        significa que este haya cerrado. Pero es justo lo que un verificador
+        humano buscaria, y sirve para estratificar la muestra: donde esto es
+        True, la hipotesis de cierre es mas creible.
 
-        De aquí sale también el nombre canónico: la **moda** desempatada por
-        el más reciente (`normalizacion_gold.md` §6.4, baseline 1). Es el
-        único lugar donde se puede calcular, porque necesita el conteo por
-        valor --que es exactamente lo que esta tabla tiene.
+        **Solo se evalua para los que la regla declara cerrados.** Para los
+        activos no significa nada --el vecino existe y los dos siguen ahi-- y
+        evaluarlo costaria una busqueda por cada uno de los 9.58M.
+
+        El `EXISTS` es un semi-join: se detiene en la primera coincidencia en
+        vez de contar todos los vecinos, que en una celda densa serian
+        cientos. Y entra por `ix_estab_h3_9` con la poda de particiones que da
+        el `period >`.
+
+        **OJO AL COSTO:** esto agrega una busqueda por negocio cerrado del
+        bloque contra `silver.establecimientos`. Es el unico paso que sale de
+        la tabla de trabajo, asi que es el candidato a sorprender: si el
+        bloque 1 tarda mucho mas que antes, este paso es el sospechoso y se
+        quita en una linea.
+        """
+        return Paso(
+            "reocupado",
+            "buscando si otro negocio ocupo el local",
+            f"""
+CREATE TEMP TABLE reocupado ON COMMIT DROP AS
+SELECT u.clee
+FROM ultima u
+JOIN ventana v USING (clee)
+WHERE u.h3_cell_9 IS NOT NULL
+  AND ({len(self._ventana or []) - 1} - v.idx_ultimo) >= {ausente}
+  AND EXISTS (
+      SELECT 1 FROM {self.origen_schema}.establecimientos e
+      WHERE e.h3_cell_9 = u.h3_cell_9
+        AND e.period > v.ultimo_periodo
+        AND e.clee IS NOT NULL AND e.clee <> '' AND e.clee <> u.clee
+  )
+""",
+        )
+
+    def _paso_nombres(self, bloque: int) -> Paso:
+        """Cuantos cortes uso cada nombre, para poder elegir la moda.
+
+        Es una temporal y ya: **no se persiste nada**. El diseno anterior
+        escribia esto en una tabla `..._variantes` de ~100M filas, y era
+        redundante -- los valores distintos de cualquier campo salen de
+        `silver.establecimientos` filtrando por `clee`, que los tiene mejor
+        tipados. Aqui solo hacen falta los conteos, y solo del nombre.
         """
         obs = f"{self.obs_schema}.{self.obs}"
-        unpivot = "\n    UNION ALL\n".join(
-            f"""    SELECT clee, '{campo}' AS campo, {campo} AS valor, period, idx
-    FROM {obs} WHERE bloque = {bloque} AND {campo} IS NOT NULL AND {campo} <> ''"""
-            for campo in CAMPOS_CON_VARIANTES
-        )
         return Paso(
-            "variantes",
-            f"listando variantes de {len(CAMPOS_CON_VARIANTES)} campos",
+            "nombres",
+            "contando en cuantos cortes se uso cada nombre",
             f"""
-CREATE TEMP TABLE variantes ON COMMIT DROP AS
-WITH crudas AS (
-{unpivot}
-)
-SELECT clee, campo, valor,
-       MIN(period) AS primer_periodo,
-       MAX(period) AS ultimo_periodo,
+CREATE TEMP TABLE nombres ON COMMIT DROP AS
+SELECT clee, nom_estab,
        COUNT(DISTINCT idx) AS n_cortes,
        MAX(idx) AS ultimo_idx
-FROM crudas
-GROUP BY clee, campo, valor
+FROM {obs}
+WHERE bloque = {bloque} AND nom_estab IS NOT NULL AND nom_estab <> ''
+GROUP BY clee, nom_estab
 """,
         )
 
     def _paso_canonico(self) -> Paso:
-        """La moda del nombre, en UNA pasada sobre las variantes.
+        """El nombre unificado, en UNA pasada: la moda sobre los cortes.
 
         Es un `DISTINCT ON` y no una subconsulta lateral por fila, y la
         diferencia es de complejidad, no de estilo. Un `LEFT JOIN LATERAL`
         con `LIMIT 1` fuerza un *nested loop*: una busqueda por cada
         identidad del bloque, y cada una recorriendo la temporal completa
         porque no tiene indice. Medido el 2026-11-09: ~300k identidades x
-        ~1M variantes dejaron el `INSERT` del bloque 1 corriendo **21
-        minutos sin terminar**, o sea ~11 horas proyectadas para los 32.
+        ~1M filas dejaron el `INSERT` del bloque corriendo **21 minutos sin
+        terminar**, o sea ~11 horas proyectadas.
 
-        Asi es una ordenada y ya: el mismo criterio de §6.4 --el valor con
-        mas cortes, desempatado por el mas reciente-- expresado como el
-        primer elemento de cada grupo. Despues entra al `INSERT` por un hash
-        join sobre `clee`, como `primera` y `referencia`.
+        **Es el baseline, no la respuesta final.** El objetivo es que un LLM
+        unifique el nombre a partir de todas las variantes; hasta que esa
+        etapa exista, la moda es lo que se publica y `nombre_origen` dice que
+        fue ella. Cuando el LLM corra, sobrescribe la columna y cambia ese
+        campo a `llm`, sin migracion.
 
-        El desempate final por `valor` no es decorativo: sin el, dos
-        variantes con el mismo `n_cortes` y el mismo `ultimo_idx` darian un
+        El desempate final por `nom_estab` no es decorativo: sin el, dos
+        nombres con el mismo conteo y el mismo `ultimo_idx` darian un
         resultado dependiente del plan, y la tabla dejaria de ser
         reproducible.
         """
         return Paso(
             "canonico",
-            "eligiendo el nombre canonico de cada negocio",
+            "eligiendo el nombre de cada negocio (moda)",
             """
 CREATE TEMP TABLE canonico ON COMMIT DROP AS
-SELECT DISTINCT ON (clee) clee, valor AS nombre
-FROM variantes
-WHERE campo = 'nom_estab'
-ORDER BY clee, n_cortes DESC, ultimo_idx DESC, valor
+SELECT DISTINCT ON (clee) clee, nom_estab AS nombre
+FROM nombres
+ORDER BY clee, n_cortes DESC, ultimo_idx DESC, nom_estab
 """,
         )
 
     def _paso_insert(
         self, ultimo_idx: int, n_cortes: int, ventana_sql: str, ajustes: Settings
     ) -> Paso:
-        """La fila del negocio: ventana, trayectoria, cobertura y canónicos."""
-        dispersion = ajustes.GOLD_JITTER_DISPERSION_M
-        neto_max = ajustes.GOLD_JITTER_NETO_M
+        """La fila del negocio: ventana, edad, veredicto y los dos extremos."""
         version = ajustes.GOLD_VERSION_REGLAS
+        ausente = ajustes.CIERRE_CORTES_AUSENTE
+        # El ultimo corte de la ventana, para medir la ausencia en meses.
+        ultimo_corte = self._ventana[-1].isoformat()
 
-        # El desplazamiento neto se usa dos veces --como columna y como
-        # criterio del jitter-- asi que se escribe una vez y se nombra.
-        neto = f"""CASE WHEN p.lat_primera IS NULL OR r.latitud IS NULL THEN NULL ELSE
+        # Distancia entre los dos extremos REALES del recorrido. Respeta el
+        # orden temporal, asi que contesta "termino en otro lado?" y no
+        # "cuanto deambulo?" -- que es lo que mediria el rectangulo.
+        distancia = f"""CASE WHEN p.latitud IS NULL OR u.latitud IS NULL THEN NULL ELSE
         2 * {_EARTH_RADIUS_M} * ASIN(SQRT(
-            POWER(SIN(RADIANS(r.latitud - p.lat_primera) / 2), 2)
-            + COS(RADIANS(p.lat_primera)) * COS(RADIANS(r.latitud))
-            * POWER(SIN(RADIANS(r.longitud - p.lon_primera) / 2), 2)
+            POWER(SIN(RADIANS(u.latitud - p.latitud) / 2), 2)
+            + COS(RADIANS(p.latitud)) * COS(RADIANS(u.latitud))
+            * POWER(SIN(RADIANS(u.longitud - p.longitud) / 2), 2)
         ))
     END"""
-        dispersion_expr = f"""CASE WHEN v.lat_min IS NULL THEN NULL ELSE
-        2 * {_EARTH_RADIUS_M} * ASIN(SQRT(
-            POWER(SIN(RADIANS(v.lat_max - v.lat_min) / 2), 2)
-            + COS(RADIANS(v.lat_min)) * COS(RADIANS(v.lat_max))
-            * POWER(SIN(RADIANS(v.lon_max - v.lon_min) / 2), 2)
-        ))
-    END"""
+
+        # Mudanza a nivel MUNICIPIO, no de coordenada: el ruido de GPS mueve
+        # el punto sin cambiar el municipio. Y solo se afirma cuando las dos
+        # llaves se conocen -- con una nula, `IS DISTINCT FROM` diria que se
+        # mudo cuando lo que pasa es que falta el dato.
+        se_mudo = """(p.cve_geo IS NOT NULL AND u.cve_geo IS NOT NULL
+         AND LEFT(p.cve_geo, 5) <> LEFT(u.cve_geo, 5))"""
 
         return Paso(
             TABLA,
             f"escribiendo el bloque en {self.schema}.{TABLA}",
             f"""
 INSERT INTO {self.schema}.{TABLA} (
-    clee,
-    primer_periodo, ultimo_periodo, idx_primer, idx_ultimo,
-    cortes_observados, huecos, cortes_tras_ultimo,
-    duracion_periodos, presente_desde_el_inicio, cortes_idx,
-    fecha_alta_date, dias_alta_a_primera,
-    cambio_tamano, delta_empleados_min,
-    n_nombres, n_direcciones, cambio_actividad, cambio_municipio,
-    n_posiciones, desplazamiento_neto_m,
-    lat_min, lat_max, lon_min, lon_max, dispersion_max_m,
-    tiene_nombre, tiene_razon_social, tiene_actividad, tiene_municipio,
-    tiene_localidad, tiene_ageb, tiene_cod_postal, tiene_tipo_asent,
-    tiene_coordenadas, tiene_estrato_personal, tiene_tipounieco,
-    tiene_telefono, tiene_correo, tiene_sitio, en_centro_comercial,
-    nombre, codigo_act,
-    corte_referencia, cve_ent, cve_mun, cve_loc, ageb, cod_postal, tipo_asent,
-    latitud, longitud, h3_cell_9,
+    clee, nombre, nombre_origen, n_nombres,
+    periodos, primer_periodo, ultimo_periodo, cortes_observados,
+    huecos, cortes_tras_ultimo,
+    fecha_alta, edad_anios, dias_alta_a_primera,
+    meses_sin_aparecer, local_reocupado, cerrado,
+    empleados_inicial, empleados_final,
+    tamano_inicial, tamano_final, cambio_tamano,
+    cve_geo_inicial, cve_geo_final,
+    lat_inicial, lon_inicial, lat_final, lon_final, h3_cell_9_final,
+    se_mudo, distancia_mudanza_m, n_posiciones,
+    codigo_act, cambio_actividad,
     cluster_sospechoso,
     ventana_cortes, metodo_base, version_reglas
 )
 SELECT
     v.clee,
-    v.primer_periodo, v.ultimo_periodo, v.idx_primer, v.idx_ultimo,
-    v.cortes_observados,
+    -- Un cluster con mas nombres que cortes agrupo mas de un establecimiento:
+    -- ahi cualquier nombre unificado seria una afirmacion falsa, asi que se
+    -- queda sin nombre y las variantes siguen en silver para mirarlas.
+    CASE WHEN v.n_nombres > {n_cortes} THEN NULL ELSE nom.nombre END AS nombre,
+    CASE WHEN v.n_nombres > {n_cortes} OR nom.nombre IS NULL THEN NULL
+         ELSE '{ORIGEN_NOMBRE_MODA}' END AS nombre_origen,
+    v.n_nombres,
+    v.periodos,
+    v.primer_periodo, v.ultimo_periodo, v.cortes_observados,
+    -- Cortes DENTRO de su ventana en que no aparecio: desaparecio y volvio.
     (v.idx_ultimo - v.idx_primer + 1) - v.cortes_observados AS huecos,
+    -- Cortes publicados DESPUES del ultimo en que aparecio.
     {ultimo_idx} - v.idx_ultimo AS cortes_tras_ultimo,
-    v.idx_ultimo - v.idx_primer AS duracion_periodos,
-    -- Censura por la izquierda, RELATIVA A LA VENTANA OFICIAL: idx 0 es el
-    -- primer corte con CLEE, no el primer corte del DENUE.
-    v.idx_primer = 0 AS presente_desde_el_inicio,
-    v.cortes_idx,
     v.fecha_alta_date,
+    -- EDAD: de la fecha de alta al ULTIMO CORTE EN QUE APARECIO, no a hoy.
+    -- Con "hoy" la tabla dejaria de ser reproducible: la misma fila daria
+    -- una edad distinta cada vez que se consultara. Para un negocio activo
+    -- esto es una edad censurada por la derecha, que es justo lo que el
+    -- modelo de supervivencia consume.
+    CASE WHEN v.fecha_alta_date IS NULL THEN NULL
+         ELSE ROUND(
+            ((v.ultimo_periodo - v.fecha_alta_date) / {DIAS_POR_ANIO})::numeric, 2)
+    END AS edad_anios,
     CASE WHEN v.fecha_alta_date IS NULL THEN NULL
          ELSE (v.primer_periodo - v.fecha_alta_date) END AS dias_alta_a_primera,
+    -- VEREDICTO. Es una HIPOTESIS: el DENUE no reporta cierres, solo deja de
+    -- listar. El umbral queda en `version_reglas` y los ingredientes
+    -- (`cortes_tras_ultimo`, `huecos`) se conservan para recalcularla sin
+    -- reconstruir la tabla.
+    -- Meses de ausencia, no cortes: los intervalos de la ventana son 6, 6,
+    -- 6, 12, 6, 6, 6, 12 meses, asi que un mismo `cortes_tras_ultimo` puede
+    -- significar el doble de evidencia. Esta es la columna comparable.
+    ((EXTRACT(YEAR FROM DATE '{ultimo_corte}') - EXTRACT(YEAR FROM v.ultimo_periodo)) * 12
+     + (EXTRACT(MONTH FROM DATE '{ultimo_corte}') - EXTRACT(MONTH FROM v.ultimo_periodo))
+    )::int AS meses_sin_aparecer,
+    -- NULL para los activos: ahi la pregunta no significa nada, el vecino
+    -- existe y los dos siguen abiertos.
+    CASE WHEN ({ultimo_idx} - v.idx_ultimo) >= {ausente}
+         THEN (ro.clee IS NOT NULL) ELSE NULL END AS local_reocupado,
+    ({ultimo_idx} - v.idx_ultimo) >= {ausente} AS cerrado,
+    -- LOS DOS EXTREMOS de la trayectoria. `permanencia` los consume para
+    -- calcular su delta y los tira; aqui se quedan, que es la mitad de la
+    -- razon de ser de esta tabla.
+    p.empleados_min AS empleados_inicial,
+    u.empleados_min AS empleados_final,
+    p.categoria_tamano AS tamano_inicial,
+    u.categoria_tamano AS tamano_final,
     v.n_estratos > 1 AS cambio_tamano,
-    r.empleados_min - p.empleados_min_primera AS delta_empleados_min,
-    v.n_nombres, v.n_direcciones,
-    v.n_actividades > 1 AS cambio_actividad,
-    v.n_municipios > 1 AS cambio_municipio,
+    p.cve_geo AS cve_geo_inicial,
+    u.cve_geo AS cve_geo_final,
+    p.latitud AS lat_inicial, p.longitud AS lon_inicial,
+    u.latitud AS lat_final,   u.longitud AS lon_final,
+    u.h3_cell_9 AS h3_cell_9_final,
+    {se_mudo} AS se_mudo,
+    {distancia} AS distancia_mudanza_m,
     COALESCE(v.n_posiciones, 0) AS n_posiciones,
-    {neto} AS desplazamiento_neto_m,
-    v.lat_min, v.lat_max, v.lon_min, v.lon_max,
-    {dispersion_expr} AS dispersion_max_m,
-    COALESCE(v.tiene_nombre, FALSE) AS tiene_nombre,
-    COALESCE(v.tiene_razon_social, FALSE) AS tiene_razon_social,
-    COALESCE(v.tiene_actividad, FALSE) AS tiene_actividad,
-    COALESCE(v.tiene_municipio, FALSE) AS tiene_municipio,
-    COALESCE(v.tiene_localidad, FALSE) AS tiene_localidad,
-    COALESCE(v.tiene_ageb, FALSE) AS tiene_ageb,
-    COALESCE(v.tiene_cod_postal, FALSE) AS tiene_cod_postal,
-    COALESCE(v.tiene_tipo_asent, FALSE) AS tiene_tipo_asent,
-    COALESCE(v.tiene_coordenadas, FALSE) AS tiene_coordenadas,
-    COALESCE(v.tiene_estrato_personal, FALSE) AS tiene_estrato_personal,
-    COALESCE(v.tiene_tipounieco, FALSE) AS tiene_tipounieco,
-    COALESCE(v.tiene_telefono, FALSE) AS tiene_telefono,
-    COALESCE(v.tiene_correo, FALSE) AS tiene_correo,
-    COALESCE(v.tiene_sitio, FALSE) AS tiene_sitio,
-    COALESCE(v.en_centro_comercial, FALSE) AS en_centro_comercial,
-    -- NOMBRE CANONICO: la moda, desempatada por el mas reciente. Es el
-    -- baseline obligatorio de normalizacion_gold.md §6.4; un LLM solo lo
-    -- reemplaza si gana en una muestra etiquetada a mano.
-    -- Los clusters sospechosos se quedan SIN nombre a proposito: con
-    -- [TACOS PACO, FARMACIA PACO] cualquier canonico es una afirmacion
-    -- falsa, y las variantes siguen ahi para mirarlas.
-    CASE WHEN v.n_nombres > {n_cortes} THEN NULL ELSE nom.nombre END AS nombre,
-    -- SCIAN CANONICO: el ancestro comun mas especifico, por prefijo. La
+    -- SCIAN canonico: el ANCESTRO COMUN mas especifico por prefijo. La
     -- jerarquia ES el codigo (sector=2, subsector=3, rama=4), asi que no
     -- hace falta unir el catalogo. Si la discrepancia cruza rama queda NULL:
-    -- es una decision de juicio, y un valor inventado seria peor que la
-    -- ausencia. `tiene_actividad` distingue ese NULL del de "nunca tuvo".
+    -- es una decision de juicio, y un valor inventado seria peor.
     CASE
         WHEN v.act_min IS NULL THEN NULL
         WHEN v.act_min = v.act_max THEN v.act_min
@@ -804,71 +820,14 @@ SELECT
         WHEN LEFT(v.act_min, 4) = LEFT(v.act_max, 4) THEN LEFT(v.act_min, 4)
         ELSE NULL
     END AS codigo_act,
-    -- BLOQUE DE UBICACION: todo del MISMO corte (§5). La unica excepcion son
-    -- las coordenadas cuando hay jitter de GPS: dispersion grande con neto
-    -- casi nulo significa que el ultimo punto es malo y la mediana es el
-    -- local. Las llaves geograficas NO se tocan en ese caso -- cambiarlas
-    -- rompería la coherencia que esta regla existe para proteger.
-    r.corte_referencia,
-    r.cve_ent, r.cve_mun, r.cve_loc, r.ageb, r.cod_postal, r.tipo_asent,
-    CASE WHEN {dispersion_expr} > {dispersion}
-          AND COALESCE({neto}, 0) < {neto_max}
-         THEN v.lat_mediana ELSE r.latitud END AS latitud,
-    CASE WHEN {dispersion_expr} > {dispersion}
-          AND COALESCE({neto}, 0) < {neto_max}
-         THEN v.lon_mediana ELSE r.longitud END AS longitud,
-    -- La celda H3 se queda la del corte de referencia incluso con jitter: es
-    -- un dato PRE-CALCULADO en los hechos y recalcularlo aqui costaria una
-    -- llamada por fila. A res 9 (~175 m de arista) el jitter rara vez cruza
-    -- de celda, y si cruza, lat/lon de la misma fila lo delatan.
-    r.h3_cell_9,
-    -- IMPOSIBLE para un cluster correcto: un establecimiento aparece a lo
-    -- mas una vez por corte, asi que mas nombres que cortes significa que la
-    -- identidad agrupo mas de un establecimiento.
+    v.n_actividades > 1 AS cambio_actividad,
     v.n_nombres > {n_cortes} AS cluster_sospechoso,
     {ventana_sql}, '{METODO_BASE}', '{version}'
 FROM ventana v
 JOIN primera p USING (clee)
-JOIN referencia r USING (clee)
--- LEFT porque un negocio puede no haber tenido nunca nombre.
+JOIN ultima u USING (clee)
 LEFT JOIN canonico nom USING (clee)
-""",
-        )
-
-    def _paso_insert_variantes(self) -> Paso:
-        """La evidencia, con `es_canonico` apuntando al valor que publicó la madre.
-
-        `es_canonico` se decide comparando contra la fila ya escrita, no
-        recalculando la regla: si se recalculara, un cambio en una de las dos
-        copias dejaría la tabla afirmando que el canónico es un valor que la
-        madre no publicó. Así, por construcción, no pueden discrepar.
-
-        El índice único parcial `(clee, campo) WHERE es_canonico` es lo que
-        vuelve estructural el "a lo más uno": si esta consulta marcara dos, el
-        `INSERT` falla aquí en vez de dejar una tabla indefendible.
-        """
-        # Solo los campos que la madre PUBLICA pueden tener un canonico. Para
-        # los otros seis el `ELSE FALSE` es la respuesta correcta, no un
-        # descuido: la madre no eligio ninguno porque cambian entre cortes.
-        casos = "\n        ".join(
-            f"WHEN va.campo = '{campo}' THEN va.valor IS NOT DISTINCT FROM n.{columna}"
-            for campo, columna in COLUMNA_CANONICA.items()
-        )
-        return Paso(
-            TABLA_VARIANTES,
-            f"escribiendo la evidencia en {self.schema}.{TABLA_VARIANTES}",
-            f"""
-INSERT INTO {self.schema}.{TABLA_VARIANTES} (
-    clee, campo, valor, primer_periodo, ultimo_periodo, n_cortes, es_canonico
-)
-SELECT va.clee, va.campo, va.valor,
-       va.primer_periodo, va.ultimo_periodo, va.n_cortes,
-       CASE
-        {casos}
-        ELSE FALSE
-       END AS es_canonico
-FROM variantes va
-JOIN {self.schema}.{TABLA} n ON n.clee = va.clee
+LEFT JOIN reocupado ro USING (clee)
 """,
         )
 

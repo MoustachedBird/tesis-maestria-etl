@@ -1,41 +1,66 @@
-"""Capa de consumo: el negocio como unidad de análisis, ya resuelto.
+"""Capa de consumo: el negocio, su edad y si cerró.
 
 El grano cambia dos veces a lo largo del pipeline, y por eso los nombres de
 las tres capas no se parecen:
 
     silver.establecimientos          82,896,807   una observación (negocio, corte)
     silver.permanencia_<metodo>          ~15.6M   un negocio, ventana de 20 cortes
-    gold.negocios_clee_oficial              (?)   un negocio de la cohorte oficial
+    gold.negocios_clee_oficial            9.58M   un negocio de la cohorte oficial
+
+**Para qué existe esta tabla, y es una sola cosa:** calcular la **edad** de un
+negocio y decidir si **cerró**, con los extremos de su trayectoria al lado
+para poder interpretarlo. De ahí se saca una muestra aleatoria y se verifica
+con agentes si la premisa "dejó de aparecer en el DENUE ⇒ quebró" es
+defendible. Lo que no sirva a eso no va aquí.
+
+**Lo que esta tabla NO es: una copia de `permanencia`.** Ese fue el error del
+primer diseño, y era literal: ventana, censura, `cortes_idx`,
+`fecha_alta_date`, `cambio_tamano`, `delta_empleados_min`, `n_nombres`,
+`n_direcciones`, `cambio_municipio`, el rectángulo envolvente y quince
+banderas `tiene_*` existían ya todas en `silver.permanencia_<metodo>`. Gold
+agregaba la renumeración de la ventana oficial y poco más, así que no
+justificaba su existencia.
+
+Lo que sí la justifica son tres cosas que `permanencia` no tiene:
+
+1. **Los EXTREMOS de la trayectoria, materializados.** `permanencia` consume
+   el primer y el último estado para calcular `delta_empleados_min` y el
+   desplazamiento neto, y después los tira. Aquí se quedan: empleados y
+   tamaño inicial y final, posición inicial y final. No contradice `b0007`
+   --no son "el valor de un corte cualquiera", son los dos extremos de la
+   vida, que es una propiedad de la trayectoria completa.
+2. **La EDAD.** Nadie la calculaba. Va de `fecha_alta` al último corte en que
+   se observó, y para un negocio activo eso es una edad **censurada por la
+   derecha**, que es exactamente lo que el modelo de supervivencia consume.
+3. **El VEREDICTO de cierre, grabado y versionado.** El proyecto venía
+   diciendo que la regla era preliminar y se derivaba en cada consulta. Eso
+   deja de servir en el momento en que el objetivo es **validar la regla**:
+   no se puede muestrear y verificar un veredicto que no se escribió.
+
+**No hay tabla de variantes.** La tuvo --trece campos, ~100M filas-- y se
+eliminó: los valores distintos de cualquier campo salen de
+`silver.establecimientos` filtrando por `clee`, que los tiene de los nueve
+cortes y mejor tipados. Es el insumo del LLM que unifica el nombre y de los
+agentes que buscan el negocio en línea:
+
+    SELECT DISTINCT nom_estab, telefono, www
+    FROM silver.establecimientos
+    WHERE clee = '14...' AND nom_estab <> '';
+
+**Tampoco hay banderas `tiene_*`.** Con los valores concretos materializados,
+un `NULL` dice lo mismo que decían las quince columnas.
 
 **La cohorte: solo los cortes en que INEGI publica el CLEE.** Medido el
 2026-11-08 son **9 cortes** (2021-05 → 2026-05) con cobertura del 100%,
-frente a 11 cortes al 0%; los oficiales suman 51.5M de las 82.9M
-observaciones, o sea el 62%. Ahí la identidad es **observada y no
-inferida**, así que no hay `NEW_*` que consolidar, no hay error de
-propagación y los tres métodos de resolución coinciden trivialmente. El
-alcance completo y lo que cuesta están en `gold_cohorte_2021.md`.
+frente a 11 cortes al 0%; suman 51.5M de las 82.9M observaciones. Ahí la
+identidad es **observada y no inferida**, así que no hay `NEW_*` que
+consolidar ni error de propagación que arrastrar. El alcance está en
+`gold_cohorte_2021.md`.
 
-**Esta capa SÍ materializa valores**, al contrario de Silver. `b0007` sacó
-de `permanencia` el valor "del corte más reciente" porque esas tablas son
-reconstruibles a voluntad y el join entrega mejor. Gold es lo contrario por
-definición: es la capa **citable**, el artefacto que la tesis reporta, y
-tiene que ser estable aunque la identidad se re-resuelva después. De ahí que
-cada fila lleve fecha, ventana y versión de reglas.
-
-    silver   reconstruible a voluntad  →  agregados + cobertura, sin snapshots
-    gold     congelado y fechado       →  un valor canónico por campo, con procedencia
-
-**No se llama `gold.establecimientos`.** `arquitectura.md` §2.3.1 eligió ese
-nombre simétrico y dejó anotada la alternativa; se adopta la alternativa
-(2026-11-07) porque el grano es distinto y el nombre tiene que decirlo. El
-beneficio es estructural, no estético: con nombres distintos, confundir la N
-de 82.9M observaciones con la de los negocios deja de ser posible y las tres
-salvaguardas de §2.3.1 dejan de depender de la disciplina de quien escribe
-la consulta.
-
-Las reglas de normalización por campo —de qué corte sale cada valor, cómo se
-elige el SCIAN, dónde interviene un LLM— están en `normalizacion_gold.md`
-§§4-6 y no se repiten aquí.
+**No se llama `gold.establecimientos`** porque el grano es distinto y el
+nombre tiene que decirlo: con nombres distintos, confundir la N de 82.9M
+observaciones con la de los negocios deja de ser posible
+(`arquitectura.md` §2.3.1).
 """
 
 from datetime import date, datetime
@@ -46,12 +71,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     Double,
-    ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     func,
-    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
@@ -62,83 +86,48 @@ from src.shared.enums import Layer
 SCHEMA = Layer.GOLD.value
 """La capa que lee el API con el rol `api_ro`, que no tiene GRANT en silver."""
 
-CAMPOS_CON_VARIANTES = (
-    "nom_estab",
-    "raz_social",
-    "codigo_act",
-    "per_ocu",
-    "tipounieco",
-    "telefono",
-    "correoelec",
-    "www",
-)
-"""Campos cuyos valores distintos se listan en la tabla de variantes.
+ORIGEN_NOMBRE_MODA = "moda"
+"""El nombre lo eligió la regla determinista: el más frecuente entre cortes."""
 
-Dos criterios para entrar, y basta cumplir uno:
+ORIGEN_NOMBRE_LLM = "llm"
+"""El nombre lo generó un LLM unificando las variantes.
 
-1. **Es la evidencia de una decisión que Gold tomó** --el nombre canónico, el
-   SCIAN elegido-- o el insumo de un consumidor que trabaja negocio por
-   negocio (la cascada de verificación prueba cada teléfono y cada correo, no
-   solo el último).
-2. **Cambia entre cortes y la madre ya no lo publica** (`b0010`). Aquí entran
-   `per_ocu` y `tipounieco`, que antes eran columnas de un solo corte: lo que
-   se quitó de la madre no se perdió, se movió aquí con su ventana.
-
-Lo que NO entra, y por qué:
-
-- `categoria_tamano`, `empleados_min` y `empleados_max`: se **derivan** de
-  `per_ocu` uniendo `silver.denue_estratos_personal`, así que tenerlas sería
-  repetir el catálogo.
-- El domicilio por componentes (ya está `n_direcciones`) y las coordenadas (ya
-  están el rectángulo, el neto y la dispersión): son variantes sin consumidor,
-  y el bloque de ubicación se queda en la madre fechado por
-  `corte_referencia` porque es la llave de los cruces.
-- `tipo_asent`/`cod_postal`/`cve_loc`/`ageb`: parte de ese mismo bloque.
-
-Lo que se evita es el crecimiento de GB que `b0007` evitó en Silver: una
-variante por campo y por valor distinto, no una fila por corte.
+La etapa no existe todavía. La columna se escribe desde el principio para que
+cuando exista no haga falta una migración, y para que una fila siempre diga
+quién eligió su nombre -- que es lo que vuelve auditable el resultado del LLM.
 """
 
 
 class NegocioCleeOficial(Base):
-    """Un negocio de la cohorte con CLEE oficial, con su ventana de vida.
-
-    La unidad de análisis de la tesis. Una fila por identidad que INEGI
-    asignó, agregada **solo sobre los cortes oficiales**.
+    """Un negocio de la cohorte oficial: su vida, su edad y si cerró.
 
     **No se copia de `silver.permanencia_<metodo>`.** Esa tabla agrega sobre
     los 20 cortes y una fila suya mezcla los dos regímenes: un negocio visto
     en 2019 (identidad propagada) y en 2021 (oficial) comparte
     `clee_resuelto`, así que tiene `cortes_directo > 0` **y**
     `cortes_propagado > 0`. Filtrar por `cortes_directo > 0` daría la cohorte
-    correcta con la ventana contaminada, y el error de propagación volvería
-    por la puerta de atrás. Los `idx` además se renumeran dentro del
-    subconjunto: heredar los de la secuencia de 20 rompería
-    `presente_desde_el_inicio` y `duracion_periodos` sin un solo error
-    visible (`gold_cohorte_2021.md` §4).
+    correcta con la ventana contaminada. Los `idx` además se renumeran dentro
+    del subconjunto: heredar los de la secuencia de 20 rompería la edad y la
+    censura sin un solo error visible (`gold_cohorte_2021.md` §4).
 
     **Cuatro columnas de `permanencia` no están, y su ausencia ES el
-    invariante**: `es_sintetica` (siempre falsa), `origen` (siempre
-    DIRECTO), `cortes_propagado` (siempre 0) y `cortes_directo` (igual a
-    `cortes_observados`). Tenerlas sería ancho constante; no tenerlas dice
-    que toda identidad de esta tabla la asignó INEGI.
-
-    **Tampoco guarda el veredicto de cierre.** El protocolo llama
-    *preliminar* a la regla, así que se deriva de `cortes_tras_ultimo` en la
-    consulta que lo necesite — mismo criterio que en Silver, y mover el
-    umbral no cuesta ni una columna.
+    invariante**: `es_sintetica` (siempre falsa), `origen` (siempre DIRECTO),
+    `cortes_propagado` (siempre 0) y `cortes_directo` (igual a
+    `cortes_observados`). Toda identidad de esta tabla la asignó INEGI.
     """
 
     __tablename__ = "negocios_clee_oficial"
     __table_args__ = (
         # El analisis de supervivencia filtra y estratifica por aqui.
-        Index("ix_negocios_clee_oficial_censura", "cortes_tras_ultimo"),
-        Index("ix_negocios_clee_oficial_ventana", "idx_primer", "idx_ultimo"),
-        # A diferencia de `permanencia`, aqui estas columnas SI existen, asi
-        # que el indice vale: estratificar por municipio o por sector es lo
-        # que el analisis hace, y el cruce con SESNSP necesita la llave
-        # geografica.
-        Index("ix_negocios_clee_oficial_geo", "cve_ent", "cve_mun"),
+        Index("ix_negocios_clee_oficial_cerrado", "cerrado"),
+        Index("ix_negocios_clee_oficial_edad", "edad_anios"),
+        # Para muestrear: donde `huecos > 0` la regla de cierre es mas fragil,
+        # asi que el muestreo con agentes se estratifica por aqui.
+        Index("ix_negocios_clee_oficial_huecos", "huecos"),
+        # El tiempo de ausencia es el eje comparable, no el conteo de cortes.
+        Index("ix_negocios_clee_oficial_ausencia", "meses_sin_aparecer"),
+        # El cruce con SESNSP y con marginacion entra por la llave final.
+        Index("ix_negocios_clee_oficial_geo_final", "cve_geo_final"),
         Index("ix_negocios_clee_oficial_actividad", "codigo_act"),
         # Separa lo que hay que mirar a mano de lo que se puede analizar.
         Index("ix_negocios_clee_oficial_sospechoso", "cluster_sospechoso"),
@@ -154,285 +143,227 @@ class NegocioCleeOficial(Base):
     clee: Mapped[str] = mapped_column(
         String(50), primary_key=True, comment="CLEE oficial de INEGI; la identidad del negocio"
     )
+    nombre: Mapped[str | None] = mapped_column(
+        String,
+        comment=(
+            "Nombre unificado del negocio. NO ES COVARIABLE DEL MODELO: es campo "
+            "de presentacion, para reportar y para que un agente pueda buscarlo en "
+            "linea. Las variantes de las que sale se consultan en "
+            "silver.establecimientos filtrando por clee"
+        ),
+    )
+    nombre_origen: Mapped[str | None] = mapped_column(
+        String(10),
+        comment=(
+            "Quien eligio el nombre: 'moda' (la regla deterministica) o 'llm'. Sin "
+            "esto, un nombre generado y uno observado son indistinguibles"
+        ),
+    )
+    n_nombres: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Cuantos nombres distintos tuvo entre los cortes"
+    )
 
-    # ===== VENTANA OBSERVADA (relativa a los cortes OFICIALES) =====
+    # ===== VENTANA: en que cortes aparecio =====
+    periodos: Mapped[list[date]] = mapped_column(
+        ARRAY(Date),
+        nullable=False,
+        comment=(
+            "Los cortes EXACTOS en que se observo, ordenados. De aqui sale cualquier "
+            "patron de presencia --y los anios, con EXTRACT-- sin volver a los 82.9M "
+            "hechos. Son a lo mas nueve fechas"
+        ),
+    )
     primer_periodo: Mapped[date] = mapped_column(
         Date, nullable=False, comment="Primer corte oficial en que se observo"
     )
     ultimo_periodo: Mapped[date] = mapped_column(
         Date, nullable=False, comment="Ultimo corte oficial en que se observo"
     )
-    idx_primer: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        comment=(
-            "Posicion del primer corte DENTRO DE LA VENTANA OFICIAL (0-based): "
-            "0 = el primer corte con CLEE, no el primer corte del DENUE"
-        ),
-    )
-    idx_ultimo: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="Posicion del ultimo corte en la ventana oficial"
-    )
     cortes_observados: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="En cuantos cortes oficiales aparecio"
+        Integer, nullable=False, comment="En cuantos de los cortes oficiales aparecio"
     )
     huecos: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         comment=(
-            "Cortes dentro de su ventana en que NO aparecio. Mayor que 0 = "
-            "desaparecio y volvio, asi que una ausencia no implica cierre"
+            "Cortes dentro de su ventana en que NO aparecio. Mayor que 0 significa "
+            "que ya desaparecio y VOLVIO, o sea un caso probado de que ausencia no "
+            "implica cierre. Es la medida del error de la regla con los propios "
+            "datos, y por donde conviene estratificar el muestreo con agentes"
         ),
     )
     cortes_tras_ultimo: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         comment=(
-            "Cortes oficiales publicados despues del ultimo en que aparecio. "
-            "0 = presente en el corte final (censura por la derecha); es el campo "
-            "sobre el que se aplica la regla de cierre"
-        ),
-    )
-    duracion_periodos: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        comment=(
-            "idx_ultimo - idx_primer. Es la VARIABLE DE TIEMPO del modelo de "
-            "supervivencia, en periodos y no en dias porque los cortes oficiales "
-            "distan entre 6 y 12 meses (falta el corte 2023-05)"
-        ),
-    )
-    presente_desde_el_inicio: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment=(
-            "True si ya estaba en el primer corte oficial. OJO: entre 2020-11 y "
-            "2021-05 la cobertura del DENUE paso de 3.22M a 5.52M observaciones "
-            "(+71%, cambio de metodologia de INEGI), asi que para una parte de "
-            "estos negocios esto significa 'INEGI empezo a verlo' y no 'ya "
-            "existia'. La antiguedad real la aproxima fecha_alta_date"
-        ),
-    )
-    cortes_idx: Mapped[list[int] | None] = mapped_column(
-        ARRAY(Integer),
-        comment=(
-            "Indices EXACTOS de los cortes oficiales en que aparecio, ordenados. "
-            "De aqui se deriva cualquier patron de ausencia sin volver a los hechos"
+            "Cortes oficiales publicados despues del ultimo en que aparecio. 0 = "
+            "presente en el corte final, o sea censurado por la derecha. Es el "
+            "ingrediente sobre el que se aplica la regla de cierre, y se conserva "
+            "para poder recalcular `cerrado` con otro umbral sin reconstruir"
         ),
     )
 
-    # ===== ANTIGUEDAD =====
-    fecha_alta_date: Mapped[date | None] = mapped_column(
+    # ===== EDAD =====
+    fecha_alta: Mapped[date | None] = mapped_column(
         Date,
         comment=(
-            "Fecha de alta en el RENEM mas antigua observada. Es de REGISTRO y no "
-            "de inicio de operaciones, pero es el unico proxy de antiguedad "
-            "INDEPENDIENTE de la ventana de observacion -- y por eso es la "
-            "covariable de antiguedad y no el primer corte observado"
+            "Fecha de alta en el RENEM mas antigua observada (MIN sobre los cortes). "
+            "Es de REGISTRO y no de inicio de operaciones, pero es el unico proxy de "
+            "antiguedad INDEPENDIENTE de la ventana de observacion -- y por eso es la "
+            "base de la edad y no el primer corte observado"
+        ),
+    )
+    edad_anios: Mapped[float | None] = mapped_column(
+        Numeric(6, 2),
+        comment=(
+            "Anios de `fecha_alta` al ULTIMO CORTE EN QUE APARECIO, no a hoy: con "
+            "'hoy' la tabla dejaria de ser reproducible. Para un negocio activo es "
+            "una edad CENSURADA por la derecha, que es exactamente lo que el modelo "
+            "de supervivencia consume. NULL si no hay fecha de alta"
         ),
     )
     dias_alta_a_primera: Mapped[int | None] = mapped_column(
         Integer,
         comment=(
-            "Dias entre fecha_alta_date y primer_periodo. Diagnostico de la "
-            "calidad de la fecha de alta: un valor NEGATIVO es inconsistente"
+            "Dias entre `fecha_alta` y `primer_periodo`. Diagnostico de la calidad de "
+            "la fecha de alta: un valor NEGATIVO es inconsistente --el negocio "
+            "aparecio antes de darse de alta-- y esas filas no deberian entrar a un "
+            "analisis de antiguedad"
         ),
     )
 
-    # ===== TRAYECTORIA: cuanto vario, no en que valor quedo =====
-    cambio_tamano: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, comment="True si cambio de estrato de personal entre cortes"
-    )
-    delta_empleados_min: Mapped[int | None] = mapped_column(
+    # ===== VEREDICTO =====
+    meses_sin_aparecer: Mapped[int] = mapped_column(
         Integer,
+        nullable=False,
         comment=(
-            "Cota inferior de empleados del ULTIMO corte menos la del PRIMERO. "
-            "Positivo = crecio. Respeta el orden temporal, asi que distingue "
-            "crecer de encogerse -- que un conteo de estratos distintos no puede"
+            "Meses del ultimo corte en que aparecio al ULTIMO de la ventana. 0 = "
+            "presente en la entrega final. Existe porque CONTAR CORTES NO ES CONTAR "
+            "TIEMPO: los intervalos de la ventana son 6, 6, 6, 12, 6, 6, 6, 12 meses "
+            "(faltan 2023-05 y 2025-11), asi que `cortes_tras_ultimo = 1` significa "
+            "12 meses de evidencia para quien desaparecio en 2022-11 y solo 6 para "
+            "quien desaparecio en 2024-05. Esta es la columna comparable, y la que un "
+            "modelo de supervivencia quiere como tiempo"
         ),
     )
-    n_nombres: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="Cuantos nombres comerciales distintos tuvo"
+    local_reocupado: Mapped[bool | None] = mapped_column(
+        Boolean,
+        comment=(
+            "True si OTRO negocio aparecio en la misma celda H3 res 9 (~174 m) en un "
+            "corte POSTERIOR al ultimo de este. No prueba el cierre --en una celda "
+            "urbana caben decenas de negocios-- pero es evidencia corroborante de que "
+            "el local siguio vivo con otro ocupante, que es justo lo que un verificador "
+            "humano buscaria. Sirve para estratificar la muestra: donde esto es True, "
+            "la hipotesis de cierre es mas creible. "
+            "NULL = no se evaluo (el negocio no esta cerrado, o no tiene coordenadas)"
+        ),
     )
-    n_direcciones: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="Cuantos domicilios distintos tuvo"
+    cerrado: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si lleva al menos `CIERRE_CORTES_AUSENTE` cortes sin aparecer. ES "
+            "UNA HIPOTESIS, no un hecho observado: el DENUE no reporta cierres, solo "
+            "deja de listar. Validar esta columna con una muestra verificada en linea "
+            "es el proposito de la tabla, asi que el umbral queda en `version_reglas` "
+            "y los ingredientes (`cortes_tras_ultimo`, `huecos`) se conservan"
+        ),
+    )
+
+    # ===== EMPLEO: los dos extremos =====
+    empleados_inicial: Mapped[int | None] = mapped_column(
+        Integer, comment="Cota INFERIOR del estrato de personal en el primer corte observado"
+    )
+    empleados_final: Mapped[int | None] = mapped_column(
+        Integer, comment="Cota inferior del estrato en el ultimo corte observado"
+    )
+    tamano_inicial: Mapped[str | None] = mapped_column(
+        String(10), comment="Micro / Small / Medium / Large al aparecer"
+    )
+    tamano_final: Mapped[str | None] = mapped_column(
+        String(10),
+        comment="Micro / Small / Medium / Large al desaparecer (o en el ultimo corte)",
+    )
+    cambio_tamano: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment="True si cambio de estrato en ALGUN momento, no solo entre los extremos",
+    )
+
+    # ===== GEOGRAFIA: los dos extremos, y si se movio =====
+    # La llave va concatenada y jerarquica, cortada en el primer nivel
+    # ausente: `cve_mun` no es unico a nivel nacional sin `cve_ent`, ni
+    # `cve_loc` sin los dos, asi que guardarlos sueltos permitiria
+    # reconstruir municipios que nunca existieron. El LARGO dice el nivel:
+    # 2 entidad, 5 municipio, 9 localidad, mas AGEB.
+    cve_geo_inicial: Mapped[str | None] = mapped_column(
+        String(20), comment="Llave geografica al aparecer (ent|mun|loc|ageb concatenados)"
+    )
+    cve_geo_final: Mapped[str | None] = mapped_column(
+        String(20),
+        comment=(
+            "Llave geografica al desaparecer. `LEFT(cve_geo_final, 5)` es la llave del "
+            "cruce con la incidencia delictiva del SESNSP"
+        ),
+    )
+    lat_inicial: Mapped[float | None] = mapped_column(Double)
+    lon_inicial: Mapped[float | None] = mapped_column(Double)
+    lat_final: Mapped[float | None] = mapped_column(Double)
+    lon_final: Mapped[float | None] = mapped_column(Double)
+    h3_cell_9_final: Mapped[int | None] = mapped_column(
+        BigInteger,
+        comment=(
+            "Celda H3 res 9 (~174 m) de la ultima posicion. Se guarda porque NO se "
+            "puede recalcular en SQL: no hay extension H3 en esta base, el calculo "
+            "vive en Python (`transformers/enrich.py`)"
+        ),
+    )
+    se_mudo: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment=(
+            "True si la llave geografica inicial y la final difieren a nivel de "
+            "MUNICIPIO. Es mas estricto que comparar coordenadas: el ruido de GPS "
+            "mueve el punto sin cambiar el municipio"
+        ),
+    )
+    distancia_mudanza_m: Mapped[float | None] = mapped_column(
+        Double,
+        comment=(
+            "Distancia entre la PRIMERA y la ULTIMA posicion, en metros. Respeta el "
+            "orden temporal, asi que responde 'termino en otro lado?' y no 'cuanto "
+            "deambulo?'. Un valor grande con `se_mudo` en False es ruido de GPS"
+        ),
+    )
+    n_posiciones: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Pares (lat, lon) distintos que tuvo. Varios con se_mudo=False es jitter",
+    )
+
+    # ===== ACTIVIDAD =====
+    codigo_act: Mapped[str | None] = mapped_column(
+        String(10),
+        comment=(
+            "SCIAN canonico: el ANCESTRO COMUN mas especifico de todas las actividades "
+            "que tuvo, no la del ultimo corte. Por eso puede ser un prefijo (una rama, "
+            "4 digitos) y no un codigo de clase. NULL si la discrepancia cruza rama: "
+            "ahi hay que juzgar"
+        ),
     )
     cambio_actividad: Mapped[bool] = mapped_column(
         Boolean, nullable=False, comment="True si cambio de actividad economica entre cortes"
     )
-    cambio_municipio: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="True si cambio de municipio: la senal mas fuerte de fusion indebida",
-    )
-
-    # ===== GEOGRAFIA: medidas sobre toda la vida =====
-    n_posiciones: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="Pares (lat, lon) distintos que tuvo"
-    )
-    desplazamiento_neto_m: Mapped[float | None] = mapped_column(
-        Double,
-        comment=(
-            "Distancia entre la PRIMERA y la ULTIMA posicion observada, en metros. "
-            "Dos puntos reales y respeta el orden: responde 'termino en otro lado?'"
-        ),
-    )
-    lat_min: Mapped[float | None] = mapped_column(Double, comment="Latitud minima observada")
-    lat_max: Mapped[float | None] = mapped_column(Double, comment="Latitud maxima observada")
-    lon_min: Mapped[float | None] = mapped_column(Double, comment="Longitud minima observada")
-    lon_max: Mapped[float | None] = mapped_column(Double, comment="Longitud maxima observada")
-    dispersion_max_m: Mapped[float | None] = mapped_column(
-        Double,
-        comment=(
-            "Diagonal del rectangulo que contiene todas sus coordenadas: COTA "
-            "SUPERIOR del movimiento, ciega al orden. Se lee junto al neto -- "
-            "neto ~0 con dispersion grande es jitter de GPS, no una mudanza"
-        ),
-    )
-
-    # ===== COBERTURA DEL DATO: si lo hubo, no cual =====
-    # Union sobre toda la vida. No sustituyen al valor: contestan "de este
-    # negocio se puede afirmar algo sobre este campo?", que es lo que decide
-    # si entra a un analisis que dependa de el.
-    tiene_nombre: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_razon_social: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="Tipicamente solo la tienen las unidades formalmente constituidas",
-    )
-    tiene_actividad: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_municipio: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_localidad: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_ageb: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment=(
-            "Llave para unir a marginacion y datos censales: en False, esa unidad "
-            "no puede entrar a ese analisis"
-        ),
-    )
-    tiene_cod_postal: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_tipo_asent: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_coordenadas: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="En False, las medidas geograficas de esta fila son nulas por construccion",
-    )
-    tiene_estrato_personal: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="En False, cambio_tamano y delta_empleados_min no significan nada",
-    )
-    tiene_tipounieco: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_telefono: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_correo: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    tiene_sitio: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    en_centro_comercial: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment="True si en algun corte estuvo dentro de un centro comercial o mercado",
-    )
-
-    # ===== VALORES CANONICOS: solo AGREGADOS sobre la vida completa =====
-    # La frontera que decide que entra aqui (2026-11-09): un AGREGADO sobre
-    # los nueve cortes si se materializa; el VALOR DE UN CORTE no. Es el mismo
-    # criterio de `b0007` en Silver, llevado a Gold.
-    #
-    # Los dos que quedan lo cumplen por construccion: `nombre` es la moda de
-    # todas las variantes y `codigo_act` el ancestro comun de todas las
-    # actividades. Ninguno es "lo que decia el ultimo corte".
-    #
-    # Lo que SALIO por ser snapshot --razon_social, per_ocu, categoria_tamano,
-    # empleados_min/max, tipounieco, telefono, correoelec, www-- vive en
-    # `negocios_clee_oficial_variantes` CON SU VENTANA, y aqui solo queda la
-    # bandera `tiene_*` que dice si el dato existio. Un telefono "el mas
-    # reciente no vacio" era el peor caso de todos: un valor sin fecha, que no
-    # se puede ni situar en el tiempo ni defender.
-    nombre: Mapped[str | None] = mapped_column(
-        String,
-        comment=(
-            "Nombre canonico: la MODA sobre los nueve cortes, desempatada por el "
-            "mas reciente. Es un agregado, no el nombre del ultimo corte. NO ES "
-            "COVARIABLE DEL MODELO: es campo de presentacion y puede haberlo "
-            "generado un LLM. Las variantes de las que sale estan en la tabla "
-            "hija, con es_canonico marcando esta"
-        ),
-    )
-    codigo_act: Mapped[str | None] = mapped_column(
-        String(10),
-        comment=(
-            "SCIAN canonico: el ANCESTRO COMUN mas especifico de todas las "
-            "actividades que tuvo, no la del ultimo corte. Por eso puede ser un "
-            "prefijo (una rama, 4 digitos) y no un codigo de clase. NULL si la "
-            "discrepancia cruza rama: ahi hay que juzgar"
-        ),
-    )
-
-    # Bloque de UBICACION: los campos de abajo salen TODOS del mismo corte,
-    # el de referencia. Armarlo por partes --el CP del corte mas reciente que
-    # lo tenga, la colonia de otro, las coordenadas del ultimo-- produciria un
-    # domicilio que nunca existio (`normalizacion_gold.md` §5).
-    corte_referencia: Mapped[date] = mapped_column(
-        Date,
-        nullable=False,
-        comment=(
-            "Corte del que sale TODO el bloque de ubicacion. Normalmente el "
-            "ultimo observado; la excepcion es el jitter de GPS, donde se usa la "
-            "mediana. Materializarlo es lo que hace verificable la coherencia"
-        ),
-    )
-    cve_ent: Mapped[str | None] = mapped_column(
-        String(2), comment="Entidad; llave del cruce SESNSP"
-    )
-    cve_mun: Mapped[str | None] = mapped_column(
-        String(3), comment="Municipio; llave del cruce con incidencia delictiva"
-    )
-    cve_loc: Mapped[str | None] = mapped_column(
-        String(4), comment="Localidad: distingue urbano de rural"
-    )
-    ageb: Mapped[str | None] = mapped_column(
-        String, comment="AGEB: llave hacia marginacion y datos censales"
-    )
-    cod_postal: Mapped[str | None] = mapped_column(String)
-    tipo_asent: Mapped[str | None] = mapped_column(
-        String, comment="Colonia, fraccionamiento, pueblo... El protocolo lo nombra"
-    )
-    latitud: Mapped[float | None] = mapped_column(Double)
-    longitud: Mapped[float | None] = mapped_column(Double)
-    h3_cell_9: Mapped[int | None] = mapped_column(
-        BigInteger, comment="Celda H3 res 9 del corte de referencia (int64)"
-    )
-
-    # NO hay columnas de tamano, tipo de unidad ni contacto, y la ausencia es
-    # la decision: todas cambian entre cortes.
-    #
-    #   el estrato de personal         -> variantes, campo `per_ocu`
-    #   fijo/semifijo/ambulante        -> variantes, campo `tipounieco`
-    #   telefono / correoelec / www    -> variantes, un campo cada uno
-    #   razon social                   -> variantes, campo `raz_social`
-    #
-    # `categoria_tamano`, `empleados_min` y `empleados_max` tampoco tienen fila
-    # propia en variantes: se DERIVAN de `per_ocu` uniendo
-    # `silver.denue_estratos_personal`, asi que guardarlas seria repetir el
-    # catalogo. La consulta esta en `AGENTS.md` §N5.
-    #
-    # Para el modelo de supervivencia el tamano es una covariable VARIABLE EN
-    # EL TIEMPO, y variantes la entrega con su ventana (`primer_periodo`,
-    # `ultimo_periodo`) que es justo lo que un Cox con covariables dependientes
-    # del tiempo necesita. Lo que no cambia de fila a fila --si cambio de
-    # tamano y cuanto-- sigue aqui, en `cambio_tamano` y `delta_empleados_min`.
 
     # ===== CALIDAD DE LA IDENTIDAD =====
     cluster_sospechoso: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         comment=(
-            "True si n_nombres excede el numero de cortes de la ventana, lo que es "
-            "IMPOSIBLE para un cluster correcto (un establecimiento aparece una "
-            "vez por corte): significa que la identidad agrupo mas de un "
-            "establecimiento. Medido sobre los 20 cortes habia ~1,245 casos, uno "
-            "con 345 nombres. No son rebranding, son fusiones indebidas -- no se "
-            "canonicalizan y se reportan como limite de la resolucion"
+            "True si `n_nombres` excede el numero de cortes de la ventana, lo que es "
+            "IMPOSIBLE para un cluster correcto (un establecimiento aparece una vez "
+            "por corte): significa que la identidad agrupo mas de un establecimiento. "
+            "Esas filas no se nombran y no deberian entrar al analisis ni a la muestra"
         ),
     )
 
@@ -441,8 +372,8 @@ class NegocioCleeOficial(Base):
         ARRAY(Date),
         nullable=False,
         comment=(
-            "Los cortes oficiales con que se construyo ESTA version. Si manana "
-            "entra un corte nuevo, la N y todas las tasas cambian, y esto es lo "
+            "Los cortes oficiales con que se construyo ESTA version. Si manana entra "
+            "un corte nuevo, la N, las edades y todas las tasas cambian, y esto es lo "
             "que lo explica. Sin esto la fila no es citable"
         ),
     )
@@ -450,129 +381,24 @@ class NegocioCleeOficial(Base):
         String(20),
         nullable=False,
         comment=(
-            "De donde salio la identidad. En esta cohorte es `inegi`: el `clee` "
-            "viene en los propios hechos, asi que NO se leyo ninguna "
-            "silver.clee_<metodo> y no hubo nada que resolver. La columna existe "
-            "para que la cohorte propagada, si se construye, pueda decir `radio` "
-            "o `h3` en el mismo lugar"
+            "De donde salio la identidad. En esta cohorte es `inegi`: el `clee` viene "
+            "en los propios hechos, asi que no se leyo ninguna silver.clee_<metodo> y "
+            "no hubo nada que resolver"
         ),
     )
     version_reglas: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        comment="Version de las reglas de normalizacion. Cambiarlas cambia los numeros",
+        comment=(
+            "Version de las reglas: el umbral de cierre, como se elige el nombre y "
+            "como se calcula la edad. Cambiar cualquiera cambia los numeros, asi que "
+            "subir esto es parte del cambio"
+        ),
     )
     construida_en: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     def __repr__(self) -> str:
-        return f"<NegocioCleeOficial({self.clee}, {self.primer_periodo}..{self.ultimo_periodo})>"
-
-
-class NegocioCleeOficialVariante(Base):
-    """Los valores distintos que tuvo un negocio en cada campo, con su ventana.
-
-    Una fila por `(negocio, campo, valor)`. Es tabla y no una columna
-    `text[]` por tres cosas que el array no da: **búsqueda difusa** con el
-    índice trigram ("¿qué negocio es *tacos paco*?", que es la pregunta al
-    verificar un caso a mano), **la cronología del rebranding** —`TACOS PACO
-    (2021–2022) → TAQUERIA DON PACO (2023–)`, que sale del mismo `GROUP BY` y
-    por tanto es gratis— y **un solo lugar para todos los campos** con el
-    discriminador `campo`, en vez de una columna de array por cada uno.
-
-    Para qué existe, en orden de peso:
-
-    1. **Es la evidencia del valor canónico.** Si la tabla madre afirma que
-       el negocio se llama `TAQUERIA DON PACO`, aquí se ve de qué salió y
-       cuál ganó (`es_canonico`), sin comparar cadenas entre tablas.
-    2. **Es el mejor diagnóstico de un mal cluster que existe.**
-       `n_nombres = 2` no dice nada; ver `[TACOS PACO, FARMACIA PACO]` delata
-       la fusión indebida al instante.
-    3. **El verificador de supervivencia los necesita todos.** Buscar en
-       Google Places funciona con un alias y falla con otro
-       (`crear_agentes.md` §11.6).
-
-    **Solo la cohorte oficial.** No contiene identidades propagadas ni
-    sintéticas `NEW_*`. Si se construye la extensión de robustez, sus
-    variantes van en `gold.negocios_clee_propagado_variantes` — una tabla por
-    régimen, nunca una columna `cohorte`, por el mismo motivo que
-    `clee_radio`/`clee_h3` son dos tablas: con una columna discriminadora un
-    `WHERE` olvidado mezcla identidad observada con inferida y los agregados
-    salen contaminados en silencio.
-
-    Es, materializada y con índice, la sucesora de las vistas
-    `variantes_<metodo>` que `b0006` eliminó: aquéllas eran una consulta
-    guardada sobre Silver sin un solo consumidor.
-    """
-
-    __tablename__ = "negocios_clee_oficial_variantes"
-    __table_args__ = (
-        # Busqueda difusa sobre el valor. Requiere la extension pg_trgm, que
-        # instala la migracion: es la primera extension del esquema.
-        Index(
-            "ix_negocios_clee_oficial_variantes_valor",
-            "valor",
-            postgresql_using="gin",
-            postgresql_ops={"valor": "gin_trgm_ops"},
-        ),
-        # A lo mas UN canonico por (negocio, campo). Indice unico PARCIAL: lo
-        # vuelve estructural en vez de convencion, porque con dos canonicos la
-        # tabla madre seria indefendible y aqui el INSERT falla.
-        Index(
-            "ux_negocios_clee_oficial_variantes_canonico",
-            "clee",
-            "campo",
-            unique=True,
-            postgresql_where=text("es_canonico"),
-        ),
-        {"schema": SCHEMA},
-    )
-
-    clee: Mapped[str] = mapped_column(
-        String(50),
-        ForeignKey(f"{SCHEMA}.negocios_clee_oficial.clee", ondelete="CASCADE"),
-        primary_key=True,
-        comment="El negocio al que pertenece esta variante",
-    )
-    campo: Mapped[str] = mapped_column(
-        String(20),
-        primary_key=True,
-        comment="Cual de los campos de CAMPOS_CON_VARIANTES vario",
-    )
-    valor: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        comment=(
-            "El valor tal como INEGI lo publico, sin normalizar: la normalizacion "
-            "produce el canonico de la tabla madre, no reescribe la evidencia. "
-            "Medido: max(nom_estab)=150 y max(raz_social)=249 caracteres, asi que "
-            "la PK queda ~10x por debajo del tope de ~2704 bytes del btree"
-        ),
-    )
-    primer_periodo: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="Primer corte en que uso este valor"
-    )
-    ultimo_periodo: Mapped[date] = mapped_column(
-        Date, nullable=False, comment="Ultimo corte en que lo uso"
-    )
-    n_cortes: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        comment=(
-            "En cuantos cortes aparecio. Distingue 'se llamo asi cinco cortes' de "
-            "'aparecio una vez', que huele a error de captura de la fuente"
-        ),
-    )
-    es_canonico: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        comment=(
-            "True si es el valor que publico la tabla madre. Es lo que cierra el "
-            "circulo: la canonicalizacion queda auditable en el mismo lugar que su "
-            "evidencia, venga de una regla o de un LLM"
-        ),
-    )
-
-    def __repr__(self) -> str:
-        return f"<NegocioCleeOficialVariante({self.clee}, {self.campo}={self.valor!r})>"
+        estado = "cerrado" if self.cerrado else "activo"
+        return f"<NegocioCleeOficial({self.clee}, {estado}, {self.edad_anios} anios)>"

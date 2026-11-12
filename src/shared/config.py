@@ -86,16 +86,16 @@ class Settings(BaseSettings):
     # para el dia en que INEGI publique un corte a medias.
     GOLD_COBERTURA_CLEE_MINIMA: float = 0.999
 
-    # Deteccion de jitter de GPS, para elegir de donde salen las coordenadas
-    # canonicas de Gold. La regla normal es "del corte de referencia", pero si
-    # un negocio disperso mucho SIN desplazarse (dispersion grande y neto ~0)
-    # el ultimo dato es una coordenada mala y la MEDIANA es el local de
-    # verdad (normalizacion_gold.md §4).
-    # Se aplica la mediana solo si dispersion_max_m > DISPERSION y
-    # desplazamiento_neto_m < NETO. Subir NETO mete mudanzas reales al caso
-    # mediana (mal); subir DISPERSION deja pasar jitter sin corregir.
-    GOLD_JITTER_DISPERSION_M: float = 200.0
-    GOLD_JITTER_NETO_M: float = 50.0
+    # Cortes consecutivos SIN APARECER tras los que se considera que un
+    # negocio cerro. Es la regla que la tabla de Gold existe para VALIDAR: el
+    # DENUE no reporta cierres, solo deja de listar, asi que `cerrado` es una
+    # hipotesis y la muestra verificada con agentes es la prueba.
+    # En 1 basta un corte ausente (lo mas sensible: mas cierres detectados y
+    # mas falsos positivos). Subirlo exige mas evidencia antes de declarar el
+    # cierre, a cambio de perder los cierres recientes por censura.
+    # `cortes_tras_ultimo` y `huecos` quedan en la tabla, asi que cambiar esto
+    # permite recalcular la columna sin reconstruir.
+    CIERRE_CORTES_AUSENTE: int = 1
 
     # Version de las reglas de normalizacion con que se construye Gold. Queda
     # en cada fila (`version_reglas`): cambiar una regla cambia los numeros que
