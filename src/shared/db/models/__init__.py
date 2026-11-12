@@ -23,7 +23,7 @@ Establecimiento`). Ese re-export se retira cuando `gold` tenga su propia
 `Establecimiento` (Fase 5), porque ahí el nombre pasa a ser ambiguo.
 """
 
-from src.shared.db.models import clee, gold, meta, permanencia, silver
+from src.shared.db.models import clee, gold, meta, permanencia, silver, verificacion
 from src.shared.db.models.clee import CleeCeldaH37, CleeH3, CleeRadio
 from src.shared.db.models.gold import NegocioCleeOficial
 from src.shared.db.models.permanencia import PermanenciaH3, PermanenciaRadio
@@ -40,12 +40,14 @@ from src.shared.db.models.silver import (
     TipoUnidadEconomica,
     TipoVialidad,
 )
+from src.shared.db.models.verificacion import Evidencia, Muestra, MuestraNegocio, Veredicto
 
 __all__ = [
     # Módulos por capa — la forma preferida de importar
     "clee",
     "gold",
     "permanencia",
+    "verificacion",
     "meta",
     "silver",
     # Re-export plano de silver (compatibilidad; se retira en la Fase 5)
@@ -56,6 +58,10 @@ __all__ = [
     "NegocioCleeOficial",
     "PermanenciaH3",
     "PermanenciaRadio",
+    "Muestra",
+    "MuestraNegocio",
+    "Veredicto",
+    "Evidencia",
     "Entidad",
     "Establecimiento",
     "EstratoPersonal",

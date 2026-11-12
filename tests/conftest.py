@@ -424,7 +424,7 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 
 @pytest.fixture(scope="session")
 def pg_engine():
-    """Engine contra el Postgres de pruebas, con los 3 schemas creados.
+    """Engine contra el Postgres de pruebas, con los schemas de `Layer` creados.
 
     Scope de sesion: levantar el esquema es caro y los tests que lo usan se
     encargan de limpiar sus propias tablas.
@@ -438,9 +438,11 @@ def pg_engine():
     if reason is not None:
         pytest.skip(f"Postgres de pruebas no disponible ({reason})")
 
+    from src.shared.db.base import SCHEMAS
+
     engine = create_engine(get_test_postgres_url(), poolclass=NullPool)
     with engine.begin() as conn:
-        for schema in ("silver", "gold", "meta"):
+        for schema in SCHEMAS:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     yield engine
     engine.dispose()
