@@ -1,0 +1,16 @@
+# SearXNG para el agente de supervivencia (docker-compose.yml, servicio
+# `searxng`). Parte de los defaults de la imagen y cambia solo lo que el
+# agente necesita: la API JSON (sin ella `/search?format=json` responde 403)
+# y espanol de Mexico. El secreto viene de SEARXNG_SECRET en el .env.
+use_default_settings: true
+
+server:
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: "es-MX"
+  safe_search: 0

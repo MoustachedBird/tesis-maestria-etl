@@ -273,6 +273,71 @@ services:
           cpus: "${CPUS_API:-4}"
           memory: ${MEM_API:-4g}
 
+  # ── Agente de supervivencia (profile `agente`) ─────────────────────────────
+  #   docker compose run --rm agente muestrear --nombre piloto-2026-11
+  #   docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1
+  #   docker compose run --rm agente metricas  --muestra piloto-2026-11
+  #
+  # Ollama NO es un servicio de compose: corre nativo en el host (sin sudo,
+  # con el tarball) y usa la GPU con el driver instalado; el contenedor lo
+  # alcanza por `host.docker.internal`. Ver ARRANQUE.md §11.
+  agente:
+    profiles: ["agente"]
+    build:
+      context: .
+      dockerfile: Dockerfile.etl
+      target: tools
+    image: tesis-etl-tools:local
+
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      searxng:
+        condition: service_started
+
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      SEARXNG_URL: http://searxng:8080
+
+    # El host, visto desde el contenedor: ahi escucha Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    entrypoint: ["uv", "run", "python", "-m", "src.agents.main"]
+
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPUS_AGENTE:-4}"
+          memory: ${MEM_AGENTE:-4g}
+
+  # Metabuscador propio del agente: gratis, sin llave, sin cuota, con API
+  # JSON (searxng/settings.yml). Solo arranca con el agente.
+  searxng:
+    profiles: ["agente"]
+    image: searxng/searxng:latest
+    restart: unless-stopped
+
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-cambia-esto-por-una-cadena-larga}
+      SEARXNG_BASE_URL: http://searxng:8080/
+
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
+
 volumes:
   pgdata:
     name: etl-pgdata

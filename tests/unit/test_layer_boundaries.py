@@ -19,18 +19,23 @@ import pytest
 SRC = Path(__file__).resolve().parents[2] / "src"
 
 PROHIBIDOS = {
-    "src.api": ("src.etl", "src.scheduler"),
+    "src.api": ("src.etl", "src.scheduler", "src.agents"),
     "src.etl": ("src.api", "src.scheduler"),
-    "src.shared": ("src.api", "src.etl", "src.meta", "src.scheduler"),
-    "src.meta": ("src.api", "src.etl", "src.scheduler"),
+    "src.shared": ("src.api", "src.etl", "src.meta", "src.scheduler", "src.agents"),
+    "src.meta": ("src.api", "src.etl", "src.scheduler", "src.agents"),
+    "src.agents": ("src.api", "src.etl", "src.scheduler"),
 }
 """Que paquete no puede importar de que.
 
-- `src.api` no toca el ETL: es otro proceso, con otro rol de base.
+- `src.api` no toca el ETL ni los agentes: es otro proceso, con otro rol de base.
 - `src.etl` no toca el API ni el scheduler: lo orquestan a el, no al reves.
+  Si puede importar `src.agents` (el adjudicador CLEE lo invocara el
+  transform, `crear_agentes.md` §9.3).
 - `src.shared` es la base de todos, asi que no puede depender de nadie --si
   lo hiciera, importar la config arrastraria medio proyecto.
 - `src.meta` describe corridas; no las ejecuta.
+- `src.agents` solo usa `shared` y `meta`: recibe datos planos y escribe en
+  `verificacion`; si necesitara `src.etl` habria un ciclo.
 """
 
 
