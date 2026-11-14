@@ -459,6 +459,104 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
  FROM meta.job_runs WHERE job_type = 'GOLD' ORDER BY start_time DESC LIMIT 5"
 ```
 
+## 11. El agente de supervivencia
+
+Con gold construido: la muestra, Ollama, y el agente sobre 1, 10 y los 400.
+Diseño en `verificacion_cierre.md`; qué garantiza el código en `AGENTS.md`
+N7.
+
+### 11.1 Ollama, nativo y sin sudo
+
+El instalador oficial pide `sudo`; el tarball no. El binario usa la 5090 con
+el driver que ya está. **`OLLAMA_HOST=0.0.0.0` no es opcional**: el
+contenedor del agente entra por `host.docker.internal`, y en `127.0.0.1` no
+lo ve.
+
+```bash
+mkdir -p ~/ollama && cd ~/ollama
+curl -L https://ollama.com/download/ollama-linux-amd64.tgz -o ollama-linux-amd64.tgz
+tar -xzf ollama-linux-amd64.tgz
+OLLAMA_HOST=0.0.0.0 OLLAMA_KEEP_ALIVE=1h nohup ~/ollama/bin/ollama serve > ~/ollama/serve.log 2>&1 &
+sleep 5
+~/ollama/bin/ollama pull qwen3:32b          # ~20 GB, una vez
+~/ollama/bin/ollama list
+nvidia-smi                                   # la GPU tiene que aparecer en serve.log al cargar
+```
+
+`OLLAMA_KEEP_ALIVE=1h` deja el modelo cargado entre negocios (el default
+son 5 min, y recargar 20 GB cuesta medio minuto). El puerto 11434 queda
+abierto en la red local de la workstation; si eso molesta, en vez de
+`0.0.0.0` va la IP del puente de Docker (`docker network inspect bridge`).
+
+Tras un reinicio hay que volver a lanzar el `serve`.
+
+### 11.2 La muestra
+
+```bash
+cd ~/tesis-maestria-etl
+docker compose run --rm agente muestrear --nombre piloto-2026-11
+```
+
+Esperado: cuatro estratos con 100 cada uno (o menos, con aviso, si la
+población de alguno no alcanza) y la muestra en `verificacion.muestras`. Es
+reproducible: `--semilla` default `MUESTRA_SEMILLA`.
+
+### 11.3 Uno, diez, todos
+
+```bash
+docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1
+```
+
+Lo primero que hace es comprobar Ollama (si falta el modelo dice el `pull`)
+y el buscador (`searxng` arranca solo con el servicio). El log por negocio
+muestra cada búsqueda, cada página leída y el veredicto con su costo:
+
+```
+   [1/400] #1 14TAC0001 · 'TACOS PACO' · Guadalajara
+      🔎 'TACOS PACO Guadalajara': 8 resultados
+      📄 https://www.google.com/maps/... (3120 caracteres)
+      ✔ cerrado/alta · 2 evidencias · 3 búsquedas · 5 vueltas · 2.1 min
+```
+
+Mira ese primer veredicto completo antes de seguir:
+
+```bash
+docker compose exec postgres psql -U etl_rw -d mipymes -c \
+"SELECT v.clee, v.estado, v.confianza, v.n_busquedas, v.duracion_s, v.razonamiento
+ FROM verificacion.veredictos v ORDER BY v.verificado_en DESC LIMIT 1" -c \
+"SELECT e.fuente, e.senal, e.fecha_publicacion, e.url, left(e.extracto, 80) AS extracto
+ FROM verificacion.evidencias e
+ JOIN verificacion.veredictos v USING (veredicto_id)
+ ORDER BY v.verificado_en DESC, e.capturada_en LIMIT 10"
+```
+
+Si el razonamiento cita fuentes que no están en las evidencias, o el estado
+no cuadra con lo que las evidencias dicen, se ajusta el prompt
+(`src/agents/survival/prompts.py`) y sube `AGENTE_VERSION`: los veredictos
+viejos quedan con la versión vieja. Luego diez, y los 400 en segundo plano:
+
+```bash
+docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 10
+nohup docker compose run --rm agente verificar --muestra piloto-2026-11 > agente.log 2>&1 &
+tail -f agente.log
+```
+
+Se reanuda solo: los pendientes son los que ESTE agente (`modelo/version`)
+no ha verificado. Con 400 negocios a ~2 min cada uno son ~13 horas.
+
+### 11.4 Las métricas
+
+```bash
+docker compose run --rm agente metricas --muestra piloto-2026-11
+```
+
+La tabla de confusión por estrato (VP/FP/FN/VN sobre `cerrado_gold`), la
+tasa de indeterminados, y las dos cifras reponderadas por el tamaño real de
+cada estrato en gold: la **precisión de `cerrado`** en la población, y la
+fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v1`
+se filtra un modelo; para comparar dos, se corre `verificar` dos veces con
+distinto `OLLAMA_MODEL` y `metricas` dos veces.
+
 ## Comandos sueltos
 
 ```bash

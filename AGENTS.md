@@ -1161,8 +1161,92 @@ verificacion.evidencias         una fila por pieza: fuente, url, fecha, extracto
   mide. Sí recibe `ultimo_periodo`, que es dato del DENUE.
 - Lo escribe el agente, no el ETL. Lo lee `api_ro`, igual que `gold`.
 
-Todavía no existe ni el comando de muestreo ni el agente: la primera
-muestra se saca con el SQL de `verificacion_cierre.md` §4.3.
+El comando de muestreo y el agente están en `src/agents/` (N7).
+
+---
+
+## N7: El agente de supervivencia (`src/agents/survival`)
+
+El que llena `verificacion`: saca la muestra de gold, busca cada negocio en
+línea con un modelo de pesos abiertos en Ollama y escribe veredicto y
+evidencias. La arquitectura es la de `crear_agentes.md` §9 (paquete de primer
+nivel, importa solo `shared` y `meta`); el protocolo es el de
+`verificacion_cierre.md` §5.
+
+```bash
+docker compose run --rm agente muestrear --nombre piloto-2026-11            # gold -> muestras
+docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1 # 1 negocio
+docker compose run --rm agente verificar --muestra piloto-2026-11            # los pendientes
+docker compose run --rm agente metricas  --muestra piloto-2026-11            # el cruce
+```
+
+Tres subcomandos y no un comando global con `--no-*`: `muestrear` se corre
+una vez por muestra, `verificar` se reanuda, `metricas` solo lee.
+
+### Ollama corre nativo en el host, no en compose
+
+No eres sudo en indominus y el instalador oficial lo exige, pero el binario
+corre como usuario con el tarball y usa la 5090 con el driver que ya está.
+El contenedor `agente` lo alcanza por `host.docker.internal` (`extra_hosts`
+en compose), así que **Ollama tiene que escuchar en todas las interfaces**
+(`OLLAMA_HOST=0.0.0.0`): en `127.0.0.1` el contenedor no lo ve. Receta en
+`ARRANQUE.md` §11.
+
+| | Tag | VRAM Q4 | |
+|---|---|---|---|
+| **Qwen3 32B** (default) | `qwen3:32b` | ~20 GB | Mejor español y tool-calling; `qwen3:14b` si hace falta velocidad |
+| gpt-oss 20B | `gpt-oss:20b` | ~13 GB | Más rápido, razonamiento fuerte |
+| Mistral Small 3.1 24B | `mistral-small3.1:24b` | ~15 GB | Multilingüe sólido |
+
+El modelo queda en cada veredicto como `agente = modelo/AGENTE_VERSION`, y
+los pendientes se calculan por agente: **comparar dos modelos sobre la misma
+muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
+`metricas --agente` separa los dos.
+
+### Lo que el bucle garantiza (y el modelo solo no)
+
+- **Ciego a la hipótesis.** `insumo.py` no carga `cerrado_gold` ni
+  `meses_sin_aparecer` ni `huecos`; el `Negocio` ni tiene esos atributos
+  (hay test). Recibe `ultimo_periodo` y los cortes en que apareció, que son
+  datos del DENUE.
+- **Ninguna URL inventada.** Una evidencia solo puede citar una URL que
+  salió en una búsqueda o que el modelo leyó. Si inventa una, `concluir` se
+  rechaza y el modelo vuelve a intentar con el error en la mano.
+- **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
+  los enums antes de escribir (mayúsculas y espacios se normalizan, `closed`
+  no). La base tiene el mismo `CHECK` como última red.
+- **`cerrado` o `activo` exigen al menos una evidencia**; `indeterminado`
+  puede ir sin ninguna y es un resultado legítimo.
+- **Presupuesto** por negocio: `AGENTE_MAX_BUSQUEDAS`, `_PAGINAS`,
+  `_VUELTAS`. Agotado uno, la herramienta responde que se agotó y pide
+  concluir; si aun así no concluye, el veredicto es `indeterminado/baja`
+  con un razonamiento que lo dice. Eso también es dato sobre el agente.
+- **`fuente` la clasifica el código** por dominio (`clasificar_fuente`), no
+  el modelo: es el eje de los `GROUP BY` del análisis.
+
+### Fuentes
+
+| | Qué | Cuándo |
+|---|---|---|
+| **SearXNG** (`searxng/settings.yml`) | Metabuscador propio en compose, API JSON, gratis, sin llave | Default |
+| **Brave Search API** | Índice propio, sin la zona gris de raspar un motor (`crear_agentes.md` §11.3) | Si hay `BRAVE_API_KEY` |
+| `leer_pagina` | `requests` + BeautifulSoup, sin JavaScript, recortado a `AGENTE_MAX_CARACTERES_PAGINA` | Siempre |
+
+Un error de red o un 404 se le devuelven al modelo **como texto**, no como
+excepción: un sitio caído es información. Google Places (`business_status`)
+y la Meta Content Library del plan quedan como fuentes futuras: una entrada
+en `sources/`, sin tocar el bucle.
+
+### Dónde queda cada cosa
+
+| | |
+|---|---|
+| `meta.job_runs` | `job_type = 'VERIFICACION'`, un run por `muestrear` y por `verificar`; `config` con muestra, agente y presupuesto |
+| `data/agente.log` | El log del stage: cada búsqueda, cada página, cada veredicto con su costo |
+| `verificacion.*` | Lo que se cuenta (N6) |
+
+Un negocio que falla por excepción se registra y se sigue con el siguiente
+(la corrida queda `PARTIAL`); si Ollama se cae, la corrida se detiene.
 
 ---
 
@@ -1290,6 +1374,7 @@ etl-core/
 ├── src/shared/                    # Sin dependencias sobre etl/api/meta
 │   ├── config.py                  # Settings (pydantic-settings), DATABASE_URL
 │   ├── logging.py                 # Logger estructurado + get_stage_logger()
+│   ├── llm/                       # OllamaCliente: chat con herramientas (lo usan los agentes)
 │   ├── db/
 │   │   ├── base.py                # Base declarativa, SCHEMAS, get_table()
 │   │   ├── session.py             # get_engine() / get_session_factory()
@@ -1306,6 +1391,16 @@ etl-core/
 │   │       ├── gold.py            # negocios_clee_oficial: edad y veredicto de cierre
 │   │       └── verificacion.py    # muestras / muestra_negocios / veredictos / evidencias (el agente)
 │   └── enums/                     # jobs, sections, clee, layer, sources, verificacion
+│
+├── src/agents/                    # Agentes LLM; importa solo shared y meta (crear_agentes.md §9)
+│   ├── main.py                    # CLI: muestrear | verificar | metricas
+│   └── survival/                  # El verificador de supervivencia (N7)
+│       ├── muestreo.py            # gold -> verificacion.muestras / muestra_negocios
+│       ├── insumo.py              # Lo que el agente recibe de un negocio (sin la hipotesis)
+│       ├── prompts.py             # Prompt de sistema + definicion de herramientas
+│       ├── verificador.py         # El bucle: buscar, leer, concluir; escribe veredictos
+│       ├── metricas.py            # Veredicto vs cerrado_gold por estrato, reponderado
+│       └── sources/               # busqueda.py (SearXNG / Brave), paginas.py
 │
 ├── src/etl/
 │   ├── main.py                    # CLI (Typer): extract, sync-bronze, transform, pipeline
@@ -1442,6 +1537,15 @@ El CLI tiene **cuatro** comandos, no más:
 No hay `load` ni `retry`: Gold no tiene tablas todavía, así que no hay nada
 que promover, y el reintento se hace volviendo a correr la sección (todas
 son incrementales).
+
+### Agente de supervivencia (profile `agente`)
+
+| Comando | Qué hace |
+|---|---|
+| `docker compose run --rm agente muestrear --nombre <n>` | Saca la muestra estratificada de gold (`--semilla`, `--cuota` opcionales) |
+| `docker compose run --rm agente verificar --muestra <n>` | Verifica los pendientes del agente vigente (`--limite N`, `--clee X`, `--modelo tag`) |
+| `docker compose run --rm agente metricas --muestra <n>` | Tabla de confusión por estrato (`--agente modelo/version`) |
+| `docker compose up -d searxng` | Solo el buscador, para probarlo: `curl 'http://localhost:8080/search?q=x&format=json'` no está expuesto; usa `docker compose exec` |
 
 ### Evaluación Fase 7
 
@@ -2121,6 +2225,25 @@ PERMANENCIA_LATIDO_SEGUNDOS=60
 GOLD_COBERTURA_CLEE_MINIMA=0.999
 CIERRE_MESES_AUSENTE=12
 GOLD_VERSION_REGLAS=v1
+
+# Agente de supervivencia (N7). Ollama nativo en el host (OLLAMA_HOST=0.0.0.0);
+# el modelo queda en cada veredicto como modelo/AGENTE_VERSION.
+OLLAMA_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=qwen3:32b
+OLLAMA_TIMEOUT_SEGUNDOS=600
+OLLAMA_CONTEXTO_TOKENS=32768
+OLLAMA_PENSAR=false
+AGENTE_VERSION=v1
+SEARXNG_URL=http://searxng:8080
+BRAVE_API_KEY=
+AGENTE_MAX_BUSQUEDAS=8
+AGENTE_MAX_PAGINAS=6
+AGENTE_MAX_VUELTAS=16
+AGENTE_MAX_CARACTERES_PAGINA=6000
+AGENTE_TIMEOUT_HTTP_SEGUNDOS=20
+MUESTRA_CUOTA_POR_ESTRATO=100
+MUESTRA_SEMILLA=0.42
+SEARXNG_SECRET=cambia-esto
 ```
 
 ---

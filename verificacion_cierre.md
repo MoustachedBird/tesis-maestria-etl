@@ -1,9 +1,12 @@
 # Verificación del cierre — la muestra, el agente y el schema `verificacion`
 
-**Estado:** el schema existe (`b0010`), la regla de cierre está grabada en
-`gold` (`dfddcb1`). El muestreo y el agente **no están implementados**: aquí
-está su diseño y las consultas con las que se construyen. Escrito el
-2026-11-11.
+**Estado:** implementado. El schema (`b0010`), la regla de cierre en `gold`,
+y el agente en `src/agents/survival` con su CLI (`muestrear`, `verificar`,
+`metricas`; `AGENTS.md` N7, `ARRANQUE.md` §11). El modelo corre en Ollama
+sobre la RTX 5090 (`qwen3:32b` por default). Lo que sigue aquí es el diseño
+que el código implementa; el SQL de §4.3 y §6 es el que ejecutan
+`muestreo.py` y `metricas.py`. Escrito el 2026-11-11, actualizado el
+2026-11-14.
 
 **La pregunta, en una línea:** cuando un negocio deja de aparecer en el
 DENUE, ¿cerró? `gold.negocios_clee_oficial.cerrado` lo afirma por regla; este
@@ -217,10 +220,10 @@ COMMIT;
 `version_reglas` y `ventana_cortes` se copian de la propia tabla: son
 iguales en todas sus filas por construcción (invariante de `gold`).
 
-Cuando esto se vuelva comando (`verificacion muestrear --nombre ... --semilla
-...`), es exactamente este SQL con los parámetros en `.env` y el registro
-en `meta`; vive en `src/etl/` como un loader más, porque escribe una tabla
-a partir de otra.
+Es lo que ejecuta `docker compose run --rm agente muestrear --nombre ...`
+(`src/agents/survival/muestreo.py`), con la cuota y la semilla en `.env` y
+el registro en `meta`. Vive con el agente y no en `src/etl/` porque
+muestrear → verificar → métricas es un solo flujo y gold es su insumo.
 
 ---
 
@@ -355,9 +358,10 @@ GROUP BY mn.estrato ORDER BY mn.estrato;
 1. **La tanda de `gold`** sobre la cohorte oficial, con la regla en meses
    (`ARRANQUE.md` §10). Reporta la foto: cuántos cerrados, cuántos
    intermitentes, cuántos con local reocupado.
-2. **El muestreo**: primero a mano con el SQL de §4.3; después el comando.
-3. **El agente**: un negocio, luego diez, luego los 400. Con los diez se
-   ajusta el protocolo de §5.2 antes de gastar en los 400.
+2. **El muestreo**: `agente muestrear` (§4.3, implementado).
+3. **El agente**: `agente verificar --limite 1`, luego `--limite 10`, luego
+   los 400 (`ARRANQUE.md` §11). Con los diez se ajusta el prompt de §5.2 y
+   sube `AGENTE_VERSION` antes de gastar en los 400.
 4. **Las métricas** de §6 y la decisión: si la precisión de `cerrado` es
    defendible, la regla pasa al capítulo de método con su intervalo; si no,
    se mueve el umbral o se agregan señales (local reocupado como condición,

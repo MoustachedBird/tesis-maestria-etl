@@ -1,7 +1,14 @@
 # Plan — agentes LLM sobre el warehouse
 
-**Estado:** propuesto, nada implementado. Decidido el 2026-10-26 escribirlo
-antes de tocar código.
+**Estado:** la arquitectura de §9 está implementada **para el agente 2**
+(2026-11-14): `src/shared/llm/client.py` y `src/agents/survival/` con su CLI
+(`AGENTS.md` N7). Tres diferencias respecto a lo que dice abajo, y mandan:
+el destino es el schema `verificacion` (no `gold.supervivencia_verificada`
+ni `meta.agent_decisions`), la confianza es ordinal (`alta|media|baja`, no un
+`float`), y `SIN_EVIDENCIA` se llama `indeterminado`. `base.py`, `registry.py`,
+la caché y el presupuesto compartidos llegan con el segundo agente, que es
+cuando dejan de ser abstracción para uno solo. El adjudicador CLEE (§§1–8)
+sigue propuesto. Decidido el 2026-10-26 escribirlo antes de tocar código.
 
 **Qué entrega:** la arquitectura de `src/agents/` para tres agentes de forma
 distinta (§9), y el primero de ellos completo — un adjudicador que puebla
