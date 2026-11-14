@@ -106,6 +106,57 @@ class Settings(BaseSettings):
     # reporta la tesis, asi que la fila tiene que decir bajo que reglas nacio.
     GOLD_VERSION_REGLAS: str = "v1"
 
+    # -------------------------------------------------------------------------
+    # Agente de supervivencia (verificacion_cierre.md §5, crear_agentes.md §9)
+    # -------------------------------------------------------------------------
+    # Donde escucha Ollama. Corre NATIVO en el host (sin sudo: tarball) y usa
+    # la GPU con el driver instalado; el contenedor del agente lo alcanza por
+    # `host.docker.internal`, que compose mapea al host.
+    OLLAMA_URL: str = "http://host.docker.internal:11434"
+    # Modelo de pesos abiertos con llamada de herramientas. Queda grabado en
+    # cada veredicto (`agente = modelo/version`), asi que comparar dos modelos
+    # sobre la misma muestra es correr dos veces con distinto valor aqui.
+    # Opciones medidas para 32 GB de VRAM: qwen3:32b (default, mejor espanol
+    # y tool-calling), gpt-oss:20b (mas rapido), mistral-small3.1:24b.
+    OLLAMA_MODEL: str = "qwen3:32b"
+    # Segundos maximos por llamada al modelo. Un 32B con 30k de contexto puede
+    # tardar minutos en una vuelta; esto no es el timeout de un API.
+    OLLAMA_TIMEOUT_SEGUNDOS: int = 600
+    # Ventana de contexto que se pide. El default de Ollama (4k) no alcanza
+    # para el insumo mas dos paginas leidas; 32k cabe en la 5090 con un 32B
+    # en Q4. Subirlo cuesta VRAM y tiempo por vuelta.
+    OLLAMA_CONTEXTO_TOKENS: int = 32768
+    # Si el modelo razona antes de responder (`think`). Mejora las decisiones
+    # dificiles a cambio de 2-5x de tokens por vuelta. Apagado para el piloto;
+    # encenderlo es un experimento que se compara por `agente`.
+    OLLAMA_PENSAR: bool = False
+    # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
+    # las reglas de decision: dos veredictos con distinta version no son
+    # comparables aunque sean del mismo modelo.
+    AGENTE_VERSION: str = "v1"
+    # Buscador web. SearXNG es el servicio de compose (gratis, sin llave, sin
+    # cuota); si hay BRAVE_API_KEY se usa la API de Brave en su lugar, que
+    # tiene indice propio y no cae en la zona gris de raspar un motor
+    # (crear_agentes.md §11.3).
+    SEARXNG_URL: str = "http://searxng:8080"
+    BRAVE_API_KEY: str = ""
+    # Presupuesto por negocio. Acotan el costo de un veredicto y evitan que
+    # el modelo busque en circulo: agotado un tope, la herramienta responde
+    # que se agoto y pide concluir.
+    AGENTE_MAX_BUSQUEDAS: int = 8
+    AGENTE_MAX_PAGINAS: int = 6
+    AGENTE_MAX_VUELTAS: int = 16
+    # Caracteres de una pagina que se le entregan al modelo. Mas no cabe en
+    # el contexto junto con el resto; lo util (estado, fechas, resenas) suele
+    # estar al principio.
+    AGENTE_MAX_CARACTERES_PAGINA: int = 6000
+    # Timeout de cada peticion HTTP a un buscador o a una pagina.
+    AGENTE_TIMEOUT_HTTP_SEGUNDOS: int = 20
+    # Muestra: negocios por estrato y semilla de `setseed()` (en [-1, 1]).
+    # Con la misma semilla y el mismo gold la tirada es identica.
+    MUESTRA_CUOTA_POR_ESTRATO: int = 100
+    MUESTRA_SEMILLA: float = 0.42
+
     # SQLAlchemy Configuration
     SQLALCHEMY_ECHO: bool = False
     SQLALCHEMY_POOL_SIZE: int = 5
