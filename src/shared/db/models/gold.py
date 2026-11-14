@@ -208,7 +208,9 @@ class NegocioCleeOficial(Base):
     fecha_alta: Mapped[date | None] = mapped_column(
         Date,
         comment=(
-            "Fecha de alta en el RENEM mas antigua observada (MIN sobre los cortes). "
+            "Fecha de alta en el RENEM mas antigua observada (MIN sobre los cortes), "
+            "ignorando los valores posteriores a su propio corte, que son imposibles "
+            "por definicion del campo; NULL si ninguno es admisible. "
             "Es de REGISTRO y no de inicio de operaciones, pero es el unico proxy de "
             "antiguedad INDEPENDIENTE de la ventana de observacion -- y por eso es la "
             "base de la edad y no el primer corte observado"

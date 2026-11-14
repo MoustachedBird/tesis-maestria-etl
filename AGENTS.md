@@ -157,6 +157,12 @@ que re-ingestar el corte.
 Se normaliza siempre al **día 1 del mes**: el dato original no trae día, así
 que inventarlo sería falsear precisión.
 
+Hay filas con `fecha_alta_date` **posterior a su propio corte** (1,641 en
+2026-10; ver `docs/findings.md`), imposibles por definición del campo. El
+ingest las conserva tal cual; es `gold.negocios_clee_oficial` quien las
+ignora al calcular `fecha_alta` (`MIN ... FILTER (WHERE fecha_alta_date <=
+period)`), y por eso su invariante "no hay edades negativas" se cumple.
+
 ### 6 Known fecha_alta_str Formats
 
 | Format | Example | Rows | Pattern |

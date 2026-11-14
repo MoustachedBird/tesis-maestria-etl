@@ -557,7 +557,11 @@ SELECT
     -- del local reocupado lean el MISMO numero.
     {self._sql_meses_sin_aparecer("MAX(period)")} AS meses_sin_aparecer,
     COUNT(DISTINCT idx) AS cortes_observados,
-    MIN(fecha_alta_date) AS fecha_alta_date,
+    -- Una fecha de alta POSTERIOR al corte en que aparece la fila es
+    -- imposible por definicion del campo (el alta precede a la aparicion en
+    -- el directorio), asi que es un dato roto y no cuenta: un MIN que lo
+    -- dejara pasar daria edades negativas, el invariante que lo vigila.
+    MIN(fecha_alta_date) FILTER (WHERE fecha_alta_date <= period) AS fecha_alta_date,
     -- Los cortes EXACTOS en que aparecio: es lo que se publica en `periodos`,
     -- y de ahi el analisis deriva cualquier patron de presencia sin volver a
     -- los 51.5M hechos.

@@ -70,6 +70,16 @@ MICRO = 2
 PEQUENA = 4
 FIJO = 2
 COLONIA = 8
+ALTA_NORMAL = date(2015, 1, 1)
+"""Fecha de alta de toda observacion que no esta en `FECHA_ALTA`."""
+FECHA_ALTA: dict[str, date] = {
+    # Posterior a su corte (2021-05): imposible, no cuenta.
+    "f1": date(2030, 1, 1),
+    "g1": date(2030, 1, 1),
+    # Igual a su corte (2021-11): el limite admisible.
+    "g2": OFICIALES[1],
+}
+"""Fechas de alta por `id` de observacion, para los casos de dato roto."""
 
 #: (id, corte, clee, nombre, codigo_act, cve_ent, cve_mun, lat, lon,
 #:  telefono, correoelec, per_ocu_id)
@@ -219,6 +229,24 @@ OBSERVACIONES = [
     ("x2", OFICIALES[1], "C_CRUZA", "MIXTO", "722513", "14", "039", 20.8, -103.2, "", "", MICRO),
     # --- solo_viejo: no tiene ninguna observacion oficial ---
     ("o1", VIEJO, "C_VIEJO", "EXTINTO", "311811", "14", "039", 20.9, -103.1, "", "", MICRO),
+    # --- futuro: su unica fecha de alta es posterior al corte en que aparece ---
+    (
+        "f1",
+        OFICIALES[0],
+        "C_FUTURO",
+        "IMPOSIBLE",
+        "311811",
+        "14",
+        "039",
+        20.9,
+        -103.2,
+        "",
+        "",
+        MICRO,
+    ),
+    # --- mixta: una fecha de alta imposible y una admisible ---
+    ("g1", OFICIALES[0], "C_MIXTA", "A MEDIAS", "311811", "14", "039", 20.9, -103.3, "", "", MICRO),
+    ("g2", OFICIALES[1], "C_MIXTA", "A MEDIAS", "311811", "14", "039", 20.9, -103.3, "", "", MICRO),
     # --- sin_clee: observacion con clee vacio dentro de un corte oficial ---
     ("n1", OFICIALES[0], "", "ANONIMO", "311811", "14", "039", 21.0, -103.0, "", "", MICRO),
     # --- jitter: oscila ~80 m y vuelve; neto ~0 con dispersion grande ---
@@ -331,7 +359,7 @@ def db(silver_engine):
         copy_dataframe(
             conn,
             pl.DataFrame(
-                [(*o, COLONIA, FIJO, date(2015, 1, 1)) for o in OBSERVACIONES],
+                [(*o, COLONIA, FIJO, FECHA_ALTA.get(o[0], ALTA_NORMAL)) for o in OBSERVACIONES],
                 schema={
                     "id": pl.Utf8,
                     "period": pl.Date,
@@ -557,6 +585,30 @@ class TestLaEdad:
         """`dias_alta_a_primera` positivo: se dio de alta antes de aparecer."""
         construir_cohorte_oficial(db, tracker)
         assert negocios(db)["C_VIVE"]["dias_alta_a_primera"] > 0
+
+    def test_una_fecha_de_alta_posterior_a_su_corte_no_cuenta(self, db, tracker):
+        """C_FUTURO solo trae un alta de 2030 en el corte de 2021-05.
+
+        Es un dato roto (el alta precede a la aparicion por definicion) y en
+        la cohorte real hay 12 identidades asi: con un MIN a ciegas la edad
+        sale negativa y la corrida entera truena en el invariante.
+        """
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_FUTURO"]
+        assert fila["fecha_alta"] is None
+        assert fila["edad_anios"] is None
+        assert fila["dias_alta_a_primera"] is None
+
+    def test_la_fecha_admisible_gana_a_la_imposible(self, db, tracker):
+        """C_MIXTA trae 2030 en 2021-05 y 2021-11-01 en 2021-11.
+
+        El MIN ignora la imposible y toma la otra aunque sea mayor; y un alta
+        igual a su corte es el limite que si se admite.
+        """
+        construir_cohorte_oficial(db, tracker)
+        fila = negocios(db)["C_MIXTA"]
+        assert fila["fecha_alta"] == OFICIALES[1]
+        assert float(fila["edad_anios"]) == 0
 
 
 @pytest.mark.unit
