@@ -1189,13 +1189,31 @@ docker compose run --rm agente metricas  --muestra piloto-2026-11            # e
 Tres subcomandos y no un comando global con `--no-*`: `muestrear` se corre
 una vez por muestra, `verificar` se reanuda, `metricas` solo lee.
 
-### Ollama corre nativo en el host, no en compose
+### Ollama es un servicio de compose, con la GPU
 
-No eres sudo en indominus y el instalador oficial lo exige, pero el binario
-corre como usuario con el tarball y usa la 5090 con el driver que ya está.
-El contenedor `agente` lo alcanza por `host.docker.internal` (`extra_hosts`
-en compose), así que **Ollama tiene que escuchar en todas las interfaces**
-(`OLLAMA_HOST=0.0.0.0`): en `127.0.0.1` el contenedor no lo ve. Receta en
+Dos servicios bajo el profile `agente`, que arrancan solos con
+`docker compose run --rm agente ...`:
+
+| Servicio | Qué hace |
+|---|---|
+| `etl-ollama` | El servidor, con la 5090 (`deploy.resources.reservations.devices`). Los pesos van al volumen `etl-ollama-models` |
+| `etl-ollama-modelo` | One-shot: descarga `OLLAMA_MODEL` si no está en el volumen. Con el modelo presente no toca la red |
+
+El agente lo alcanza por `http://etl-ollama:11434` (compose fija `OLLAMA_URL`).
+**El 11434 no se publica en el host**: en indominus ya hay otro Ollama en
+contenedor, de otro proyecto, y no se reusa —su ciclo de vida no lo
+controlamos— ni se le disputa el puerto.
+
+Lo primero a verificar en una máquina nueva es que el modelo cargó en la
+GPU: la 5090 es Blackwell, y una imagen que no la reconozca cae a CPU **en
+silencio** — funciona, pero decenas de veces más lento.
+
+```bash
+docker exec etl-ollama ollama ps      # columna PROCESSOR: "100% GPU"
+```
+
+Un modelo distinto al de `OLLAMA_MODEL` (para `verificar --modelo`) se baja
+a mano: `docker exec etl-ollama ollama pull <tag>`. Receta completa en
 `ARRANQUE.md` §11.
 
 | | Tag | VRAM Q4 | |
@@ -2232,9 +2250,13 @@ GOLD_COBERTURA_CLEE_MINIMA=0.999
 CIERRE_MESES_AUSENTE=12
 GOLD_VERSION_REGLAS=v1
 
-# Agente de supervivencia (N7). Ollama nativo en el host (OLLAMA_HOST=0.0.0.0);
+# Agente de supervivencia (N7). Ollama es el servicio `etl-ollama` de compose;
 # el modelo queda en cada veredicto como modelo/AGENTE_VERSION.
-OLLAMA_URL=http://host.docker.internal:11434
+# OLLAMA_KEEP_ALIVE lo lee el servidor; CPUS_/MEM_OLLAMA son sus limites.
+OLLAMA_URL=http://etl-ollama:11434
+OLLAMA_KEEP_ALIVE=1h
+CPUS_OLLAMA=8
+MEM_OLLAMA=32g
 OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768

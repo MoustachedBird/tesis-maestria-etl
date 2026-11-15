@@ -465,30 +465,42 @@ Con gold construido: la muestra, Ollama, y el agente sobre 1, 10 y los 400.
 Diseño en `verificacion_cierre.md`; qué garantiza el código en `AGENTS.md`
 N7.
 
-### 11.1 Ollama, nativo y sin sudo
+### 11.1 Ollama, en contenedor y con la GPU
 
-El instalador oficial pide `sudo`; el tarball no. El binario usa la 5090 con
-el driver que ya está. **`OLLAMA_HOST=0.0.0.0` no es opcional**: el
-contenedor del agente entra por `host.docker.internal`, y en `127.0.0.1` no
-lo ve.
+Ollama es un servicio de compose (`etl-ollama`, profile `agente`), aparte del
+que ya corre en indominus para otro proyecto: no comparten puerto ni
+modelos. `etl-ollama-modelo` descarga `OLLAMA_MODEL` al volumen
+`etl-ollama-models` la primera vez (~20 GB para `qwen3:32b`).
 
 ```bash
-mkdir -p ~/ollama && cd ~/ollama
-curl -L https://ollama.com/download/ollama-linux-amd64.tgz -o ollama-linux-amd64.tgz
-tar -xzf ollama-linux-amd64.tgz
-OLLAMA_HOST=0.0.0.0 OLLAMA_KEEP_ALIVE=1h nohup ~/ollama/bin/ollama serve > ~/ollama/serve.log 2>&1 &
-sleep 5
-~/ollama/bin/ollama pull qwen3:32b          # ~20 GB, una vez
-~/ollama/bin/ollama list
-nvidia-smi                                   # la GPU tiene que aparecer en serve.log al cargar
+cd ~/tesis-maestria-etl
+docker compose --profile agente up -d etl-ollama
+nohup docker compose --profile agente up etl-ollama-modelo > ollama_pull.log 2>&1 &
+sleep 10
+tail -f ollama_pull.log                    # termina con "success"
+docker exec etl-ollama ollama list     # debe listar qwen3:32b
 ```
 
-`OLLAMA_KEEP_ALIVE=1h` deja el modelo cargado entre negocios (el default
-son 5 min, y recargar 20 GB cuesta medio minuto). El puerto 11434 queda
-abierto en la red local de la workstation; si eso molesta, en vez de
-`0.0.0.0` va la IP del puente de Docker (`docker network inspect bridge`).
+No hace falta correrlo aparte —`docker compose run --rm agente ...` levanta
+los dos—, pero así la descarga no queda escondida dentro del primer
+`muestrear`.
 
-Tras un reinicio hay que volver a lanzar el `serve`.
+**Verificar que usa la GPU**, antes de medir nada. Una imagen que no
+reconozca la 5090 cae a CPU en silencio:
+
+```bash
+docker exec etl-ollama ollama run qwen3:32b "di hola" > /dev/null
+docker exec etl-ollama ollama ps       # PROCESSOR: "100% GPU"
+nvidia-smi                                 # ~20 GB ocupados
+```
+
+Si `up -d etl-ollama` falla con *could not select device driver "nvidia"*, a
+Docker le falta el NVIDIA Container Toolkit, y eso lo instala quien
+administra la máquina.
+
+`OLLAMA_KEEP_ALIVE=1h` deja el modelo cargado entre negocios (el default
+son 5 min, y recargar 20 GB cuesta medio minuto). El servicio lleva
+`restart: unless-stopped`, así que vuelve solo tras un reinicio.
 
 ### 11.2 La muestra
 

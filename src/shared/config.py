@@ -109,10 +109,9 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Agente de supervivencia (verificacion_cierre.md §5, crear_agentes.md §9)
     # -------------------------------------------------------------------------
-    # Donde escucha Ollama. Corre NATIVO en el host (sin sudo: tarball) y usa
-    # la GPU con el driver instalado; el contenedor del agente lo alcanza por
-    # `host.docker.internal`, que compose mapea al host.
-    OLLAMA_URL: str = "http://host.docker.internal:11434"
+    # Donde escucha Ollama: el servicio `etl-ollama` de docker-compose.yml, con
+    # la GPU, visto por nombre dentro de la red de compose.
+    OLLAMA_URL: str = "http://etl-ollama:11434"
     # Modelo de pesos abiertos con llamada de herramientas. Queda grabado en
     # cada veredicto (`agente = modelo/version`), asi que comparar dos modelos
     # sobre la misma muestra es correr dos veces con distinto valor aqui.

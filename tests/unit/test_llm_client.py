@@ -96,7 +96,7 @@ class TestComprobar:
             raise requests.ConnectionError("x")
 
         monkeypatch.setattr(modulo.requests, "get", get)
-        with pytest.raises(OllamaNoDisponible, match="ollama serve"):
+        with pytest.raises(OllamaNoDisponible, match="up -d etl-ollama"):
             OllamaCliente("http://o", "qwen3:32b").comprobar()
 
     def test_sin_el_modelo_dice_que_hacer_pull(self, monkeypatch):

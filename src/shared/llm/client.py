@@ -43,7 +43,7 @@ class OllamaCliente:
     """Una conversacion con un modelo de Ollama, con herramientas.
 
     Attributes:
-        url: base del servidor (`http://host.docker.internal:11434`).
+        url: base del servidor (`http://etl-ollama:11434`).
         modelo: tag del modelo (`qwen3:32b`).
         timeout: segundos maximos por llamada; un 32B razonando con 30k de
             contexto puede tardar minutos, asi que no es el timeout de un API.
@@ -84,7 +84,8 @@ class OllamaCliente:
         except requests.RequestException as e:
             raise OllamaNoDisponible(
                 f"Ollama no responde en {self.url} ({e.__class__.__name__}). "
-                "Arrancalo en el host (`ollama serve`) o ajusta OLLAMA_URL."
+                "Levantalo con `docker compose --profile agente up -d etl-ollama` "
+                "o ajusta OLLAMA_URL."
             ) from e
         tags = {m.get("name", "") for m in respuesta.json().get("models", [])}
         # `qwen3:32b` y `qwen3:32b-q4_K_M` son el mismo modelo con y sin
@@ -93,7 +94,8 @@ class OllamaCliente:
         if self.modelo not in tags and not any(t.split(":")[0] == base for t in tags):
             raise OllamaNoDisponible(
                 f"el modelo {self.modelo!r} no esta descargado en {self.url}. "
-                f"Corre `ollama pull {self.modelo}`. Disponibles: {sorted(tags) or 'ninguno'}"
+                f"Corre `docker exec etl-ollama ollama pull {self.modelo}`. "
+                f"Disponibles: {sorted(tags) or 'ninguno'}"
             )
 
     # ----- chat -----

@@ -278,9 +278,9 @@ services:
   #   docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1
   #   docker compose run --rm agente metricas  --muestra piloto-2026-11
   #
-  # Ollama NO es un servicio de compose: corre nativo en el host (sin sudo,
-  # con el tarball) y usa la GPU con el driver instalado; el contenedor lo
-  # alcanza por `host.docker.internal`. Ver ARRANQUE.md §11.
+  # El modelo lo sirve el servicio `etl-ollama` de este mismo archivo, y
+  # `etl-ollama-modelo` lo descarga si falta: el agente no arranca hasta que el
+  # servidor responde y el modelo esta en el volumen. Ver ARRANQUE.md §11.
   agente:
     profiles: ["agente"]
     build:
@@ -294,15 +294,17 @@ services:
         condition: service_completed_successfully
       searxng:
         condition: service_started
+      etl-ollama-modelo:
+        condition: service_completed_successfully
 
     env_file: .env
     environment:
       POSTGRES_HOST: postgres
       SEARXNG_URL: http://searxng:8080
-
-    # El host, visto desde el contenedor: ahi escucha Ollama.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Dentro de la red de compose el servidor es "etl-ollama", igual que la
+      # base es "postgres". Se fija aqui para que un OLLAMA_URL viejo en el
+      # .env no mande al agente a buscarlo en el host.
+      OLLAMA_URL: http://etl-ollama:11434
 
     entrypoint: ["uv", "run", "python", "-m", "src.agents.main"]
 
@@ -338,6 +340,79 @@ services:
           cpus: "2"
           memory: 1g
 
+  # Servidor del modelo, con la GPU. Propio de este proyecto: en indominus ya
+  # hay otro Ollama en contenedor, de otro proyecto, y no se reusa porque su
+  # ciclo de vida no lo controlamos. Por eso el servicio NO se llama `ollama`
+  # y tampoco publica el 11434 en el host (chocaria con aquel): solo lo ve
+  # la red de compose. Todo comando va con el contenedor por delante:
+  # `docker exec etl-ollama ollama <lo que sea>`.
+  #
+  #   docker compose --profile agente up -d etl-ollama        # solo el servidor
+  #   docker exec etl-ollama ollama list              # que hay descargado
+  #   docker exec etl-ollama ollama ps                # debe decir "100% GPU"
+  #   docker exec etl-ollama ollama pull gpt-oss:20b  # otro modelo, a mano
+  etl-ollama:
+    profiles: ["agente"]
+    image: ollama/ollama:latest
+    # Nombre fijo, como `etl-postgres`: es el que va en `docker exec`, y lo
+    # distingue a simple vista del Ollama ajeno en `docker ps`.
+    container_name: etl-ollama
+    restart: unless-stopped
+
+    environment:
+      # Deja el modelo cargado entre negocios: el default son 5 min, y
+      # recargar 20 GB a la VRAM cuesta medio minuto cada vez.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-1h}
+
+    volumes:
+      # Los pesos (~20 GB por modelo). Volumen nombrado: sobrevive a
+      # `docker compose down` y solo se va con `down -v`.
+      - ollama_models:/root/.ollama
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPUS_OLLAMA:-8}"
+          memory: ${MEM_OLLAMA:-32g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # Descarga OLLAMA_MODEL al volumen si no esta. One-shot e idempotente: con
+  # el modelo ya descargado sale sin tocar la red (`ollama show` es local),
+  # asi que el agente arranca aunque el registro de Ollama no responda.
+  etl-ollama-modelo:
+    profiles: ["agente"]
+    image: ollama/ollama:latest
+    restart: "no"
+
+    depends_on:
+      etl-ollama:
+        condition: service_healthy
+
+    environment:
+      # El binario hace de cliente contra el servidor del servicio `etl-ollama`.
+      OLLAMA_HOST: http://etl-ollama:11434
+      MODELO: ${OLLAMA_MODEL:-qwen3:32b}
+
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama show "$$MODELO" > /dev/null 2>&1
+        && echo "modelo $$MODELO ya descargado"
+        || ollama pull "$$MODELO"
+
 volumes:
   pgdata:
     name: etl-pgdata
+  ollama_models:
+    name: etl-ollama-models
