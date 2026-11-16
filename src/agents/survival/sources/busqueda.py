@@ -15,7 +15,8 @@ modo de fallo más barato de atrapar, y se atrapa aquí.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import date
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import requests
@@ -31,10 +32,34 @@ class Resultado:
     titulo: str
     url: str
     extracto: str
+    fecha: date | None = None
+    """Fecha de publicación que reporta el buscador; la mayoría de los resultados no trae."""
 
     def como_texto(self) -> str:
-        """Una línea legible para el modelo."""
-        return f"- {self.titulo}\n  {self.url}\n  {self.extracto}".strip()
+        """El resultado para el modelo: título, URL, extracto y la fecha si el buscador la dio.
+
+        Es también el texto contra el que `verificador.py` comprueba que una
+        `fecha_publicacion` citada salió de algo visto, así que la fecha va
+        escrita y no solo guardada.
+        """
+        lineas = [f"- {self.titulo}", f"  {self.url}", f"  {self.extracto}"]
+        if self.fecha:
+            lineas.append(f"  fecha de publicación: {self.fecha.isoformat()}")
+        return "\n".join(lineas).strip()
+
+
+def _fecha_iso(valor: Any) -> date | None:
+    """La fecha de un resultado (`2026-11-05T00:00:00`, `2026-11-05`) o None si no parsea.
+
+    Tolerante a propósito: el campo es opcional y cada motor lo llena a su
+    manera; una fecha ilegible es un resultado sin fecha, no un error.
+    """
+    if not valor:
+        return None
+    try:
+        return date.fromisoformat(str(valor)[:10])
+    except ValueError:
+        return None
 
 
 class Buscador(Protocol):
@@ -67,6 +92,7 @@ class BuscadorSearxng:
                 titulo=(r.get("title") or "").strip(),
                 url=r.get("url", ""),
                 extracto=(r.get("content") or "").strip(),
+                fecha=_fecha_iso(r.get("publishedDate")),
             )
             for r in respuesta.json().get("results", [])[:n]
             if r.get("url")
@@ -96,6 +122,7 @@ class BuscadorBrave:
                 titulo=(r.get("title") or "").strip(),
                 url=r.get("url", ""),
                 extracto=(r.get("description") or "").strip(),
+                fecha=_fecha_iso(r.get("page_age")),
             )
             for r in respuesta.json().get("web", {}).get("results", [])[:n]
             if r.get("url")

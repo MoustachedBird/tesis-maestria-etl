@@ -104,7 +104,10 @@ def verificar(
         cliente,
         buscador,
         lambda url: leer_pagina(
-            url, ajustes.AGENTE_MAX_CARACTERES_PAGINA, ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS
+            url,
+            ajustes.AGENTE_MAX_CARACTERES_PAGINA,
+            ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
+            ajustes.AGENTE_MIN_CARACTERES_PAGINA,
         ),
         version=ajustes.AGENTE_VERSION,
         max_busquedas=ajustes.AGENTE_MAX_BUSQUEDAS,

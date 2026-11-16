@@ -1,5 +1,7 @@
 """Las fuentes del agente: clasificación de URLs, el buscador y el lector, sin red."""
 
+from datetime import date
+
 import pytest
 import requests
 
@@ -74,6 +76,29 @@ class TestSearxng:
         assert resultados[1].extracto == ""
         assert "https://x.mx/1" in resultados[0].como_texto()
 
+    def test_la_fecha_del_resultado_llega_al_modelo(self, monkeypatch):
+        """Sin esto el modelo no tiene de dónde sacar una fecha y la supone."""
+        resultados_json = [
+            {
+                "title": "A",
+                "url": "https://x.mx/a",
+                "content": "c",
+                "publishedDate": "2026-11-05T00:00:00",
+            },
+            {"title": "B", "url": "https://x.mx/b", "content": "c", "publishedDate": None},
+            {"title": "C", "url": "https://x.mx/c", "content": "c", "publishedDate": "hace 3 días"},
+        ]
+        monkeypatch.setattr(
+            busqueda.requests,
+            "get",
+            lambda *a, **k: RespuestaFalsa(json={"results": resultados_json}),
+        )
+        a, b, c = BuscadorSearxng("http://s").buscar("x")
+        assert a.fecha == date(2026, 11, 5)
+        assert "fecha de publicación: 2026-11-05" in a.como_texto()
+        assert b.fecha is None and "fecha" not in b.como_texto()
+        assert c.fecha is None  # ilegible = sin fecha, no error
+
     def test_un_403_se_propaga(self, monkeypatch):
         """Sin `json` en search.formats SearXNG responde 403: tiene que verse, no taparse."""
         monkeypatch.setattr(busqueda.requests, "get", lambda *a, **k: RespuestaFalsa(status=403))
@@ -100,6 +125,26 @@ def test_brave_manda_la_llave_y_parsea_web_results(monkeypatch):
 
 @pytest.mark.unit
 class TestLeerPagina:
+    def test_un_muro_de_login_no_cuenta_como_lectura(self, monkeypatch):
+        """Facebook responde 200 con ~50 caracteres: eso no es haber leído la página."""
+        html = "<html><head><title>Facebook</title></head><body><p>Inicia sesión para continuar</p></body></html>"
+        monkeypatch.setattr(
+            paginas.requests,
+            "get",
+            lambda *a, **k: RespuestaFalsa(text=html, content_type="text/html"),
+        )
+        texto = paginas.leer_pagina("https://www.facebook.com/p/x")
+        assert texto.startswith("ERROR") and "NO la leíste" in texto
+
+    def test_una_pagina_con_contenido_pasa_el_piso(self, monkeypatch):
+        html = "<p>" + "Abierto de lunes a sábado. " * 20 + "</p>"
+        monkeypatch.setattr(
+            paginas.requests,
+            "get",
+            lambda *a, **k: RespuestaFalsa(text=html, content_type="text/html"),
+        )
+        assert not paginas.leer_pagina("https://x.mx").startswith("ERROR")
+
     def test_quita_el_ruido_y_recorta(self, monkeypatch):
         html = "<html><head><title>Tacos Paco</title><script>var x=1</script></head><body><nav>menu</nav><p>Cerrado  permanentemente</p><footer>pie</footer></body></html>"
         monkeypatch.setattr(
@@ -107,7 +152,7 @@ class TestLeerPagina:
             "get",
             lambda *a, **k: RespuestaFalsa(text=html, content_type="text/html"),
         )
-        texto = paginas.leer_pagina("https://x.mx", max_caracteres=1000)
+        texto = paginas.leer_pagina("https://x.mx", max_caracteres=1000, min_caracteres=0)
         assert texto.startswith("TITULO: Tacos Paco")
         assert "Cerrado permanentemente" in texto
         for ruido in ("var x", "menu", "pie"):

@@ -18,8 +18,8 @@ from src.shared.enums import Confianza, EstadoVerificado, SenalEvidencia
 SISTEMA = """Eres un verificador de negocios de México. Te doy TODO lo que el Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) publicó de UN negocio, y tu trabajo es averiguar, buscando en internet, si ese negocio SIGUE ACTIVO o CERRÓ. El DENUE no reporta cierres: solo deja de listar negocios, y no sabemos por qué. Tu veredicto es independiente del DENUE.
 
 TIENES TRES HERRAMIENTAS
-- buscar_web(consulta): resultados de un buscador (título, URL, extracto).
-- leer_pagina(url): el texto de una página.
+- buscar_web(consulta): resultados de un buscador (título, URL, extracto y, cuando el buscador la da, la fecha de publicación).
+- leer_pagina(url): el texto de una página. Si responde ERROR (no abre, pide iniciar sesión, viene vacía) NO la leíste: de esa URL solo sabes lo que mostró el buscador.
 - concluir(...): tu veredicto. ES OBLIGATORIO terminar llamándola. No respondas en texto libre.
 
 PROTOCOLO, EN ESTE ORDEN (detente cuando tengas evidencia para confianza alta):
@@ -41,9 +41,10 @@ REGLAS DE DECISIÓN
 
 AL CONCLUIR
 - razonamiento: por qué llegaste a ese estado, en prosa breve, nombrando las fuentes y las fechas.
-- evidencias: UNA por pieza en que te apoyaste. Cada una con la URL EXACTA que viste en una búsqueda o leíste (no inventes ni reconstruyas URLs), el extracto CITADO (no parafraseado), la fecha de publicación si la pieza la trae, y hacia dónde apunta esa pieza por sí sola: cerrado, activo o neutral. Guarda también las contradictorias.
+- evidencias: UNA por pieza en que te apoyaste. Cada una con la URL EXACTA que viste en una búsqueda o leíste (no inventes ni reconstruyas URLs), el extracto CITADO (no parafraseado), la fecha de publicación SOLO si está escrita en el resultado del buscador o en la página (si no lo está va null: no la deduzcas ni la estimes; una fecha que no viste se rechaza), y hacia dónde apunta esa pieza por sí sola: cerrado, activo o neutral. Guarda también las contradictorias.
 - fecha_cierre_estimada: solo si la evidencia la da (último rastro de actividad, aviso).
 - Para activo o cerrado hace falta al menos una evidencia; para indeterminado puede no haber ninguna.
+- Sin una fecha escrita no hay "actividad FECHADA": lo más que sostiene una ficha o un extracto sin fecha es activo / baja.
 
 Trabaja con calma pero sin dar vueltas: cuando una herramienta te diga que se agotó el presupuesto, concluye con lo que tengas."""
 """Prompt de sistema. Sube `AGENTE_VERSION` si cambia."""
@@ -100,7 +101,7 @@ HERRAMIENTAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "buscar_web",
-            "description": "Busca en la web. Devuelve título, URL y extracto de los primeros resultados.",
+            "description": "Busca en la web. Devuelve título, URL, extracto y fecha de publicación (si el buscador la da) de los primeros resultados.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -117,7 +118,7 @@ HERRAMIENTAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "leer_pagina",
-            "description": "Devuelve el texto visible de una página web (recortado).",
+            "description": "Devuelve el texto visible de una página web (recortado), o ERROR si no se pudo leer.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -161,7 +162,7 @@ HERRAMIENTAS: list[dict] = [
                                 },
                                 "fecha_publicacion": {
                                     "type": ["string", "null"],
-                                    "description": "AAAA-MM-DD o AAAA-MM si la pieza la trae.",
+                                    "description": "AAAA-MM-DD o AAAA-MM, solo si está escrita en lo que viste de esa URL; null si no.",
                                 },
                                 "senal": {"type": "string", "enum": _enum(SenalEvidencia)},
                             },

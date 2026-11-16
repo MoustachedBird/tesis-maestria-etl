@@ -1236,6 +1236,17 @@ muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
 - **Ninguna URL inventada.** Una evidencia solo puede citar una URL que
   salió en una búsqueda o que el modelo leyó. Si inventa una, `concluir` se
   rechaza y el modelo vuelve a intentar con el error en la mano.
+- **Ninguna fecha inventada.** La `fecha_publicacion` de una evidencia tiene
+  que estar escrita en lo que el agente vio de esa URL: el resultado del
+  buscador (que incluye su fecha cuando el motor la da) o la página. Si no,
+  `concluir` se rechaza y la salida que se le ofrece es mandar `null`. Una
+  fecha relativa ("hace 3 días") no cuenta: el agente no sabe qué día es
+  hoy. La fecha es lo que separa `activo/alta` de `activo/baja`, así que es
+  el dato que al modelo más le conviene suponer.
+- **Una página sin contenido no es una lectura.** Menos de
+  `AGENTE_MIN_CARACTERES_PAGINA` de texto visible es un muro de login
+  (Facebook, Instagram) o un cascarón de JavaScript: se devuelve como
+  `ERROR`, igual que un 404.
 - **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
   los enums antes de escribir (mayúsculas y espacios se normalizan, `closed`
   no). La base tiene el mismo `CHECK` como última red.
@@ -1254,7 +1265,7 @@ muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
 |---|---|---|
 | **SearXNG** (`searxng/settings.yml`) | Metabuscador propio en compose, API JSON, gratis, sin llave | Default |
 | **Brave Search API** | Índice propio, sin la zona gris de raspar un motor (`crear_agentes.md` §11.3) | Si hay `BRAVE_API_KEY` |
-| `leer_pagina` | `requests` + BeautifulSoup, sin JavaScript, recortado a `AGENTE_MAX_CARACTERES_PAGINA` | Siempre |
+| `leer_pagina` | `requests` + BeautifulSoup, sin JavaScript, recortado a `AGENTE_MAX_CARACTERES_PAGINA`; con menos de `AGENTE_MIN_CARACTERES_PAGINA` es `ERROR` | Siempre |
 
 Un error de red o un 404 se le devuelven al modelo **como texto**, no como
 excepción: un sitio caído es información. Google Places (`business_status`)
@@ -2261,13 +2272,14 @@ OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
-AGENTE_VERSION=v1
+AGENTE_VERSION=v2
 SEARXNG_URL=http://searxng:8080
 BRAVE_API_KEY=
 AGENTE_MAX_BUSQUEDAS=8
 AGENTE_MAX_PAGINAS=6
 AGENTE_MAX_VUELTAS=16
 AGENTE_MAX_CARACTERES_PAGINA=6000
+AGENTE_MIN_CARACTERES_PAGINA=200
 AGENTE_TIMEOUT_HTTP_SEGUNDOS=20
 MUESTRA_CUOTA_POR_ESTRATO=100
 MUESTRA_SEMILLA=0.42

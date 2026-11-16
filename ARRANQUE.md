@@ -565,7 +565,7 @@ docker compose run --rm agente metricas --muestra piloto-2026-11
 La tabla de confusión por estrato (VP/FP/FN/VN sobre `cerrado_gold`), la
 tasa de indeterminados, y las dos cifras reponderadas por el tamaño real de
 cada estrato en gold: la **precisión de `cerrado`** en la población, y la
-fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v1`
+fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v2`
 se filtra un modelo; para comparar dos, se corre `verificar` dos veces con
 distinto `OLLAMA_MODEL` y `metricas` dos veces.
 

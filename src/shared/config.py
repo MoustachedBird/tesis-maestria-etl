@@ -132,7 +132,7 @@ class Settings(BaseSettings):
     # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
     # las reglas de decision: dos veredictos con distinta version no son
     # comparables aunque sean del mismo modelo.
-    AGENTE_VERSION: str = "v1"
+    AGENTE_VERSION: str = "v2"
     # Buscador web. SearXNG es el servicio de compose (gratis, sin llave, sin
     # cuota); si hay BRAVE_API_KEY se usa la API de Brave en su lugar, que
     # tiene indice propio y no cae en la zona gris de raspar un motor
@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     # el contexto junto con el resto; lo util (estado, fechas, resenas) suele
     # estar al principio.
     AGENTE_MAX_CARACTERES_PAGINA: int = 6000
+    # Texto visible minimo para que una pagina cuente como leida. Por debajo
+    # es un muro de inicio de sesion (Facebook devuelve ~50 caracteres) o un
+    # cascaron de JavaScript, y se le devuelve al modelo como ERROR.
+    AGENTE_MIN_CARACTERES_PAGINA: int = 200
     # Timeout de cada peticion HTTP a un buscador o a una pagina.
     AGENTE_TIMEOUT_HTTP_SEGUNDOS: int = 20
     # Muestra: negocios por estrato y semilla de `setseed()` (en [-1, 1]).

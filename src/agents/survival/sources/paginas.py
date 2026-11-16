@@ -25,14 +25,23 @@ _RUIDO = ("script", "style", "noscript", "svg", "nav", "footer", "header", "form
 """Etiquetas que nunca llevan el contenido que importa y sí llenan el contexto."""
 
 
-def leer_pagina(url: str, max_caracteres: int = 6000, timeout: int = 20) -> str:
+def leer_pagina(
+    url: str, max_caracteres: int = 6000, timeout: int = 20, min_caracteres: int = 200
+) -> str:
     """El texto visible de una página, recortado.
+
+    Una página que responde 200 con casi nada de texto es un muro de inicio
+    de sesión (Facebook, Instagram) o un cascarón que se llena con
+    JavaScript. Se devuelve como `ERROR`, igual que un 404: entregársela al
+    modelo como lectura lo deja creer que leyó la fuente.
 
     Args:
         url: qué leer.
         max_caracteres: tope del texto devuelto; lo útil suele estar al
             principio y el contexto del modelo es finito.
         timeout: segundos por petición.
+        min_caracteres: texto visible mínimo (sin contar el título) para que
+            la página cuente como leída.
 
     Returns:
         str: el texto, o una línea `ERROR: ...` que el modelo puede leer.
@@ -54,6 +63,12 @@ def leer_pagina(url: str, max_caracteres: int = 6000, timeout: int = 20) -> str:
         etiqueta.decompose()
     titulo = sopa.title.get_text(strip=True) if sopa.title else ""
     texto = re.sub(r"\s+", " ", sopa.get_text(" ", strip=True))
+    if len(texto) < min_caracteres:
+        return (
+            f"ERROR: {url} no entregó contenido legible ({len(texto)} caracteres; suele ser "
+            "un muro de inicio de sesión o una página que necesita JavaScript). NO la leíste: "
+            "de esta URL solo sabes lo que mostró el buscador."
+        )
     cuerpo = f"TITULO: {titulo}\n{texto}" if titulo else texto
     if len(cuerpo) > max_caracteres:
         return cuerpo[:max_caracteres] + f"\n[... recortado a {max_caracteres} caracteres]"

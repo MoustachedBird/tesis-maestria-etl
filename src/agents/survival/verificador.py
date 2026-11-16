@@ -12,6 +12,10 @@ Lo que el bucle garantiza, porque el modelo por sí solo no lo garantiza:
 - **Ninguna URL inventada.** Una evidencia solo puede citar una URL que
   apareció en una búsqueda o que el modelo leyó. Es el modo de fallo más
   barato de un LLM y el que más daño haría a la auditoría.
+- **Ninguna fecha inventada.** La `fecha_publicacion` de una evidencia tiene
+  que estar escrita en lo que el agente vio de esa URL (el resultado del
+  buscador o la página). La fecha es lo que separa `activo/alta` de
+  `activo/baja`, así que es el dato que al modelo más le conviene suponer.
 - **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
   los enums antes de escribir; si el modelo se sale, se le devuelve el error
   y vuelve a intentar, no se corrige por él.
@@ -24,6 +28,7 @@ Lo que el bucle garantiza, porque el modelo por sí solo no lo garantiza:
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -58,6 +63,26 @@ JOB_NAME_VERIFICAR = "agente_supervivencia_verificar"
 
 _MIN_RAZONAMIENTO = 20
 """Caracteres mínimos del razonamiento: menos no es un porqué."""
+
+_MESES = {
+    1: "ene(?:ro)?|jan(?:uary)?",
+    2: "feb(?:rero|ruary)?",
+    3: "mar(?:zo|ch)?",
+    4: "abr(?:il)?|apr(?:il)?",
+    5: "may(?:o)?",
+    6: "jun(?:io|e)?",
+    7: "jul(?:io|y)?",
+    8: "ago(?:sto)?|aug(?:ust)?",
+    9: "sep(?:t|tiembre|tember)?|set(?:iembre)?",
+    10: "oct(?:ubre|ober)?",
+    11: "nov(?:iembre|ember)?",
+    12: "dic(?:iembre)?|dec(?:ember)?",
+}
+"""El nombre de cada mes como regex: completo o abreviado, en español y en inglés.
+
+Va el nombre entero y no un prefijo para que "novedades 2026" o "martes
+2024" no pasen por noviembre o marzo (`_fecha_sustentada`).
+"""
 
 
 @dataclass
@@ -132,7 +157,9 @@ class Verificador:
             {"role": "system", "content": SISTEMA},
             {"role": "user", "content": formatear_insumo(negocio)},
         ]
-        vistas: set[str] = set()
+        # URL normalizada -> todo el texto que el agente vio de ella. Las llaves
+        # son las URLs citables; el texto es contra lo que se comprueba una fecha.
+        vistas: dict[str, str] = {}
         n_busquedas = n_paginas = 0
 
         for vuelta in range(1, self.max_vueltas + 1):
@@ -177,7 +204,8 @@ class Verificador:
                             _tool(nombre, f"ERROR del buscador: {e.__class__.__name__}: {e}")
                         )
                         continue
-                    vistas.update(_normalizar(r.url) for r in resultados)
+                    for r in resultados:
+                        _anotar(vistas, r.url, r.como_texto())
                     texto = "\n".join(r.como_texto() for r in resultados) or "(sin resultados)"
                     logger.info(f"      🔎 {consulta!r}: {len(resultados)} resultados")
                     mensajes.append(_tool(nombre, texto))
@@ -194,9 +222,11 @@ class Verificador:
                     n_paginas += 1
                     url = str(args.get("url", "")).strip()
                     texto = self.leer_pagina(url)
-                    if not texto.startswith("ERROR"):
-                        vistas.add(_normalizar(url))
-                    logger.info(f"      📄 {url} ({len(texto)} caracteres)")
+                    if texto.startswith("ERROR"):
+                        logger.info(f"      📄 {url} ✖ {texto[:120]}")
+                    else:
+                        _anotar(vistas, url, texto)
+                        logger.info(f"      📄 {url} ({len(texto)} caracteres)")
                     mensajes.append(_tool(nombre, texto))
                     continue
                 mensajes.append(_tool(nombre, f"ERROR: no existe la herramienta {nombre!r}"))
@@ -236,8 +266,12 @@ class Verificador:
 
     # ----- validacion -----
 
-    def _validar_conclusion(self, args: dict, vistas: set[str]) -> tuple[dict, list[str]]:
-        """Revisa la conclusión del modelo contra el vocabulario y las URLs vistas.
+    def _validar_conclusion(self, args: dict, vistas: dict[str, str]) -> tuple[dict, list[str]]:
+        """Revisa la conclusión del modelo contra el vocabulario y lo que vio.
+
+        Args:
+            args: los argumentos de `concluir`, como los mandó el modelo.
+            vistas: URL normalizada -> texto visto de esa URL.
 
         Returns:
             tuple[dict, list[str]]: la conclusión normalizada y los errores;
@@ -284,6 +318,12 @@ class Verificador:
             fecha_pub, error_pub = _fecha(ev.get("fecha_publicacion"))
             if error_pub:
                 errores.append(f"evidencia {i}: fecha_publicacion: {error_pub}")
+            elif fecha_pub and not _fecha_sustentada(fecha_pub, vistas.get(_normalizar(url), "")):
+                errores.append(
+                    f"evidencia {i}: la fecha_publicacion {ev.get('fecha_publicacion')!r} no está "
+                    "escrita en lo que viste de esa URL (ni en el resultado del buscador ni en "
+                    "la página). Si la pieza no trae fecha, manda null; no la deduzcas"
+                )
             evidencias.append(
                 EvidenciaDecidida(
                     url=url,
@@ -514,6 +554,42 @@ def _desempacar(llamada: dict) -> tuple[str, dict]:
         except json.JSONDecodeError:
             args = {}
     return str(funcion.get("name", "")), dict(args) if isinstance(args, dict) else {}
+
+
+def _anotar(vistas: dict[str, str], url: str, texto: str) -> None:
+    """Suma `texto` a lo visto de `url`: una URL puede salir en dos búsquedas y además leerse."""
+    clave = _normalizar(url)
+    vistas[clave] = f"{vistas.get(clave, '')}\n{texto}"
+
+
+def _fecha_sustentada(fecha: date, texto: str) -> bool:
+    """Si el mes y el año de `fecha` están escritos en `texto`.
+
+    Reconoce el mes en letra junto al año ("5 de noviembre de 2026",
+    "nov. 2026", "Nov 5, 2026") y las formas numéricas ("2026-11-05",
+    "05/11/2026", "11/2026"). El día no se comprueba: el modelo normaliza a
+    `AAAA-MM-DD` y un `AAAA-MM` llega aquí como día 1. Una fecha relativa
+    ("hace 3 días") NO sustenta nada: el agente no sabe qué día es hoy, y
+    resolverla sería justo la deducción que esto impide.
+
+    Args:
+        fecha: la `fecha_publicacion` que citó el modelo.
+        texto: lo visto de la URL de esa evidencia.
+
+    Returns:
+        bool: True si el texto la respalda.
+    """
+    t = texto.lower()
+    a, m = fecha.year, fecha.month
+    nombres = _MESES[m]
+    patrones = (
+        # mes en letra y despues el anio: "noviembre de 2026", "nov 5, 2026"
+        rf"\b(?:{nombres})\b\.?,?\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?(?:de\s+|del\s+)?{a}(?!\d)",
+        rf"(?<!\d){a}[-/.]0?{m}(?!\d)",  # 2026-11-05, 2026/11
+        rf"(?<!\d)0?{m}[-/.]{a}(?!\d)",  # 05/11/2026, 11/2026
+        rf"(?<!\d)0?{m}[-/.]\d{{1,2}}[-/.]{a}(?!\d)",  # 11/05/2026 (mes primero)
+    )
+    return any(re.search(p, t) for p in patrones)
 
 
 def _normalizar(url: str) -> str:

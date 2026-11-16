@@ -13,7 +13,12 @@ import pytest
 from src.agents.survival.insumo import Negocio
 from src.agents.survival.prompts import HERRAMIENTAS, SISTEMA, formatear_insumo
 from src.agents.survival.sources.busqueda import Resultado as ResultadoBusqueda
-from src.agents.survival.verificador import Verificador, _fecha, _normalizar
+from src.agents.survival.verificador import (
+    Verificador,
+    _fecha,
+    _fecha_sustentada,
+    _normalizar,
+)
 
 VENTANA_FIN = date(2026, 5, 1)
 
@@ -251,6 +256,138 @@ class TestLoQueSeRechaza:
         verificador(cliente).verificar(negocio())
         usuario = [m["content"] for m in cliente.conversaciones[-1] if m["role"] == "user"]
         assert any("`concluir`" in m for m in usuario[1:])
+
+
+FACEBOOK = "https://www.facebook.com/tacospacogdl"
+
+
+def conclusion_activo(fecha, url=FACEBOOK) -> dict:
+    return dict(
+        estado="activo",
+        confianza="alta",
+        razonamiento="La página de Facebook del negocio tiene una publicación reciente.",
+        evidencias=[
+            {
+                "url": url,
+                "extracto": "Promo de la semana",
+                "fecha_publicacion": fecha,
+                "senal": "activo",
+            }
+        ],
+    )
+
+
+@pytest.mark.unit
+class TestNingunaFechaInventada:
+    """La fecha separa activo/alta de activo/baja: es lo que al modelo más le conviene suponer."""
+
+    def test_una_fecha_que_no_esta_en_lo_visto_se_rechaza(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
+            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
+            respuesta(llamada("concluir", **conclusion_activo(None))),
+        )
+        r = verificador(cliente).verificar(negocio())
+        assert r.evidencias[0].fecha_publicacion is None
+        assert any("no está escrita en lo que viste" in m for m in cliente.mensajes_tool())
+
+    def test_la_fecha_que_dio_el_buscador_vale(self):
+        buscador = BuscadorFalso(
+            [ResultadoBusqueda("Tacos Paco | Facebook", FACEBOOK, "Promo", date(2026, 11, 5))]
+        )
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
+            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
+        )
+        r = verificador(cliente, buscador).verificar(negocio())
+        assert r.evidencias[0].fecha_publicacion == date(2026, 11, 5)
+
+    def test_la_fecha_escrita_en_el_extracto_vale(self):
+        buscador = BuscadorFalso(
+            [
+                ResultadoBusqueda(
+                    "Tacos Paco", FACEBOOK, "5 de noviembre de 2026 — Promo de la semana"
+                )
+            ]
+        )
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
+            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
+        )
+        assert verificador(cliente, buscador).verificar(negocio()).estado == "activo"
+
+    def test_la_fecha_escrita_en_la_pagina_leida_vale(self):
+        """`leer_falso` dice "desde marzo de 2024"."""
+        url = "https://tacospaco.mx/aviso"
+        cliente = ClienteFalso(
+            respuesta(llamada("leer_pagina", url=url)),
+            respuesta(llamada("concluir", **conclusion_activo("2024-03", url=url))),
+        )
+        r = verificador(cliente).verificar(negocio())
+        assert r.evidencias[0].fecha_publicacion == date(2024, 3, 1)
+
+    def test_la_fecha_de_otra_url_no_se_presta(self):
+        """Cada evidencia se comprueba contra lo visto de SU url, no de la conversación entera."""
+        buscador = BuscadorFalso(
+            [
+                ResultadoBusqueda(
+                    "Nota", "https://nota.mx/1", "Publicado el 5 de noviembre de 2026"
+                ),
+                ResultadoBusqueda("Tacos Paco | Facebook", FACEBOOK, "Promo de la semana"),
+            ]
+        )
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
+            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
+            respuesta(llamada("concluir", **conclusion_activo(None))),
+        )
+        r = verificador(cliente, buscador).verificar(negocio())
+        assert r.evidencias[0].fecha_publicacion is None
+
+    def test_una_pagina_que_fallo_no_aporta_texto(self):
+        """Un ERROR de lectura no vuelve citable la URL ni sustenta fechas."""
+        cliente = ClienteFalso(
+            respuesta(llamada("leer_pagina", url="https://x.mx/404")),
+            respuesta(llamada("concluir", **conclusion_activo("2024-03", url="https://x.mx/404"))),
+        )
+        r = verificador(cliente, max_vueltas=2).verificar(negocio())
+        assert r.estado == "indeterminado"
+
+    @pytest.mark.parametrize(
+        "texto",
+        [
+            "5 de noviembre de 2026",
+            "5 nov 2026",
+            "nov. 2026",
+            "Nov 5, 2026",
+            "November 5th, 2026",
+            "Noviembre del 2026",
+            "2026-11-05",
+            "fecha de publicación: 2026-11-05",
+            "05/11/2026",
+            "11/05/2026",
+            "11/2026",
+        ],
+    )
+    def test_formas_que_sustentan(self, texto):
+        assert _fecha_sustentada(date(2026, 11, 5), f"Publicado: {texto}. Promo.")
+
+    @pytest.mark.parametrize(
+        "texto",
+        [
+            "",
+            "hace 3 días",
+            "noviembre",  # sin año
+            "2026",  # sin mes
+            "5 de octubre de 2026",
+            "5 de noviembre de 2025",
+            "novedades 2026",  # empieza como el mes pero no lo es
+            "tel 3312026115",
+            "12026-11",
+        ],
+    )
+    def test_formas_que_no_sustentan(self, texto):
+        assert not _fecha_sustentada(date(2026, 11, 5), texto)
 
 
 @pytest.mark.unit
