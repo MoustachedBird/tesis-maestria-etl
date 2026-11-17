@@ -19,7 +19,8 @@ Lo que el bucle garantiza, porque el modelo por sí solo no lo garantiza:
 - **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
   los enums antes de escribir; si el modelo se sale, se le devuelve el error
   y vuelve a intentar, no se corrige por él.
-- **Presupuesto.** Topes de búsquedas, páginas y vueltas. Agotado uno, la
+- **Presupuesto.** Topes de búsquedas, páginas (una consulta a Maps cuenta
+  como página: abre un navegador) y vueltas. Agotado uno, la
   herramienta responde que se agotó y pide concluir. Si aun así no concluye,
   el veredicto es `indeterminado` con un razonamiento que lo dice: eso
   también es un dato sobre el agente.
@@ -123,6 +124,7 @@ class Verificador:
         cliente: Any,
         buscador: Buscador,
         leer_pagina: Callable[[str], str],
+        buscar_maps: Callable[[str], tuple[str, str]],
         *,
         version: str,
         max_busquedas: int,
@@ -135,6 +137,8 @@ class Verificador:
                 `.chat(mensajes, herramientas)`.
             buscador: de dónde salen los resultados web.
             leer_pagina: función `url -> texto`.
+            buscar_maps: función `consulta -> (url citable, texto)` sobre
+                Google Maps. Cada llamada gasta del tope de páginas.
             version: `AGENTE_VERSION`; va en `veredictos.agente` junto al modelo.
             max_busquedas: tope de `buscar_web` por negocio.
             max_paginas: tope de `leer_pagina` por negocio.
@@ -143,6 +147,7 @@ class Verificador:
         self.cliente = cliente
         self.buscador = buscador
         self.leer_pagina = leer_pagina
+        self.buscar_maps = buscar_maps
         self.agente = f"{cliente.modelo}/{version}"
         self.max_busquedas = max_busquedas
         self.max_paginas = max_paginas
@@ -209,6 +214,25 @@ class Verificador:
                     texto = "\n".join(r.como_texto() for r in resultados) or "(sin resultados)"
                     logger.info(f"      🔎 {consulta!r}: {len(resultados)} resultados")
                     mensajes.append(_tool(nombre, texto))
+                    continue
+                if nombre == "buscar_en_maps":
+                    if n_paginas >= self.max_paginas:
+                        mensajes.append(
+                            _tool(
+                                nombre,
+                                "PRESUPUESTO AGOTADO: no hay más lecturas. Concluye con lo que tienes.",
+                            )
+                        )
+                        continue
+                    n_paginas += 1
+                    consulta = str(args.get("consulta", "")).strip()
+                    url, texto = self.buscar_maps(consulta)
+                    if texto.startswith("ERROR"):
+                        logger.info(f"      🗺  {consulta!r} ✖ {texto[:120]}")
+                    else:
+                        _anotar(vistas, url, texto)
+                        logger.info(f"      🗺  {consulta!r} ({len(texto)} caracteres)")
+                    mensajes.append(_tool(nombre, f"URL: {url}\n{texto}"))
                     continue
                 if nombre == "leer_pagina":
                     if n_paginas >= self.max_paginas:

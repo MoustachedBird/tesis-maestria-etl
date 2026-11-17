@@ -281,13 +281,17 @@ services:
   # El modelo lo sirve el servicio `etl-ollama` de este mismo archivo, y
   # `etl-ollama-modelo` lo descarga si falta: el agente no arranca hasta que el
   # servidor responde y el modelo esta en el volumen. Ver ARRANQUE.md §11.
+  #
+  # Corre sobre la imagen `etl` y no sobre `tools` porque necesita Chrome:
+  # Google Maps y Facebook solo se leen con un navegador. El codigo se monta
+  # igual, asi que editar src/ no pide rebuild.
   agente:
     profiles: ["agente"]
     build:
       context: .
       dockerfile: Dockerfile.etl
-      target: tools
-    image: tesis-etl-tools:local
+      target: etl
+    image: tesis-etl:local
 
     depends_on:
       migrate:
@@ -308,6 +312,9 @@ services:
 
     entrypoint: ["uv", "run", "python", "-m", "src.agents.main"]
 
+    # Chrome se cae en Docker sin memoria compartida.
+    shm_size: ${AGENTE_SHM_SIZE:-2gb}
+
     volumes:
       - ./src:/app/src
       - ./data:/app/data
@@ -318,7 +325,7 @@ services:
       resources:
         limits:
           cpus: "${CPUS_AGENTE:-4}"
-          memory: ${MEM_AGENTE:-4g}
+          memory: ${MEM_AGENTE:-8g}
 
   # Metabuscador propio del agente: gratis, sin llave, sin cuota, con API
   # JSON (searxng/settings.yml). Solo arranca con el agente.

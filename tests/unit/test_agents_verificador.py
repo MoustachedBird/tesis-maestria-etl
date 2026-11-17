@@ -107,10 +107,22 @@ def leer_falso(url: str) -> str:
     return f"TITULO: pagina de {url}\nCerrado permanentemente desde marzo de 2024."
 
 
+MAPS = "https://www.google.com/maps/search/TACOS%20PACO%20Guadalajara?hl=es"
+
+
+def maps_falso(consulta: str) -> tuple[str, str]:
+    if "nada" in consulta:
+        return MAPS, f"ERROR: {MAPS} no entregó contenido legible ni con navegador (12 caracteres)."
+    return (
+        MAPS,
+        "TITULO: Tacos Paco\nCerrado permanentemente · Última reseña hace 2 meses [≈ 2026-09]",
+    )
+
+
 def verificador(cliente, buscador=None, **kw) -> Verificador:
     params = dict(version="v1", max_busquedas=8, max_paginas=6, max_vueltas=6)
     params.update(kw)
-    return Verificador(cliente, buscador or BuscadorFalso(), leer_falso, **params)
+    return Verificador(cliente, buscador or BuscadorFalso(), leer_falso, maps_falso, **params)
 
 
 CONCLUSION_CERRADO = dict(
@@ -390,6 +402,61 @@ class TestNingunaFechaInventada:
         assert not _fecha_sustentada(date(2026, 11, 5), texto)
 
 
+def conclusion_maps(fecha=None) -> dict:
+    return dict(
+        estado="cerrado",
+        confianza="alta",
+        razonamiento="La ficha de Google Maps del domicilio marca cerrado permanentemente.",
+        evidencias=[
+            {
+                "url": MAPS,
+                "extracto": "Cerrado permanentemente",
+                "fecha_publicacion": fecha,
+                "senal": "cerrado",
+            }
+        ],
+    )
+
+
+@pytest.mark.unit
+class TestGoogleMaps:
+    def test_la_url_de_maps_llega_al_modelo_y_es_citable(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="TACOS PACO Guadalajara")),
+            respuesta(llamada("concluir", **conclusion_maps())),
+        )
+        r = verificador(cliente).verificar(negocio())
+        assert r.estado == "cerrado" and r.evidencias[0].fuente == "google_maps"
+        assert r.n_paginas == 1 and r.n_busquedas == 0  # Maps gasta del tope de paginas
+        assert cliente.mensajes_tool()[0].startswith(f"URL: {MAPS}")
+
+    def test_la_fecha_relativa_anotada_sustenta_su_mes(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="TACOS PACO Guadalajara")),
+            respuesta(llamada("concluir", **conclusion_maps("2026-09"))),
+        )
+        r = verificador(cliente).verificar(negocio())
+        assert r.evidencias[0].fecha_publicacion == date(2026, 9, 1)
+
+    def test_un_maps_que_fallo_no_es_citable(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="nada")),
+            respuesta(llamada("concluir", **conclusion_maps())),
+        )
+        r = verificador(cliente, max_vueltas=2).verificar(negocio())
+        assert r.estado == "indeterminado"
+
+    def test_respeta_el_tope_de_paginas(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="a")),
+            respuesta(llamada("buscar_en_maps", consulta="b")),
+            respuesta(llamada("concluir", **conclusion_maps())),
+        )
+        r = verificador(cliente, max_paginas=1).verificar(negocio())
+        assert r.n_paginas == 1
+        assert any("PRESUPUESTO AGOTADO" in m for m in cliente.mensajes_tool())
+
+
 @pytest.mark.unit
 class TestElPresupuesto:
     def test_la_segunda_busqueda_se_niega_con_tope_en_una(self):
@@ -470,7 +537,7 @@ class TestElInsumoEsCiego:
     def test_el_prompt_exige_concluir_y_admite_indeterminado(self):
         assert "concluir" in SISTEMA and "indeterminado" in SISTEMA
         nombres = {h["function"]["name"] for h in HERRAMIENTAS}
-        assert nombres == {"buscar_web", "leer_pagina", "concluir"}
+        assert nombres == {"buscar_en_maps", "buscar_web", "leer_pagina", "concluir"}
 
 
 @pytest.mark.unit

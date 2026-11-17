@@ -17,13 +17,14 @@ from src.shared.enums import Confianza, EstadoVerificado, SenalEvidencia
 
 SISTEMA = """Eres un verificador de negocios de México. Te doy TODO lo que el Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) publicó de UN negocio, y tu trabajo es averiguar, buscando en internet, si ese negocio SIGUE ACTIVO o CERRÓ. El DENUE no reporta cierres: solo deja de listar negocios, y no sabemos por qué. Tu veredicto es independiente del DENUE.
 
-TIENES TRES HERRAMIENTAS
+TIENES CUATRO HERRAMIENTAS
+- buscar_en_maps(consulta): abre Google Maps con esa búsqueda y devuelve lo que muestra: la ficha del lugar (estado, horario, reseñas con su antigüedad) o la lista de resultados. Devuelve también la URL que debes citar.
 - buscar_web(consulta): resultados de un buscador (título, URL, extracto y, cuando el buscador la da, la fecha de publicación).
-- leer_pagina(url): el texto de una página. Si responde ERROR (no abre, pide iniciar sesión, viene vacía) NO la leíste: de esa URL solo sabes lo que mostró el buscador.
+- leer_pagina(url): el texto de una página (Facebook e Instagram se abren con un navegador, sin sesión). Si responde ERROR (no abre, pide iniciar sesión, viene vacía) NO la leíste: de esa URL solo sabes lo que mostró el buscador.
 - concluir(...): tu veredicto. ES OBLIGATORIO terminar llamándola. No respondas en texto libre.
 
 PROTOCOLO, EN ESTE ORDEN (detente cuando tengas evidencia para confianza alta):
-1. Google Maps / Google Business: busca "<nombre> <municipio>" y "<nombre> <domicilio>". Es la fuente con estado explícito ("Cerrado permanentemente", "Cerrado temporalmente", horarios vigentes) y con fecha de la última reseña.
+1. Google Maps, SIEMPRE primero y con buscar_en_maps: "<nombre> <municipio> <estado>" y, si no aparece, "<nombre> <domicilio>". Es la fuente con estado explícito ("Cerrado permanentemente", "Cerrado temporalmente", horarios vigentes) y con la antigüedad de la última reseña. Comprueba que la ficha sea de ESE domicilio. Las fechas relativas ("hace 2 meses") vienen anotadas con su mes aproximado entre corchetes: ese mes es el que puedes citar como fecha.
 2. Redes sociales (Facebook, Instagram): página del negocio, fecha de la última publicación, avisos de cierre o de cambio de domicilio.
 3. Sitio web del negocio, si el DENUE trae uno: si responde y qué dice; si no responde, es señal.
 4. Directorios y marketplaces (Sección Amarilla, Cylex, Mercado Libre, Uber Eats, Rappi, DiDi Food).
@@ -97,6 +98,23 @@ def _enum(valores: type) -> list[str]:
 
 
 HERRAMIENTAS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_en_maps",
+            "description": "Busca un negocio en Google Maps. Devuelve la URL a citar y el texto de la ficha (estado, horario, reseñas) o de la lista de resultados.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {
+                        "type": "string",
+                        "description": "Nombre del negocio y lugar, como en el buscador de Maps.",
+                    }
+                },
+                "required": ["consulta"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {

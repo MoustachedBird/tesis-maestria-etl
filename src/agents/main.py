@@ -66,7 +66,7 @@ def verificar(
 ) -> None:
     """Busca en línea cada negocio pendiente de la muestra y escribe su veredicto."""
     from src.agents.survival.sources.busqueda import BuscadorBrave, BuscadorSearxng
-    from src.agents.survival.sources.paginas import leer_pagina
+    from src.agents.survival.sources.navegador import Navegador, leer_con_respaldo
     from src.agents.survival.verificador import Verificador, resumen_muestra, verificar_muestra
     from src.meta.tracker import MetadataTracker
     from src.shared.db.session import get_engine
@@ -100,14 +100,31 @@ def verificar(
         console.print(f"[red]   ✖ el buscador {buscador.nombre} no responde: {e}[/red]")
         raise typer.Exit(code=1) from e
 
+    navegador = Navegador(
+        timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
+        espera=ajustes.AGENTE_NAVEGADOR_ESPERA_SEGUNDOS,
+    )
+    try:
+        navegador.comprobar()
+    except Exception as e:  # noqa: BLE001  (se reporta y se sale: sin Chrome no hay Maps ni redes)
+        console.print(
+            f"[red]   ✖ Chrome no arranca ({e.__class__.__name__}). El agente corre sobre la "
+            "imagen `etl`, que lo trae: `docker compose build agente`.[/red]"
+        )
+        raise typer.Exit(code=1) from e
+
     verificador = Verificador(
         cliente,
         buscador,
-        lambda url: leer_pagina(
+        lambda url: leer_con_respaldo(
             url,
+            navegador,
             ajustes.AGENTE_MAX_CARACTERES_PAGINA,
             ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
             ajustes.AGENTE_MIN_CARACTERES_PAGINA,
+        ),
+        lambda consulta: navegador.buscar_en_maps(
+            consulta, ajustes.AGENTE_MAX_CARACTERES_PAGINA, ajustes.AGENTE_MIN_CARACTERES_PAGINA
         ),
         version=ajustes.AGENTE_VERSION,
         max_busquedas=ajustes.AGENTE_MAX_BUSQUEDAS,
@@ -125,9 +142,12 @@ def verificar(
         f"[bold magenta]   {verificador.agente} · buscador {buscador.nombre} · muestra {muestra!r}: "
         f"{resumen['pendientes']}/{resumen['total']} pendientes[/bold magenta]"
     )
-    conteos = verificar_muestra(
-        engine, MetadataTracker(), verificador, muestra, limite=limite, solo_clee=clee
-    )
+    try:
+        conteos = verificar_muestra(
+            engine, MetadataTracker(), verificador, muestra, limite=limite, solo_clee=clee
+        )
+    finally:
+        navegador.cerrar()
     console.print(f"   {conteos}")
     if conteos["fallidos"]:
         raise typer.Exit(code=1)

@@ -21,6 +21,9 @@ from bs4 import BeautifulSoup
 _UA = "Mozilla/5.0 (X11; Linux x86_64) tesis-etl-agente/1.0"
 """User-Agent de las peticiones: identifica al agente sin fingir un navegador."""
 
+SIN_CONTENIDO = "no entregó contenido legible"
+"""Frase del `ERROR` de una página vacía; `navegador.leer_con_respaldo` la busca para reintentar con Chrome."""
+
 _RUIDO = ("script", "style", "noscript", "svg", "nav", "footer", "header", "form", "iframe")
 """Etiquetas que nunca llevan el contenido que importa y sí llenan el contexto."""
 
@@ -65,7 +68,7 @@ def leer_pagina(
     texto = re.sub(r"\s+", " ", sopa.get_text(" ", strip=True))
     if len(texto) < min_caracteres:
         return (
-            f"ERROR: {url} no entregó contenido legible ({len(texto)} caracteres; suele ser "
+            f"ERROR: {url} {SIN_CONTENIDO} ({len(texto)} caracteres; suele ser "
             "un muro de inicio de sesión o una página que necesita JavaScript). NO la leíste: "
             "de esta URL solo sabes lo que mostró el buscador."
         )

@@ -502,6 +502,10 @@ administra la máquina.
 son 5 min, y recargar 20 GB cuesta medio minuto). El servicio lleva
 `restart: unless-stopped`, así que vuelve solo tras un reinicio.
 
+El agente lee Google Maps y Facebook con Chrome, así que corre sobre la
+imagen `etl`. Si esa imagen no está construida (o es anterior a un cambio de
+dependencias): `docker compose build agente`.
+
 ### 11.2 La muestra
 
 ```bash
@@ -565,7 +569,7 @@ docker compose run --rm agente metricas --muestra piloto-2026-11
 La tabla de confusión por estrato (VP/FP/FN/VN sobre `cerrado_gold`), la
 tasa de indeterminados, y las dos cifras reponderadas por el tamaño real de
 cada estrato en gold: la **precisión de `cerrado`** en la población, y la
-fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v2`
+fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v3`
 se filtra un modelo; para comparar dos, se corre `verificar` dos veces con
 distinto `OLLAMA_MODEL` y `metricas` dos veces.
 

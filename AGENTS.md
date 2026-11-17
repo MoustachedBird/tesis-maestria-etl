@@ -1265,7 +1265,25 @@ muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
 |---|---|---|
 | **SearXNG** (`searxng/settings.yml`) | Metabuscador propio en compose, API JSON, gratis, sin llave | Default |
 | **Brave Search API** | Índice propio, sin la zona gris de raspar un motor (`crear_agentes.md` §11.3) | Si hay `BRAVE_API_KEY` |
-| `leer_pagina` | `requests` + BeautifulSoup, sin JavaScript, recortado a `AGENTE_MAX_CARACTERES_PAGINA`; con menos de `AGENTE_MIN_CARACTERES_PAGINA` es `ERROR` | Siempre |
+| `buscar_en_maps` | Google Maps en Chrome headless (`sources/navegador.py`): la ficha del lugar o la lista de resultados, con la URL citable | Siempre; el prompt la pone primero |
+| `leer_pagina` | `requests` + BeautifulSoup, recortado a `AGENTE_MAX_CARACTERES_PAGINA`; con menos de `AGENTE_MIN_CARACTERES_PAGINA` es `ERROR`. Facebook, Instagram y Maps van directo a Chrome; un sitio que llega vacío se reintenta con Chrome | Siempre |
+
+**El navegador no inicia sesión en ningún lado**: lee lo que la página
+muestra a un visitante anónimo, y una redirección al login es `ERROR`. Es un
+solo Chrome por corrida, que se reabre solo si una lectura lo tumba. Por él
+el servicio `agente` corre sobre la imagen `etl` (la que trae Chrome) y no
+sobre `tools`.
+
+**Las fechas relativas se anotan, y solo ahí.** Maps y Facebook dicen "hace
+2 meses"; como la página se acaba de renderizar, el código la resuelve
+contra hoy y la deja como `hace 2 meses [≈ 2026-09]`, que es lo que el
+modelo puede citar. En el extracto de un buscador no se hace: ahí es
+relativa al día en que el motor rastreó la página, que no se conoce.
+
+Leer Maps y Facebook con un navegador automatizado está fuera de lo que sus
+términos de uso permiten; se hace sin sesión, sobre páginas públicas y a
+volumen de muestra (cientos de negocios). La vía limpia para Maps sigue
+siendo Places API si se consigue llave.
 
 Un error de red o un 404 se le devuelven al modelo **como texto**, no como
 excepción: un sitio caído es información. Google Places (`business_status`)
@@ -1435,7 +1453,7 @@ etl-core/
 │       ├── prompts.py             # Prompt de sistema + definicion de herramientas
 │       ├── verificador.py         # El bucle: buscar, leer, concluir; escribe veredictos
 │       ├── metricas.py            # Veredicto vs cerrado_gold por estrato, reponderado
-│       └── sources/               # busqueda.py (SearXNG / Brave), paginas.py
+│       └── sources/               # busqueda.py (SearXNG / Brave), paginas.py, navegador.py (Chrome: Maps y redes)
 │
 ├── src/etl/
 │   ├── main.py                    # CLI (Typer): extract, sync-bronze, transform, pipeline
@@ -1529,8 +1547,9 @@ Dos imágenes desde un solo `Dockerfile.etl`:
 | `tools` | deps del proyecto + pytest/ruff | migraciones, tests, scripts, API | portable (arm64 y amd64) |
 | `etl` | lo anterior + Chrome | el pipeline (el scraping de DENUE usa Selenium) | amd64 |
 
-Chrome vive solo en `etl` porque lo usan dos archivos (`utils/browser.py`,
-`utils/denue_scraping.py`). Tenerlo en la base obligaba a que tests y
+Chrome vive solo en `etl` porque lo usan el scraping de DENUE
+(`utils/browser.py`, `utils/denue_scraping.py`) y el agente
+(`agents/survival/sources/navegador.py`), que por eso corre sobre esa imagen. Tenerlo en la base obligaba a que tests y
 migraciones cargaran un navegador de ~500 MB que no usan, y volvía la imagen
 inconstruible en arm64.
 
@@ -2272,7 +2291,7 @@ OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
-AGENTE_VERSION=v2
+AGENTE_VERSION=v3
 SEARXNG_URL=http://searxng:8080
 BRAVE_API_KEY=
 AGENTE_MAX_BUSQUEDAS=8
@@ -2281,6 +2300,8 @@ AGENTE_MAX_VUELTAS=16
 AGENTE_MAX_CARACTERES_PAGINA=6000
 AGENTE_MIN_CARACTERES_PAGINA=200
 AGENTE_TIMEOUT_HTTP_SEGUNDOS=20
+AGENTE_NAVEGADOR_ESPERA_SEGUNDOS=5
+AGENTE_SHM_SIZE=2gb
 MUESTRA_CUOTA_POR_ESTRATO=100
 MUESTRA_SEMILLA=0.42
 SEARXNG_SECRET=cambia-esto
