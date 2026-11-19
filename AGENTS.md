@@ -1148,7 +1148,10 @@ Log del stage: `data/etl_gold.log`.
 verificacion.muestras           una tirada: tamaño, semilla, estratos, filtro, reglas de gold
 verificacion.muestra_negocios   los negocios que salieron, con cerrado_gold CONGELADO
 verificacion.veredictos         activo | cerrado | indeterminado + confianza + razonamiento
-verificacion.evidencias         una fila por pieza: fuente, url, fecha, extracto, señal
+verificacion.consultas          el expediente: todo lo que trajo cada fuente, citado o no
+verificacion.informes           un informe por fuente: ¿es este negocio? ¿qué indica?
+verificacion.evidencias         las piezas citadas: fuente, url, fecha, extracto, señal
+verificacion.auditorias         el juez: estado a ciegas + dictamen sobre el veredicto
 ```
 
 - **Es un schema aparte porque no es derivable.** Un veredicto costó
@@ -1173,21 +1176,62 @@ El comando de muestreo y el agente están en `src/agents/` (N7).
 
 ## N7: El agente de supervivencia (`src/agents/survival`)
 
-El que llena `verificacion`: saca la muestra de gold, busca cada negocio en
-línea con un modelo de pesos abiertos en Ollama y escribe veredicto y
-evidencias. La arquitectura es la de `crear_agentes.md` §9 (paquete de primer
-nivel, importa solo `shared` y `meta`); el protocolo es el de
-`verificacion_cierre.md` §5.
+El que llena `verificacion`: saca la muestra de gold, verifica cada negocio en
+línea con un **equipo de agentes** sobre un modelo de pesos abiertos en
+Ollama, y un **juez** audita cada veredicto. La arquitectura es la de
+`crear_agentes.md` §9 (paquete de primer nivel, importa solo `shared` y
+`meta`); el protocolo es el de `verificacion_cierre.md` §5.
 
 ```bash
-docker compose run --rm agente muestrear --nombre piloto-2026-11            # gold -> muestras
-docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1 # 1 negocio
-docker compose run --rm agente verificar --muestra piloto-2026-11            # los pendientes
-docker compose run --rm agente metricas  --muestra piloto-2026-11            # el cruce
+docker compose run --rm agente muestrear --nombre piloto-2026-11             # gold -> muestras
+docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1  # 1 negocio (+ juez)
+docker compose run --rm agente verificar --muestra piloto-2026-11             # los pendientes
+docker compose run --rm agente auditar   --muestra piloto-2026-11             # juez sobre lo no auditado
+docker compose run --rm agente metricas  --muestra piloto-2026-11             # el cruce y el juez
 ```
 
-Tres subcomandos y no un comando global con `--no-*`: `muestrear` se corre
-una vez por muestra, `verificar` se reanuda, `metricas` solo lee.
+Cuatro subcomandos y no un comando global con `--no-*`: `muestrear` se corre
+una vez por muestra, `verificar` y `auditar` se reanudan, `metricas` solo lee.
+
+### El equipo: un especialista por fuente, un decisor, un juez
+
+```
+por cada fuente, en orden (Maps -> buscador -> redes -> sitio propio):
+    recolección base, en código          misma consulta para todos los negocios
+    especialista de la fuente (LLM)      ¿es este negocio? ¿qué indica? + citas
+                                         puede pedir AGENTE_MAX_AMPLIACIONES consultas extra
+decisor (LLM)                            integra los informes; solo cita lo que citaron
+juez (LLM, fuera del equipo)             paso 1 a ciegas sobre el expediente crudo,
+                                         paso 2 dictamen sobre el veredicto
+```
+
+| Módulo | Qué |
+|---|---|
+| `recoleccion.py` | Las fuentes (`FuenteMaps`, `FuenteWeb`, `FuenteRedes`, `FuenteSitio`): recolección base y ampliación. Una fuente nueva es una clase más |
+| `equipo.py` | `Especialista` (uno sirve para todas: cambia el prompt) y `Decisor` |
+| `juez.py` | `Juez`, `auditar_muestra` y los cargadores de lo guardado |
+| `citas.py` | Lo que hace válida una cita (pieza, extracto textual, fecha escrita) |
+| `llamada.py` | El bucle "conversa hasta una herramienta terminal válida", compartido por los tres roles |
+| `verificador.py` | `Equipo`, la persistencia y `verificar_muestra` |
+
+**Por qué la recolección base es código y no un agente.** Si cada agente
+eligiera qué fuentes mirar, un negocio se verificaría con Maps y otro no, y
+sus veredictos dejarían de ser comparables. Con la base fija, la única
+variable entre negocios es lo que la web dice de cada uno; lo que piden los
+especialistas por encima queda en `consultas.ampliada`.
+
+**Por qué el juez no ve los informes.** Relee el expediente crudo, así que
+también atrapa errores de los especialistas (un homónimo identificado como
+el negocio). Y estima **antes** de ver el veredicto: `estado_ciego =
+veredictos.estado` es el acuerdo entre dos lecturas independientes del mismo
+expediente, el número de confiabilidad que la tesis puede reportar. El
+dictamen (`sostenido` / `no_sostenido`) dice si las citas alcanzan;
+`metricas --solo-sostenidos` cuenta solo esos.
+
+**Costo.** Hasta 4 especialistas + decisor + 2 pasos del juez por negocio,
+en serie sobre una GPU: del orden de un minuto por negocio, una noche para
+400. Un especialista sin nada que leer no llama al modelo, ni el decisor si
+nadie citó nada.
 
 ### Ollama es un servicio de compose, con la GPU
 
@@ -1212,7 +1256,7 @@ silencio** — funciona, pero decenas de veces más lento.
 docker exec etl-ollama ollama ps      # columna PROCESSOR: "100% GPU"
 ```
 
-Un modelo distinto al de `OLLAMA_MODEL` (para `verificar --modelo`) se baja
+Un modelo distinto al de `OLLAMA_MODEL` (para `--modelo` o `JUEZ_MODEL`) se baja
 a mano: `docker exec etl-ollama ollama pull <tag>`. Receta completa en
 `ARRANQUE.md` §11.
 
@@ -1227,79 +1271,83 @@ los pendientes se calculan por agente: **comparar dos modelos sobre la misma
 muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
 `metricas --agente` separa los dos.
 
-### Lo que el bucle garantiza (y el modelo solo no)
+### Lo que el sistema garantiza (y el modelo solo no)
 
 - **Ciego a la hipótesis.** `insumo.py` no carga `cerrado_gold` ni
   `meses_sin_aparecer` ni `huecos`; el `Negocio` ni tiene esos atributos
-  (hay test). Recibe `ultimo_periodo` y los cortes en que apareció, que son
-  datos del DENUE.
-- **Ninguna URL inventada.** Una evidencia solo puede citar una URL que
-  salió en una búsqueda o que el modelo leyó. Si inventa una, `concluir` se
-  rechaza y el modelo vuelve a intentar con el error en la mano.
-- **Ninguna fecha inventada.** La `fecha_publicacion` de una evidencia tiene
-  que estar escrita en lo que el agente vio de esa URL: el resultado del
-  buscador (que incluye su fecha cuando el motor la da) o la página. Si no,
-  `concluir` se rechaza y la salida que se le ofrece es mandar `null`. Una
-  fecha relativa ("hace 3 días") no cuenta: el agente no sabe qué día es
-  hoy. La fecha es lo que separa `activo/alta` de `activo/baja`, así que es
-  el dato que al modelo más le conviene suponer.
+  (hay test). Ningún rol, juez incluido, la recibe.
+- **Mismas fuentes para todos.** La recolección base no la decide ningún
+  agente (ver arriba).
+- **Ninguna cita inventada.** Toda cita es `[n]` + extracto + fecha, y se
+  valida contra el texto EXACTO que el modelo vio de esa pieza
+  (`citas.py`): el extracto tiene que estar escrito ahí (se admite recortar
+  con `...`) y la fecha también. La URL de una evidencia la pone el código
+  desde la pieza, así que no hay URLs inventadas por construcción. Una
+  fecha relativa sin anotar ("hace 3 días" en un extracto de buscador) no
+  cuenta: es relativa al día en que el motor rastreó la página.
+- **Cada rol cita solo lo suyo.** Un especialista, las piezas de su fuente;
+  el decisor, las que citó algún especialista; el juez solo puede objetar
+  piezas citadas.
+- **Los directorios que copian al DENUE no prueban nada.** `mexicopymes`,
+  `municipiodata`, `pueblosamerica` e `inegi.org.mx` se clasifican como
+  `directorio_denue` y solo pueden citarse como señal `neutral`: aparecer ahí
+  dice que el INEGI lo listó, no que siga abierto.
+- **`activo/alta` exige fecha.** Al menos una evidencia `activo` fechada en o
+  después del último corte del DENUE; si no, el decisor tiene que bajar la
+  confianza. `activo` y `cerrado` exigen una evidencia con esa señal.
+- **El silencio no es cierre.** Si ningún especialista citó nada, el
+  veredicto es `indeterminado/baja` sin llamar al modelo.
 - **Una página sin contenido no es una lectura.** Menos de
-  `AGENTE_MIN_CARACTERES_PAGINA` de texto visible es un muro de login
-  (Facebook, Instagram) o un cascarón de JavaScript: se devuelve como
-  `ERROR`, igual que un 404.
-- **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
-  los enums antes de escribir (mayúsculas y espacios se normalizan, `closed`
-  no). La base tiene el mismo `CHECK` como última red.
-- **`cerrado` o `activo` exigen al menos una evidencia**; `indeterminado`
-  puede ir sin ninguna y es un resultado legítimo.
-- **Presupuesto** por negocio: `AGENTE_MAX_BUSQUEDAS`, `_PAGINAS`,
-  `_VUELTAS`. Agotado uno, la herramienta responde que se agotó y pide
-  concluir; si aun así no concluye, el veredicto es `indeterminado/baja`
-  con un razonamiento que lo dice. Eso también es dato sobre el agente.
+  `AGENTE_MIN_CARACTERES_PAGINA` de texto visible es un muro de login o un
+  cascarón de JavaScript: la pieza queda `error` y no se puede citar.
+- **Vocabulario cerrado** en estados, confianzas, señales, identificaciones
+  y dictámenes; la base tiene el mismo `CHECK` como última red.
+- **Salidas automáticas que lo dicen.** Si un rol no produce algo válido en
+  `AGENTE_MAX_INTENTOS`, su salida es automática (`informes.automatico`,
+  veredicto `indeterminado/baja`) con un texto que lo explica. Eso también
+  es dato sobre el agente.
 - **`fuente` la clasifica el código** por dominio (`clasificar_fuente`), no
   el modelo: es el eje de los `GROUP BY` del análisis.
 
 ### Fuentes
 
-| | Qué | Cuándo |
+| | Qué | Recolección base |
 |---|---|---|
-| **SearXNG** (`searxng/settings.yml`) | Metabuscador propio en compose, API JSON, gratis, sin llave | Default |
-| **Brave Search API** | Índice propio, sin la zona gris de raspar un motor (`crear_agentes.md` §11.3) | Si hay `BRAVE_API_KEY` |
-| `buscar_en_maps` | Google Maps en Chrome headless (`sources/navegador.py`): la ficha del lugar o la lista de resultados, con la URL citable | Siempre; el prompt la pone primero |
-| `leer_pagina` | `requests` + BeautifulSoup, recortado a `AGENTE_MAX_CARACTERES_PAGINA`; con menos de `AGENTE_MIN_CARACTERES_PAGINA` es `ERROR`. Facebook, Instagram y Maps van directo a Chrome; un sitio que llega vacío se reintenta con Chrome | Siempre |
+| **Maps** | Google Maps en Chrome headless (`sources/navegador.py`): la ficha o la lista de resultados | nombre + lugar; nombre + domicilio |
+| **Web** | SearXNG del compose (o Brave con `BRAVE_API_KEY`): título, URL, extracto, fecha | nombre + lugar; nombre + domicilio; teléfono; nombre + municipio + facebook |
+| **Redes** | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajo el buscador |
+| **Sitio** | `requests` + BeautifulSoup, con Chrome de respaldo si llega vacío | los primeros `AGENTE_MAX_SITIOS` que publicó el DENUE |
 
 **El navegador no inicia sesión en ningún lado**: lee lo que la página
 muestra a un visitante anónimo, y una redirección al login es `ERROR`. Es un
-solo Chrome por corrida, que se reabre solo si una lectura lo tumba. Por él
-el servicio `agente` corre sobre la imagen `etl` (la que trae Chrome) y no
-sobre `tools`.
+solo Chrome por corrida, que se reabre solo si una lectura lo tumba. Vive en
+la imagen `agente` (`Dockerfile.etl --target agente`): la base + Chrome, sin
+el código ni el CLI del ETL. Comparte con `etl` solo la etapa `navegador`.
 
 **Las fechas relativas se anotan, y solo ahí.** Maps y Facebook dicen "hace
 2 meses"; como la página se acaba de renderizar, el código la resuelve
 contra hoy y la deja como `hace 2 meses [≈ 2026-09]`, que es lo que el
-modelo puede citar. En el extracto de un buscador no se hace: ahí es
-relativa al día en que el motor rastreó la página, que no se conoce.
+modelo puede citar.
 
 Leer Maps y Facebook con un navegador automatizado está fuera de lo que sus
 términos de uso permiten; se hace sin sesión, sobre páginas públicas y a
 volumen de muestra (cientos de negocios). La vía limpia para Maps sigue
 siendo Places API si se consigue llave.
 
-Un error de red o un 404 se le devuelven al modelo **como texto**, no como
-excepción: un sitio caído es información. Google Places (`business_status`)
-y la Meta Content Library del plan quedan como fuentes futuras: una entrada
-en `sources/`, sin tocar el bucle.
-
 ### Dónde queda cada cosa
 
 | | |
 |---|---|
-| `meta.job_runs` | `job_type = 'VERIFICACION'`, un run por `muestrear` y por `verificar`; `config` con muestra, agente y presupuesto |
-| `data/agente.log` | El log del stage: cada búsqueda, cada página, cada veredicto con su costo |
-| `verificacion.*` | Lo que se cuenta (N6) |
+| `meta.job_runs` | `job_type = 'VERIFICACION'`: un run por `muestrear`, por `verificar` y por `auditar`; `config` con muestra, agente, juez y fuentes |
+| `data/agente.log` | Cada fuente con su informe, cada veredicto con su costo, cada dictamen del juez |
+| `verificacion.consultas` | El expediente: todo lo visto, citado o no, y lo que falló |
+| `verificacion.informes` | Un informe por fuente y veredicto |
+| `verificacion.auditorias` | El juez: estado a ciegas, dictamen, piezas objetadas |
+| `verificacion.*` | El resto, lo que se cuenta (N6) |
 
 Un negocio que falla por excepción se registra y se sigue con el siguiente
-(la corrida queda `PARTIAL`); si Ollama se cae, la corrida se detiene.
+(la corrida queda `PARTIAL`); si el juez falla en uno, el veredicto se
+queda y `auditar` lo retoma; si Ollama se cae, la corrida se detiene.
 
 ---
 
@@ -1442,17 +1490,22 @@ etl-core/
 │   │       ├── permanencia.py     # permanencia_radio / permanencia_h3
 │   │       ├── meta.py            # job_runs, download/process/clee tasks, lineage
 │   │       ├── gold.py            # negocios_clee_oficial: edad y veredicto de cierre
-│   │       └── verificacion.py    # muestras / muestra_negocios / veredictos / evidencias (el agente)
+│   │       └── verificacion.py    # muestras / negocios / veredictos / consultas / informes / evidencias / auditorias
 │   └── enums/                     # jobs, sections, clee, layer, sources, verificacion
 │
 ├── src/agents/                    # Agentes LLM; importa solo shared y meta (crear_agentes.md §9)
-│   ├── main.py                    # CLI: muestrear | verificar | metricas
+│   ├── main.py                    # CLI: muestrear | verificar | auditar | metricas
 │   └── survival/                  # El verificador de supervivencia (N7)
 │       ├── muestreo.py            # gold -> verificacion.muestras / muestra_negocios
-│       ├── insumo.py              # Lo que el agente recibe de un negocio (sin la hipotesis)
-│       ├── prompts.py             # Prompt de sistema + definicion de herramientas
-│       ├── verificador.py         # El bucle: buscar, leer, concluir; escribe veredictos
-│       ├── metricas.py            # Veredicto vs cerrado_gold por estrato, reponderado
+│       ├── insumo.py              # Lo que el equipo recibe de un negocio (sin la hipotesis)
+│       ├── recoleccion.py         # Las fuentes: recoleccion base fija + ampliacion
+│       ├── equipo.py              # Especialista por fuente + decisor
+│       ├── juez.py                # El auditor: a ciegas + dictamen; `auditar`
+│       ├── citas.py               # Que hace valida una cita (pieza, extracto, fecha)
+│       ├── llamada.py             # El bucle hasta una herramienta terminal valida
+│       ├── prompts.py             # Prompts de los tres roles + herramientas terminales
+│       ├── verificador.py         # Equipo + persistencia + verificar_muestra
+│       ├── metricas.py            # Veredicto vs cerrado_gold por estrato; el juez
 │       └── sources/               # busqueda.py (SearXNG / Brave), paginas.py, navegador.py (Chrome: Maps y redes)
 │
 ├── src/etl/
@@ -1511,7 +1564,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 11 revisiones, b0000 (baseline) -> b0010
+├── alembic/versions/              # 12 revisiones, b0000 (baseline) -> b0011
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -1540,18 +1593,20 @@ docker compose run --rm tools ruff check src/ tests/      # lint
 docker compose exec postgres psql -U etl_rw -d mipymes    # SQL
 ```
 
-Dos imágenes desde un solo `Dockerfile.etl`:
+Tres imágenes desde un solo `Dockerfile.etl`:
 
 | Target | Lleva | Para qué | Arquitectura |
 |---|---|---|---|
 | `tools` | deps del proyecto + pytest/ruff | migraciones, tests, scripts, API | portable (arm64 y amd64) |
-| `etl` | lo anterior + Chrome | el pipeline (el scraping de DENUE usa Selenium) | amd64 |
+| `etl` | deps + Chrome + `src/` horneado + CLI del ETL | el pipeline (el scraping de DENUE usa Selenium) | amd64 |
+| `agente` | deps + Chrome + CLI de los agentes; código montado | el agente (lee Maps y Facebook con Chrome) | amd64 |
 
-Chrome vive solo en `etl` porque lo usan el scraping de DENUE
-(`utils/browser.py`, `utils/denue_scraping.py`) y el agente
-(`agents/survival/sources/navegador.py`), que por eso corre sobre esa imagen. Tenerlo en la base obligaba a que tests y
-migraciones cargaran un navegador de ~500 MB que no usan, y volvía la imagen
-inconstruible en arm64.
+Chrome vive en una etapa propia, `navegador`, de la que salen `etl` y
+`agente`. **`agente` no sale de `etl`**: el agente no importa del ETL
+(`test_layer_boundaries.py`) y su imagen tampoco lo lleva; lo que comparten
+es el navegador, que es infraestructura. Tenerlo en la base obligaba a que
+tests y migraciones cargaran un navegador de ~500 MB que no usan, y volvía
+la imagen inconstruible en arm64.
 
 ---
 
@@ -2161,6 +2216,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0008clee_celda_h3_7` | Agrega `establecimientos.h3_cell_7` y crea `silver.clee_celda_h3_7` (la celda como criterio, no como índice) |
 | `b0009gold_cohorte_oficial` | Crea `gold.negocios_clee_oficial`: edad y veredicto de cierre de la cohorte con CLEE oficial. **Reescrita en sitio** el 2026-11-11 (tira y recrea: su contenido es derivable); la `b0010gold_sin_snapshots` que la seguía se retiró de la cadena. Una base que aplicó cualquiera de las dos necesita `alembic stamp --purge b0008clee_celda_h3_7` antes de `upgrade head` (`ARRANQUE.md` §10) |
 | `b0010verificacion_agente` | Crea el schema `verificacion` (muestras, muestra_negocios, veredictos, evidencias) para el agente que busca los negocios en línea. **No tira antes de crear**: su contenido no es derivable |
+| `b0011expediente_y_juez` | Agrega `verificacion.consultas` (el expediente), `informes` (un especialista por fuente) y `auditorias` (el juez), y `evidencias.pieza_id`. Solo aditiva, idempotente; tampoco tira nada |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2291,12 +2347,15 @@ OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
-AGENTE_VERSION=v3
+AGENTE_VERSION=v4
 SEARXNG_URL=http://searxng:8080
 BRAVE_API_KEY=
-AGENTE_MAX_BUSQUEDAS=8
-AGENTE_MAX_PAGINAS=6
-AGENTE_MAX_VUELTAS=16
+AGENTE_MAX_RESULTADOS=8
+AGENTE_MAX_REDES=2
+AGENTE_MAX_SITIOS=2
+AGENTE_MAX_AMPLIACIONES=2
+AGENTE_MAX_INTENTOS=3
+JUEZ_MODEL=
 AGENTE_MAX_CARACTERES_PAGINA=6000
 AGENTE_MIN_CARACTERES_PAGINA=200
 AGENTE_TIMEOUT_HTTP_SEGUNDOS=20

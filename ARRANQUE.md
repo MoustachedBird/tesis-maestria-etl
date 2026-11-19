@@ -502,9 +502,17 @@ administra la máquina.
 son 5 min, y recargar 20 GB cuesta medio minuto). El servicio lleva
 `restart: unless-stopped`, así que vuelve solo tras un reinicio.
 
-El agente lee Google Maps y Facebook con Chrome, así que corre sobre la
-imagen `etl`. Si esa imagen no está construida (o es anterior a un cambio de
-dependencias): `docker compose build agente`.
+El agente lee Google Maps y Facebook con Chrome, así que tiene imagen
+propia (`--target agente`: la base + Chrome, sin el ETL). Se construye una
+vez, y de nuevo solo si cambian dependencias: el código se monta.
+
+```bash
+docker compose build agente
+```
+
+Las tablas del expediente, los informes y el juez llegan con la migración
+`b0011`; `docker compose up -d migrate` la aplica (solo crea, no toca lo que
+ya hay en `verificacion`).
 
 ### 11.2 La muestra
 
@@ -523,55 +531,77 @@ reproducible: `--semilla` default `MUESTRA_SEMILLA`.
 docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1
 ```
 
-Lo primero que hace es comprobar Ollama (si falta el modelo dice el `pull`)
-y el buscador (`searxng` arranca solo con el servicio). El log por negocio
-muestra cada búsqueda, cada página leída y el veredicto con su costo:
+Lo primero que hace es comprobar Ollama (si falta el modelo dice el `pull`),
+el buscador (`searxng` arranca solo con el servicio) y Chrome. El log por
+negocio muestra cada fuente con el informe de su especialista, el veredicto
+y el dictamen del juez:
 
 ```
    [1/400] #1 14TAC0001 · 'TACOS PACO' · Guadalajara
-      🔎 'TACOS PACO Guadalajara': 8 resultados
-      📄 https://www.google.com/maps/... (3120 caracteres)
-      ✔ cerrado/alta · 2 evidencias · 3 búsquedas · 5 vueltas · 2.1 min
+      🗺  maps: 2 piezas útiles · si/cerrado · 1 citas
+      🔎 web: 14 piezas útiles · si/neutral · 1 citas
+      👥 redes: 1 piezas útiles · dudoso/neutral · 0 citas
+      🌐 sitio: 0 piezas útiles · no/neutral · 0 citas (automático)
+      ✔ cerrado/alta · 1 evidencias · 18 piezas · 0.9 min
+      ⚖  sostenido · a ciegas cerrado/alta (= cerrado) · objetadas — · 0.3 min
 ```
 
-Mira ese primer veredicto completo antes de seguir:
+Mira ese primer negocio completo antes de seguir: los informes, las
+evidencias y lo que dijo el juez.
 
 ```bash
 docker compose exec postgres psql -U etl_rw -d mipymes -c \
-"SELECT v.clee, v.estado, v.confianza, v.n_busquedas, v.duracion_s, v.razonamiento
- FROM verificacion.veredictos v ORDER BY v.verificado_en DESC LIMIT 1" -c \
-"SELECT e.fuente, e.senal, e.fecha_publicacion, e.url, left(e.extracto, 80) AS extracto
- FROM verificacion.evidencias e
- JOIN verificacion.veredictos v USING (veredicto_id)
- ORDER BY v.verificado_en DESC, e.capturada_en LIMIT 10"
+"SELECT v.estado, v.confianza, v.razonamiento, a.estado_ciego, a.dictamen, a.motivo
+ FROM verificacion.veredictos v LEFT JOIN verificacion.auditorias a USING (veredicto_id)
+ ORDER BY v.verificado_en DESC LIMIT 1" -c \
+"SELECT i.especialista, i.identificado, i.senal, i.automatico, i.resumen
+ FROM verificacion.informes i
+ WHERE i.veredicto_id = (SELECT veredicto_id FROM verificacion.veredictos
+                         ORDER BY verificado_en DESC LIMIT 1)" -c \
+"SELECT c.orden, c.recolector, c.fuente, c.estado, e.senal, e.fecha_publicacion,
+        left(e.extracto, 80) AS extracto
+ FROM verificacion.evidencias e JOIN verificacion.consultas c USING (pieza_id)
+ WHERE e.veredicto_id = (SELECT veredicto_id FROM verificacion.veredictos
+                         ORDER BY verificado_en DESC LIMIT 1)"
 ```
 
-Si el razonamiento cita fuentes que no están en las evidencias, o el estado
-no cuadra con lo que las evidencias dicen, se ajusta el prompt
-(`src/agents/survival/prompts.py`) y sube `AGENTE_VERSION`: los veredictos
-viejos quedan con la versión vieja. Luego diez, y los 400 en segundo plano:
+Si un especialista identifica a un homónimo, o el juez objeta algo que sí
+estaba bien, se ajusta el prompt (`src/agents/survival/prompts.py`) y sube
+`AGENTE_VERSION`: los veredictos viejos quedan con la versión vieja. Luego
+diez, y los 400 en segundo plano:
 
 ```bash
 docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 10
 nohup docker compose run --rm agente verificar --muestra piloto-2026-11 > agente.log 2>&1 &
+sleep 10
 tail -f agente.log
 ```
 
-Se reanuda solo: los pendientes son los que ESTE agente (`modelo/version`)
-no ha verificado. Con 400 negocios a ~2 min cada uno son ~13 horas.
+Se reanuda solo: los pendientes son los que ESTE equipo (`modelo/version`)
+no ha verificado. Del orden de un minuto por negocio: una noche para 400.
+
+Si el juez falló en algunos negocios, o se quiere otro modelo como juez:
+
+```bash
+docker compose run --rm agente auditar --muestra piloto-2026-11
+docker compose run --rm agente auditar --muestra piloto-2026-11 --modelo gpt-oss:20b
+```
 
 ### 11.4 Las métricas
 
 ```bash
 docker compose run --rm agente metricas --muestra piloto-2026-11
+docker compose run --rm agente metricas --muestra piloto-2026-11 --solo-sostenidos
 ```
 
 La tabla de confusión por estrato (VP/FP/FN/VN sobre `cerrado_gold`), la
 tasa de indeterminados, y las dos cifras reponderadas por el tamaño real de
 cada estrato en gold: la **precisión de `cerrado`** en la población, y la
-fracción de `activos` del DENUE que ya cerraron. Con `--agente qwen3:32b/v3`
-se filtra un modelo; para comparar dos, se corre `verificar` dos veces con
-distinto `OLLAMA_MODEL` y `metricas` dos veces.
+fracción de `activos` del DENUE que ya cerraron. Debajo, el juez por
+estrato: cuántos veredictos sostuvo y en cuántos llegó a ciegas al mismo
+estado. `--solo-sostenidos` recalcula la tabla con los veredictos que el
+juez sostuvo. Con `--agente qwen3:32b/v4` se filtra un modelo; para comparar
+dos, se corre `verificar` dos veces con distinto `OLLAMA_MODEL`.
 
 ## Comandos sueltos
 

@@ -21,13 +21,18 @@ cohorte mientras exista un veredicto, que es justo lo contrario de lo que se
 quiere. El join es lógico, por `clee`, y lo que la muestra necesita de la
 fila de `gold` lo copia al momento de muestrear.
 
-Cuatro tablas, del diseño al detalle:
+Seis tablas, del diseño al detalle:
 
     muestras            una tirada: cuántos, con qué semilla, bajo qué reglas
     muestra_negocios    los negocios que salieron, con la HIPÓTESIS congelada
     veredictos          lo que el agente concluyó de cada uno, y por qué
-    evidencias          cada pieza en que se apoyó, con su URL y hacia dónde
-                        apunta
+    consultas           el EXPEDIENTE: todo lo que se trajo de cada fuente
+                        para ese veredicto, citado o no
+    informes            lo que el especialista de cada fuente concluyó de ella
+    evidencias          las piezas del expediente en que se apoyó, con el
+                        extracto y hacia dónde apunta
+    auditorias          lo que el juez dijo del veredicto: su propio estado,
+                        a ciegas, y si las citas lo sostienen
 
 **La hipótesis se congela en `muestra_negocios`**, y no contradice
 `b0007`/`b0010` ("las tablas derivadas no guardan snapshots"): aquí el valor
@@ -58,7 +63,16 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.shared.db.base import Base
-from src.shared.enums import Confianza, EstadoVerificado, Layer, SenalEvidencia
+from src.shared.enums import (
+    Confianza,
+    Dictamen,
+    EstadoConsulta,
+    EstadoVerificado,
+    Identificacion,
+    Layer,
+    Recolector,
+    SenalEvidencia,
+)
 
 SCHEMA = Layer.VERIFICACION.value
 """Schema propio: lo escribe el agente, lo lee el análisis y el API."""
@@ -276,12 +290,150 @@ class Veredicto(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     n_busquedas: Mapped[int | None] = mapped_column(
-        Integer, comment="Cuantas consultas hizo antes de concluir: el costo del veredicto"
+        Integer,
+        comment=(
+            "Cuantas consultas costo el veredicto (busquedas, fichas de Maps y paginas "
+            "leidas): el costo del veredicto"
+        ),
     )
     duracion_s: Mapped[float | None] = mapped_column(Double, comment="Segundos que tardo")
 
     def __repr__(self) -> str:
         return f"<Veredicto({self.clee}, {self.estado}, {self.confianza})>"
+
+
+class Consulta(Base):
+    """Una pieza del expediente: lo que UNA consulta del recolector devolvió.
+
+    El expediente es todo lo que el modelo tuvo a la vista al decidir, y se
+    guarda completo --no solo lo que citó-- por dos razones: el juez audita
+    contra él, y sin él no se puede responder "¿Maps tenía ficha y el modelo
+    la ignoró?". Las consultas que fallaron también son filas (`estado`):
+    medir la cobertura de cada fuente es parte del resultado.
+
+    `orden` es el número `[n]` con que el modelo vio la pieza y con el que la
+    cita; `contenido` es el texto exacto que se le dio, que es contra lo que
+    se comprueba que un extracto citado o una fecha estén escritos ahí.
+    """
+
+    __tablename__ = "consultas"
+    __table_args__ = (
+        UniqueConstraint("veredicto_id", "orden"),
+        CheckConstraint(f"recolector IN ({_en(Recolector)})", name="recolector"),
+        CheckConstraint(f"estado IN ({_en(EstadoConsulta)})", name="estado"),
+        Index("ix_consultas_fuente", "fuente"),
+        {"schema": SCHEMA},
+    )
+
+    pieza_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    veredicto_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(f"{SCHEMA}.veredictos.veredicto_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    orden: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="El [n] con que el modelo vio y cita la pieza"
+    )
+    recolector: Mapped[str] = mapped_column(
+        String(10), nullable=False, comment="maps | web | redes | sitio: que paso la trajo"
+    )
+    fuente: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        comment="Tipo de fuente por dominio (clasificar_fuente); 'ninguna' si no hay URL",
+    )
+    consulta: Mapped[str | None] = mapped_column(
+        Text, comment="Lo que se busco (Maps, buscador); NULL en una lectura de pagina"
+    )
+    url: Mapped[str | None] = mapped_column(Text, comment="La URL de la pieza; NULL si no hubo")
+    titulo: Mapped[str | None] = mapped_column(Text)
+    fecha_publicacion: Mapped[date | None] = mapped_column(
+        Date, comment="La fecha que reporto el buscador para el resultado, si la dio"
+    )
+    contenido: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="El texto exacto que vio el modelo: extracto, ficha, pagina o el ERROR",
+    )
+    estado: Mapped[str] = mapped_column(
+        String(15), nullable=False, comment="ok | sin_resultados | error"
+    )
+    ampliada: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+        comment=(
+            "TRUE si la pidio el especialista de la fuente (una consulta extra); FALSE si "
+            "es de la recoleccion base, que es igual para todos los negocios"
+        ),
+    )
+    capturada_en: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<Consulta([{self.orden}] {self.recolector}/{self.fuente}, {self.estado})>"
+
+
+class Informe(Base):
+    """Lo que el especialista de UNA fuente concluyó de ella.
+
+    El equipo tiene un especialista por fuente (Maps, buscador, redes, sitio
+    propio): cada uno lee solo lo de su fuente y responde dos preguntas
+    separadas --¿es este negocio? y ¿qué indica?--, con las piezas que lo
+    sostienen. El decisor integra estos informes. Guardarlos permite medir
+    qué fuente aporta veredictos y en cuáles el especialista no identificó
+    al negocio.
+    """
+
+    __tablename__ = "informes"
+    __table_args__ = (
+        UniqueConstraint("veredicto_id", "especialista"),
+        CheckConstraint(f"especialista IN ({_en(Recolector)})", name="especialista"),
+        CheckConstraint(f"identificado IN ({_en(Identificacion)})", name="identificado"),
+        CheckConstraint(f"senal IN ({_en(SenalEvidencia)})", name="senal_informe"),
+        {"schema": SCHEMA},
+    )
+
+    informe_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    veredicto_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(f"{SCHEMA}.veredictos.veredicto_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    especialista: Mapped[str] = mapped_column(
+        String(10), nullable=False, comment="La fuente: maps | web | redes | sitio"
+    )
+    identificado: Mapped[str] = mapped_column(
+        String(10), nullable=False, comment="si | no | dudoso: si las piezas son de ESTE negocio"
+    )
+    senal: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+        comment="activo | cerrado | neutral: lo que la fuente indica por si sola",
+    )
+    fecha_mas_reciente: Mapped[date | None] = mapped_column(
+        Date, comment="La fecha mas reciente entre sus citas, si alguna la trae"
+    )
+    resumen: Mapped[str] = mapped_column(Text, nullable=False)
+    citas: Mapped[list] = mapped_column(
+        JSONB,
+        nullable=False,
+        comment="[{pieza, extracto, fecha_publicacion, senal}]: lo que sostiene el informe",
+    )
+    automatico: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+        comment=(
+            "TRUE si no lo escribio el modelo: la fuente no devolvio nada citable, o el "
+            "especialista no produjo un informe valido"
+        ),
+    )
+    duracion_s: Mapped[float | None] = mapped_column(Double)
+
+    def __repr__(self) -> str:
+        return f"<Informe({self.especialista}, {self.identificado}, {self.senal})>"
 
 
 class Evidencia(Base):
@@ -320,6 +472,14 @@ class Evidencia(Base):
             "crecen; el analisis las agrupa por este valor"
         ),
     )
+    pieza_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey(f"{SCHEMA}.consultas.pieza_id", ondelete="CASCADE"),
+        comment=(
+            "La pieza del expediente que se cita. NULL en los veredictos anteriores al "
+            "expediente (v1-v3), que buscaban con herramientas y no guardaban lo visto"
+        ),
+    )
     url: Mapped[str | None] = mapped_column(Text, comment="Donde se vio; NULL si no es citable")
     titulo: Mapped[str | None] = mapped_column(Text, comment="Titulo de la pagina o de la ficha")
     fecha_publicacion: Mapped[date | None] = mapped_column(
@@ -345,3 +505,61 @@ class Evidencia(Base):
 
     def __repr__(self) -> str:
         return f"<Evidencia({self.fuente}, {self.senal})>"
+
+
+class Auditoria(Base):
+    """Lo que el juez dijo de UN veredicto: su estado a ciegas y si las citas lo sostienen.
+
+    El juez es otra llamada al modelo, sin herramientas, que ve el mismo
+    negocio y el mismo expediente que el decisor --pero no su razonamiento--
+    y responde en dos pasos:
+
+    1. **A ciegas** (`estado_ciego`): qué concluiría él, sin saber qué
+       concluyó el decisor. `estado_ciego = veredictos.estado` es el acuerdo
+       entre dos lecturas independientes del mismo expediente.
+    2. **El dictamen**: ya viendo el estado y las citas del decisor, si esas
+       piezas dicen lo que se les atribuye y alcanzan para esa confianza.
+
+    Una auditoría por veredicto y juez: con otro modelo como juez es otra
+    fila, y eso es lo que vuelve reanudable `auditar`.
+    """
+
+    __tablename__ = "auditorias"
+    __table_args__ = (
+        UniqueConstraint("veredicto_id", "juez"),
+        CheckConstraint(f"estado_ciego IN ({_en(EstadoVerificado)})", name="estado_ciego"),
+        CheckConstraint(f"confianza_ciega IN ({_en(Confianza)})", name="confianza_ciega"),
+        CheckConstraint(f"dictamen IN ({_en(Dictamen)})", name="dictamen"),
+        {"schema": SCHEMA},
+    )
+
+    auditoria_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    veredicto_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(f"{SCHEMA}.veredictos.veredicto_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    juez: Mapped[str] = mapped_column(
+        String(100), nullable=False, comment="Modelo y version del juez (p. ej. 'qwen3:32b/v4')"
+    )
+    estado_ciego: Mapped[str] = mapped_column(
+        String(15), nullable=False, comment="Lo que el juez concluyo SIN ver el veredicto"
+    )
+    confianza_ciega: Mapped[str] = mapped_column(String(5), nullable=False)
+    razonamiento_ciego: Mapped[str] = mapped_column(Text, nullable=False)
+    dictamen: Mapped[str] = mapped_column(
+        String(15),
+        nullable=False,
+        comment="sostenido | no_sostenido: si las citas del decisor sostienen su estado y confianza",
+    )
+    motivo: Mapped[str] = mapped_column(Text, nullable=False, comment="Por que, en prosa")
+    piezas_objetadas: Mapped[list[int] | None] = mapped_column(
+        ARRAY(Integer), comment="Los [n] citados que el juez rechaza; vacio si ninguno"
+    )
+    auditado_en: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    duracion_s: Mapped[float | None] = mapped_column(Double, comment="Segundos que tardo")
+
+    def __repr__(self) -> str:
+        return f"<Auditoria({self.veredicto_id}, {self.dictamen})>"

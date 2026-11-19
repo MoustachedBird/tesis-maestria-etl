@@ -1,38 +1,36 @@
-"""El bucle del agente: un negocio entra, un veredicto con evidencias sale.
+"""La verificación de un negocio de punta a punta, y de una muestra entera.
 
-Es un bucle propio de ~150 líneas y no un framework, como manda
-`crear_agentes.md` §9.5 para arrancar: tres herramientas no justifican una
-dependencia, y así cada vuelta queda legible en el log. Si el bucle se
-vuelve el cuello, se cambia este módulo y nada más.
+Por cada negocio, en este orden:
 
-Lo que el bucle garantiza, porque el modelo por sí solo no lo garantiza:
+    para cada fuente (Maps, buscador, redes, sitio propio):
+        recolección base en código  ->  piezas del expediente
+        especialista de la fuente   ->  informe (puede ampliar su fuente)
+    decisor                         ->  veredicto con evidencias
+    se guarda todo                  ->  veredictos, consultas, informes, evidencias
+    juez                            ->  auditoría (a ciegas + dictamen)
+
+El orden de las fuentes importa: el especialista de redes abre las páginas
+de Facebook que encontró el buscador, así que va después.
+
+Lo que el sistema garantiza, porque el modelo por sí solo no lo garantiza:
 
 - **Ciego a la hipótesis.** `insumo.py` no carga `cerrado_gold`; aquí no se
   toca. El veredicto se compara después, en `metricas.py`.
-- **Ninguna URL inventada.** Una evidencia solo puede citar una URL que
-  apareció en una búsqueda o que el modelo leyó. Es el modo de fallo más
-  barato de un LLM y el que más daño haría a la auditoría.
-- **Ninguna fecha inventada.** La `fecha_publicacion` de una evidencia tiene
-  que estar escrita en lo que el agente vio de esa URL (el resultado del
-  buscador o la página). La fecha es lo que separa `activo/alta` de
-  `activo/baja`, así que es el dato que al modelo más le conviene suponer.
-- **Vocabulario cerrado.** `estado`, `confianza` y `senal` se validan contra
-  los enums antes de escribir; si el modelo se sale, se le devuelve el error
-  y vuelve a intentar, no se corrige por él.
-- **Presupuesto.** Topes de búsquedas, páginas (una consulta a Maps cuenta
-  como página: abre un navegador) y vueltas. Agotado uno, la
-  herramienta responde que se agotó y pide concluir. Si aun así no concluye,
-  el veredicto es `indeterminado` con un razonamiento que lo dice: eso
-  también es un dato sobre el agente.
+- **Mismas fuentes para todos.** La recolección base no la decide ningún
+  agente; lo que pidan los especialistas queda marcado `ampliada`.
+- **Ninguna cita inventada.** Toda cita apunta a una pieza del expediente,
+  su extracto está escrito ahí y su fecha también (`citas.py`). La URL de
+  una evidencia la pone el código desde la pieza, no el modelo.
+- **Vocabulario cerrado.** Estados, confianzas, señales y dictámenes se
+  validan contra los enums antes de escribir; la base tiene el mismo CHECK.
+- **Todo lo visto se guarda.** El expediente completo va a
+  `verificacion.consultas`, citado o no: es contra lo que audita el juez.
 """
 
 from __future__ import annotations
 
-import json
-import re
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -42,18 +40,14 @@ from sqlalchemy import insert, text
 from sqlalchemy.engine import Connection, Engine
 
 from src.agents.survival import insumo
-from src.agents.survival.prompts import HERRAMIENTAS, SISTEMA, formatear_insumo
-from src.agents.survival.sources.busqueda import Buscador, clasificar_fuente
+from src.agents.survival.citas import Cita
+from src.agents.survival.equipo import Decisor, Especialista, Informe
+from src.agents.survival.juez import Juez, auditar_veredicto
+from src.agents.survival.recoleccion import Fuente, Pieza
 from src.meta.tracker import MetadataTracker
-from src.shared.db.models.verificacion import Evidencia, Veredicto
-from src.shared.enums import (
-    Confianza,
-    EstadoVerificado,
-    JobStatus,
-    SenalEvidencia,
-    TaskStatus,
-    TriggerType,
-)
+from src.shared.db.models.verificacion import Consulta, Evidencia, Veredicto
+from src.shared.db.models.verificacion import Informe as InformeFila
+from src.shared.enums import Dictamen, EstadoVerificado, JobStatus, TaskStatus, TriggerType
 from src.shared.llm import OllamaNoDisponible
 from src.shared.logging import get_stage_logger
 
@@ -62,45 +56,13 @@ logger = get_stage_logger(__name__, Path("./data/agente.log"))
 JOB_NAME_VERIFICAR = "agente_supervivencia_verificar"
 """Nombre de la corrida de verificación en `meta.job_runs`."""
 
-_MIN_RAZONAMIENTO = 20
-"""Caracteres mínimos del razonamiento: menos no es un porqué."""
-
-_MESES = {
-    1: "ene(?:ro)?|jan(?:uary)?",
-    2: "feb(?:rero|ruary)?",
-    3: "mar(?:zo|ch)?",
-    4: "abr(?:il)?|apr(?:il)?",
-    5: "may(?:o)?",
-    6: "jun(?:io|e)?",
-    7: "jul(?:io|y)?",
-    8: "ago(?:sto)?|aug(?:ust)?",
-    9: "sep(?:t|tiembre|tember)?|set(?:iembre)?",
-    10: "oct(?:ubre|ober)?",
-    11: "nov(?:iembre|ember)?",
-    12: "dic(?:iembre)?|dec(?:ember)?",
-}
-"""El nombre de cada mes como regex: completo o abreviado, en español y en inglés.
-
-Va el nombre entero y no un prefijo para que "novedades 2026" o "martes
-2024" no pasen por noviembre o marzo (`_fecha_sustentada`).
-"""
-
-
-@dataclass
-class EvidenciaDecidida:
-    """Una pieza que el modelo citó, ya validada."""
-
-    url: str
-    extracto: str
-    senal: str
-    fuente: str
-    titulo: str | None = None
-    fecha_publicacion: date | None = None
+_ICONOS = {"maps": "🗺 ", "web": "🔎", "redes": "👥", "sitio": "🌐"}
+"""Un ícono por fuente en el log, para leerlo de un vistazo."""
 
 
 @dataclass
 class Resultado:
-    """Lo que sale del bucle para un negocio: el veredicto y su costo."""
+    """Lo que sale del equipo para un negocio: el veredicto, todo lo visto y su costo."""
 
     muestra_id: str
     clee: str
@@ -109,293 +71,72 @@ class Resultado:
     razonamiento: str
     agente: str
     fecha_cierre_estimada: date | None = None
-    evidencias: list[EvidenciaDecidida] = field(default_factory=list)
-    n_busquedas: int = 0
-    n_paginas: int = 0
-    vueltas: int = 0
+    evidencias: list[Cita] = field(default_factory=list)
+    expediente: list[Pieza] = field(default_factory=list)
+    informes: list[Informe] = field(default_factory=list)
     duracion_s: float = 0.0
 
+    @property
+    def n_consultas(self) -> int:
+        """Cuántas consultas costó: búsquedas, fichas de Maps y páginas leídas."""
+        return len({(p.recolector, p.consulta or p.url) for p in self.expediente})
 
-class Verificador:
-    """El agente sobre un modelo y unas fuentes; `verificar()` por negocio."""
+
+class Equipo:
+    """El verificador: las fuentes, un especialista por fuente y el decisor."""
 
     def __init__(
         self,
         cliente: Any,
-        buscador: Buscador,
-        leer_pagina: Callable[[str], str],
-        buscar_maps: Callable[[str], tuple[str, str]],
+        fuentes: list[Fuente],
         *,
         version: str,
-        max_busquedas: int,
-        max_paginas: int,
-        max_vueltas: int,
+        max_ampliaciones: int,
+        max_intentos: int,
     ):
         """
         Args:
-            cliente: `OllamaCliente` o cualquier objeto con `.modelo` y
-                `.chat(mensajes, herramientas)`.
-            buscador: de dónde salen los resultados web.
-            leer_pagina: función `url -> texto`.
-            buscar_maps: función `consulta -> (url citable, texto)` sobre
-                Google Maps. Cada llamada gasta del tope de páginas.
+            cliente: `OllamaCliente` o cualquier objeto con `.modelo` y `.chat(...)`.
+            fuentes: en el orden en que se consultan (redes después de web).
             version: `AGENTE_VERSION`; va en `veredictos.agente` junto al modelo.
-            max_busquedas: tope de `buscar_web` por negocio.
-            max_paginas: tope de `leer_pagina` por negocio.
-            max_vueltas: tope de llamadas al modelo por negocio.
+            max_ampliaciones: consultas extra por especialista.
+            max_intentos: vueltas por rol para producir una salida válida.
         """
-        self.cliente = cliente
-        self.buscador = buscador
-        self.leer_pagina = leer_pagina
-        self.buscar_maps = buscar_maps
+        self.fuentes = fuentes
         self.agente = f"{cliente.modelo}/{version}"
-        self.max_busquedas = max_busquedas
-        self.max_paginas = max_paginas
-        self.max_vueltas = max_vueltas
+        self.especialista = Especialista(
+            cliente, max_ampliaciones=max_ampliaciones, max_intentos=max_intentos
+        )
+        self.decisor = Decisor(cliente, max_intentos=max_intentos)
 
-    # ----- el bucle -----
-
-    def verificar(self, negocio: insumo.Negocio) -> Resultado:
-        """Busca el negocio en línea hasta que el modelo concluye o se agota el presupuesto."""
+    def verificar(self, n: insumo.Negocio) -> Resultado:
+        """Recolecta, informa por fuente y decide."""
         inicio = time.monotonic()
-        mensajes: list[dict] = [
-            {"role": "system", "content": SISTEMA},
-            {"role": "user", "content": formatear_insumo(negocio)},
-        ]
-        # URL normalizada -> todo el texto que el agente vio de ella. Las llaves
-        # son las URLs citables; el texto es contra lo que se comprueba una fecha.
-        vistas: dict[str, str] = {}
-        n_busquedas = n_paginas = 0
-
-        for vuelta in range(1, self.max_vueltas + 1):
-            respuesta = self.cliente.chat(mensajes, HERRAMIENTAS)
-            mensajes.append({k: v for k, v in respuesta.items() if not k.startswith("_")})
-            llamadas = respuesta.get("tool_calls") or []
-            if not llamadas:
-                # Respondio en prosa: el protocolo exige terminar por `concluir`.
-                mensajes.append(
-                    {
-                        "role": "user",
-                        "content": "Responde únicamente llamando a la herramienta `concluir`.",
-                    }
-                )
-                continue
-
-            for llamada in llamadas:
-                nombre, args = _desempacar(llamada)
-                if nombre == "concluir":
-                    conclusion, errores = self._validar_conclusion(args, vistas)
-                    if errores:
-                        mensajes.append(_tool("concluir", "RECHAZADO:\n- " + "\n- ".join(errores)))
-                        continue
-                    return self._resultado(
-                        negocio, conclusion, n_busquedas, n_paginas, vuelta, inicio
-                    )
-                if nombre == "buscar_web":
-                    if n_busquedas >= self.max_busquedas:
-                        mensajes.append(
-                            _tool(
-                                nombre,
-                                "PRESUPUESTO AGOTADO: no hay más búsquedas. Concluye con lo que tienes.",
-                            )
-                        )
-                        continue
-                    n_busquedas += 1
-                    consulta = str(args.get("consulta", "")).strip()
-                    try:
-                        resultados = self.buscador.buscar(consulta)
-                    except Exception as e:  # noqa: BLE001  (el buscador falla, el veredicto sigue)
-                        mensajes.append(
-                            _tool(nombre, f"ERROR del buscador: {e.__class__.__name__}: {e}")
-                        )
-                        continue
-                    for r in resultados:
-                        _anotar(vistas, r.url, r.como_texto())
-                    texto = "\n".join(r.como_texto() for r in resultados) or "(sin resultados)"
-                    logger.info(f"      🔎 {consulta!r}: {len(resultados)} resultados")
-                    mensajes.append(_tool(nombre, texto))
-                    continue
-                if nombre == "buscar_en_maps":
-                    if n_paginas >= self.max_paginas:
-                        mensajes.append(
-                            _tool(
-                                nombre,
-                                "PRESUPUESTO AGOTADO: no hay más lecturas. Concluye con lo que tienes.",
-                            )
-                        )
-                        continue
-                    n_paginas += 1
-                    consulta = str(args.get("consulta", "")).strip()
-                    url, texto = self.buscar_maps(consulta)
-                    if texto.startswith("ERROR"):
-                        logger.info(f"      🗺  {consulta!r} ✖ {texto[:120]}")
-                    else:
-                        _anotar(vistas, url, texto)
-                        logger.info(f"      🗺  {consulta!r} ({len(texto)} caracteres)")
-                    mensajes.append(_tool(nombre, f"URL: {url}\n{texto}"))
-                    continue
-                if nombre == "leer_pagina":
-                    if n_paginas >= self.max_paginas:
-                        mensajes.append(
-                            _tool(
-                                nombre,
-                                "PRESUPUESTO AGOTADO: no hay más lecturas. Concluye con lo que tienes.",
-                            )
-                        )
-                        continue
-                    n_paginas += 1
-                    url = str(args.get("url", "")).strip()
-                    texto = self.leer_pagina(url)
-                    if texto.startswith("ERROR"):
-                        logger.info(f"      📄 {url} ✖ {texto[:120]}")
-                    else:
-                        _anotar(vistas, url, texto)
-                        logger.info(f"      📄 {url} ({len(texto)} caracteres)")
-                    mensajes.append(_tool(nombre, texto))
-                    continue
-                mensajes.append(_tool(nombre, f"ERROR: no existe la herramienta {nombre!r}"))
-
-        # Se acabaron las vueltas sin concluir: una ultima oportunidad, y si
-        # no, el veredicto dice que el agente no concluyo. Eso tambien es dato.
-        mensajes.append(
-            {
-                "role": "user",
-                "content": "Agotaste las vueltas. Llama a `concluir` AHORA con lo que tengas.",
-            }
-        )
-        respuesta = self.cliente.chat(mensajes, HERRAMIENTAS)
-        for llamada in respuesta.get("tool_calls") or []:
-            nombre, args = _desempacar(llamada)
-            if nombre == "concluir":
-                conclusion, errores = self._validar_conclusion(args, vistas)
-                if not errores:
-                    return self._resultado(
-                        negocio, conclusion, n_busquedas, n_paginas, self.max_vueltas + 1, inicio
-                    )
-        return Resultado(
-            muestra_id=negocio.muestra_id,
-            clee=negocio.clee,
-            estado=EstadoVerificado.INDETERMINADO.value,
-            confianza=Confianza.BAJA.value,
-            razonamiento=(
-                f"El agente no concluyó dentro del presupuesto ({self.max_vueltas} vueltas, "
-                f"{n_busquedas} búsquedas, {n_paginas} páginas). Se registra como indeterminado."
-            ),
-            agente=self.agente,
-            n_busquedas=n_busquedas,
-            n_paginas=n_paginas,
-            vueltas=self.max_vueltas + 1,
-            duracion_s=time.monotonic() - inicio,
-        )
-
-    # ----- validacion -----
-
-    def _validar_conclusion(self, args: dict, vistas: dict[str, str]) -> tuple[dict, list[str]]:
-        """Revisa la conclusión del modelo contra el vocabulario y lo que vio.
-
-        Args:
-            args: los argumentos de `concluir`, como los mandó el modelo.
-            vistas: URL normalizada -> texto visto de esa URL.
-
-        Returns:
-            tuple[dict, list[str]]: la conclusión normalizada y los errores;
-            con errores, la conclusión no vale.
-        """
-        errores: list[str] = []
-        estado = str(args.get("estado", "")).strip().lower()
-        confianza = str(args.get("confianza", "")).strip().lower()
-        razonamiento = str(args.get("razonamiento", "")).strip()
-        if estado not in {e.value for e in EstadoVerificado}:
-            errores.append(f"estado {estado!r} no es uno de {[e.value for e in EstadoVerificado]}")
-        if confianza not in {c.value for c in Confianza}:
-            errores.append(f"confianza {confianza!r} no es una de {[c.value for c in Confianza]}")
-        if len(razonamiento) < _MIN_RAZONAMIENTO:
-            errores.append("razonamiento vacío o demasiado corto: di por qué, con fuentes y fechas")
-
-        fecha_cierre, error_fecha = _fecha(args.get("fecha_cierre_estimada"))
-        if error_fecha:
-            errores.append(f"fecha_cierre_estimada: {error_fecha}")
-
-        evidencias: list[EvidenciaDecidida] = []
-        crudas = args.get("evidencias") or []
-        if not isinstance(crudas, list):
-            errores.append("evidencias tiene que ser una lista")
-            crudas = []
-        for i, ev in enumerate(crudas, start=1):
-            if not isinstance(ev, dict):
-                errores.append(f"evidencia {i}: no es un objeto")
-                continue
-            url = str(ev.get("url", "")).strip()
-            extracto = str(ev.get("extracto", "")).strip()
-            senal = str(ev.get("senal", "")).strip().lower()
-            if _normalizar(url) not in vistas:
-                errores.append(
-                    f"evidencia {i}: la URL {url!r} no apareció en ninguna búsqueda ni la leíste; "
-                    "cita solo URLs que viste"
-                )
-            if not extracto:
-                errores.append(f"evidencia {i}: falta el extracto citado")
-            if senal not in {s.value for s in SenalEvidencia}:
-                errores.append(
-                    f"evidencia {i}: senal {senal!r} no es una de {[s.value for s in SenalEvidencia]}"
-                )
-            fecha_pub, error_pub = _fecha(ev.get("fecha_publicacion"))
-            if error_pub:
-                errores.append(f"evidencia {i}: fecha_publicacion: {error_pub}")
-            elif fecha_pub and not _fecha_sustentada(fecha_pub, vistas.get(_normalizar(url), "")):
-                errores.append(
-                    f"evidencia {i}: la fecha_publicacion {ev.get('fecha_publicacion')!r} no está "
-                    "escrita en lo que viste de esa URL (ni en el resultado del buscador ni en "
-                    "la página). Si la pieza no trae fecha, manda null; no la deduzcas"
-                )
-            evidencias.append(
-                EvidenciaDecidida(
-                    url=url,
-                    extracto=extracto,
-                    senal=senal,
-                    fuente=clasificar_fuente(url),
-                    titulo=(str(ev["titulo"]).strip() or None) if ev.get("titulo") else None,
-                    fecha_publicacion=fecha_pub,
-                )
+        expediente: list[Pieza] = []
+        informes: list[Informe] = []
+        for fuente in self.fuentes:
+            expediente.extend(fuente.recolectar(n, expediente))
+            informe = self.especialista.informar(n, fuente, expediente)
+            informes.append(informe)
+            utiles = sum(p.citable for p in expediente if p.recolector == fuente.recolector)
+            marca = " (automático)" if informe.automatico else ""
+            logger.info(
+                f"      {_ICONOS.get(fuente.recolector, '·')} {fuente.recolector}: "
+                f"{utiles} piezas útiles · {informe.identificado}/{informe.senal} · "
+                f"{len(informe.citas)} citas{marca}"
             )
-        if (
-            estado in (EstadoVerificado.ACTIVO.value, EstadoVerificado.CERRADO.value)
-            and not evidencias
-        ):
-            errores.append(f"un veredicto {estado!r} necesita al menos una evidencia con URL vista")
-
-        return (
-            {
-                "estado": estado,
-                "confianza": confianza,
-                "razonamiento": razonamiento,
-                "fecha_cierre_estimada": fecha_cierre,
-                "evidencias": evidencias,
-            },
-            errores,
-        )
-
-    def _resultado(
-        self,
-        negocio: insumo.Negocio,
-        c: dict,
-        n_busquedas: int,
-        n_paginas: int,
-        vueltas: int,
-        inicio: float,
-    ) -> Resultado:
+        decision = self.decisor.decidir(n, informes, expediente)
         return Resultado(
-            muestra_id=negocio.muestra_id,
-            clee=negocio.clee,
-            estado=c["estado"],
-            confianza=c["confianza"],
-            razonamiento=c["razonamiento"],
+            muestra_id=n.muestra_id,
+            clee=n.clee,
+            estado=decision.estado,
+            confianza=decision.confianza,
+            razonamiento=decision.razonamiento,
             agente=self.agente,
-            fecha_cierre_estimada=c["fecha_cierre_estimada"],
-            evidencias=c["evidencias"],
-            n_busquedas=n_busquedas,
-            n_paginas=n_paginas,
-            vueltas=vueltas,
+            fecha_cierre_estimada=decision.fecha_cierre_estimada,
+            evidencias=decision.evidencias,
+            expediente=expediente,
+            informes=informes,
             duracion_s=time.monotonic() - inicio,
         )
 
@@ -404,7 +145,11 @@ class Verificador:
 
 
 def guardar(conn: Connection, r: Resultado) -> str:
-    """Escribe el veredicto y sus evidencias; devuelve el `veredicto_id`."""
+    """Escribe el veredicto, su expediente, los informes y las evidencias; devuelve el `veredicto_id`.
+
+    En el orden de las FK: el veredicto, el expediente (las evidencias
+    apuntan a sus piezas), los informes y las evidencias.
+    """
     veredicto_id = str(uuid.uuid4())
     conn.execute(
         insert(Veredicto.__table__).values(
@@ -416,10 +161,51 @@ def guardar(conn: Connection, r: Resultado) -> str:
             fecha_cierre_estimada=r.fecha_cierre_estimada,
             razonamiento=r.razonamiento,
             agente=r.agente,
-            n_busquedas=r.n_busquedas,
+            n_busquedas=r.n_consultas,
             duracion_s=round(r.duracion_s, 1),
         )
     )
+    ids = [str(uuid.uuid4()) for _ in r.expediente]
+    if r.expediente:
+        conn.execute(
+            insert(Consulta.__table__),
+            [
+                {
+                    "pieza_id": ids[i],
+                    "veredicto_id": veredicto_id,
+                    "orden": i + 1,
+                    "recolector": p.recolector,
+                    "fuente": p.fuente,
+                    "consulta": p.consulta,
+                    "url": p.url,
+                    "titulo": p.titulo,
+                    "fecha_publicacion": p.fecha,
+                    "contenido": p.contenido,
+                    "estado": p.estado,
+                    "ampliada": p.ampliada,
+                }
+                for i, p in enumerate(r.expediente)
+            ],
+        )
+    if r.informes:
+        conn.execute(
+            insert(InformeFila.__table__),
+            [
+                {
+                    "informe_id": str(uuid.uuid4()),
+                    "veredicto_id": veredicto_id,
+                    "especialista": i.especialista,
+                    "identificado": i.identificado,
+                    "senal": i.senal,
+                    "fecha_mas_reciente": i.fecha_mas_reciente,
+                    "resumen": i.resumen,
+                    "citas": [c.como_dict() for c in i.citas],
+                    "automatico": i.automatico,
+                    "duracion_s": round(i.duracion_s, 1),
+                }
+                for i in r.informes
+            ],
+        )
     if r.evidencias:
         conn.execute(
             insert(Evidencia.__table__),
@@ -427,9 +213,10 @@ def guardar(conn: Connection, r: Resultado) -> str:
                 {
                     "evidencia_id": str(uuid.uuid4()),
                     "veredicto_id": veredicto_id,
-                    "fuente": e.fuente,
-                    "url": e.url,
-                    "titulo": e.titulo,
+                    "pieza_id": ids[e.pieza - 1],
+                    "fuente": r.expediente[e.pieza - 1].fuente,
+                    "url": r.expediente[e.pieza - 1].url,
+                    "titulo": r.expediente[e.pieza - 1].titulo,
                     "fecha_publicacion": e.fecha_publicacion,
                     "extracto": e.extracto,
                     "senal": e.senal,
@@ -443,33 +230,37 @@ def guardar(conn: Connection, r: Resultado) -> str:
 def verificar_muestra(
     engine: Engine,
     tracker: MetadataTracker,
-    verificador: Verificador,
+    equipo: Any,
     nombre: str,
     *,
     limite: int | None = None,
     solo_clee: str | None = None,
+    juez: Juez | None = None,
 ) -> dict[str, int]:
     """Verifica los negocios pendientes de una muestra y registra la corrida en `meta`.
 
-    Reanudable por construcción: los pendientes son los que ESTE agente
-    (modelo/version) no ha verificado. Un negocio que falla por una
-    excepción se registra y se sigue con el siguiente; si Ollama se cae, la
-    corrida se detiene, porque todo lo que sigue fallaría igual.
+    Reanudable por construcción: los pendientes son los que ESTE equipo
+    (modelo/version) no ha verificado. Un negocio que falla se registra y se
+    sigue con el siguiente; si Ollama se cae, la corrida se detiene, porque
+    todo lo que sigue fallaría igual. Si el juez falla en un negocio, el
+    veredicto se queda y la auditoría se repite después con `auditar`.
 
     Args:
         engine: engine con permisos de escritura en `verificacion`.
         tracker: registro de `meta`.
-        verificador: el agente ya armado.
+        equipo: `Equipo`, o cualquier objeto con `.agente` y `.verificar(negocio)`.
         nombre: la muestra.
         limite: cuántos verificar como máximo (para probar con 1 o 10).
         solo_clee: verificar únicamente este negocio.
+        juez: si se pasa, audita cada veredicto en cuanto se guarda.
 
     Returns:
-        dict[str, int]: conteos de la corrida (verificados, fallidos, por estado).
+        dict[str, int]: conteos de la corrida (verificados, fallidos, por
+        estado y, con juez, los de la auditoría).
     """
     with engine.connect() as conn:
         muestra_id, _ = insumo.muestra_por_nombre(conn, nombre)
-        cola = insumo.pendientes(conn, muestra_id, verificador.agente)
+        cola = insumo.pendientes(conn, muestra_id, equipo.agente)
     if solo_clee:
         cola = [(o, c) for o, c in cola if c == solo_clee]
     if limite is not None:
@@ -481,12 +272,11 @@ def verificar_muestra(
         trigger_type=TriggerType.MANUAL.value,
         config={
             "muestra": nombre,
-            "agente": verificador.agente,
+            "agente": equipo.agente,
+            "juez": juez.juez if juez else None,
+            "fuentes": [f.recolector for f in getattr(equipo, "fuentes", [])],
             "pendientes": len(cola),
             "limite": limite,
-            "max_busquedas": verificador.max_busquedas,
-            "max_paginas": verificador.max_paginas,
-            "max_vueltas": verificador.max_vueltas,
         },
     )
     task_id = tracker.create_process_task(
@@ -496,10 +286,12 @@ def verificar_muestra(
         target_table="verificacion.veredictos",
     )
     tracker.start_process_task(task_id)
-    logger.info(f"   ▶ {verificador.agente} sobre {nombre!r}: {len(cola)} negocios pendientes")
+    logger.info(f"   ▶ {equipo.agente} sobre {nombre!r}: {len(cola)} negocios pendientes")
 
     conteos = {"verificados": 0, "fallidos": 0}
-    por_estado = {e.value: 0 for e in EstadoVerificado}
+    conteos.update({e.value: 0 for e in EstadoVerificado})
+    if juez:
+        conteos.update({"auditados": 0, "sostenidos": 0, "acuerdo": 0, "auditorias_fallidas": 0})
     try:
         for i, (orden, clee) in enumerate(cola, start=1):
             with engine.connect() as conn:
@@ -508,7 +300,7 @@ def verificar_muestra(
                 f"   [{i}/{len(cola)}] #{orden} {clee} · {negocio.nombre!r} · {negocio.municipio}"
             )
             try:
-                resultado = verificador.verificar(negocio)
+                resultado = equipo.verificar(negocio)
             except OllamaNoDisponible:
                 raise
             except Exception as e:  # noqa: BLE001  (un negocio no tumba la muestra)
@@ -516,13 +308,27 @@ def verificar_muestra(
                 logger.error(f"      ✖ {clee}: {e.__class__.__name__}: {e}")
                 continue
             with engine.begin() as conn:
-                guardar(conn, resultado)
+                veredicto_id = guardar(conn, resultado)
             conteos["verificados"] += 1
-            por_estado[resultado.estado] += 1
+            conteos[resultado.estado] += 1
             logger.info(
-                f"      ✔ {resultado.estado}/{resultado.confianza} · {len(resultado.evidencias)} evidencias · "
-                f"{resultado.n_busquedas} búsquedas · {resultado.vueltas} vueltas · {resultado.duracion_s / 60:.1f} min"
+                f"      ✔ {resultado.estado}/{resultado.confianza} · "
+                f"{len(resultado.evidencias)} evidencias · {len(resultado.expediente)} piezas · "
+                f"{resultado.duracion_s / 60:.1f} min"
             )
+            if juez is None:
+                continue
+            try:
+                a = auditar_veredicto(engine, juez, veredicto_id, negocio)
+            except OllamaNoDisponible:
+                raise
+            except Exception as e:  # noqa: BLE001  (el veredicto queda; se audita despues)
+                conteos["auditorias_fallidas"] += 1
+                logger.error(f"      ✖ juez en {clee}: {e.__class__.__name__}: {e}")
+                continue
+            conteos["auditados"] += 1
+            conteos["sostenidos"] += int(a.dictamen == Dictamen.SOSTENIDO.value)
+            conteos["acuerdo"] += int(a.estado_ciego == resultado.estado)
     except Exception as e:
         tracker.complete_process_task(
             task_id, TaskStatus.FAILED, rows_loaded=conteos["verificados"], error_message=str(e)
@@ -544,96 +350,15 @@ def verificar_muestra(
         if not conteos["fallidos"]
         else (JobStatus.PARTIAL if conteos["verificados"] else JobStatus.FAILED),
     )
-    logger.info(
-        f"   ✅ {conteos['verificados']} verificados, {conteos['fallidos']} fallidos · {por_estado}"
-    )
-    return {**conteos, **por_estado}
+    logger.info(f"   ✅ {conteos}")
+    return conteos
 
 
 def resumen_muestra(conn: Connection, nombre: str, agente: str) -> dict[str, int]:
-    """Cuántos negocios tiene la muestra y cuántos ya verificó este agente."""
+    """Cuántos negocios tiene la muestra y cuántos ya verificó este equipo."""
     muestra_id, _ = insumo.muestra_por_nombre(conn, nombre)
     total = conn.execute(
         text("SELECT count(*) FROM verificacion.muestra_negocios WHERE muestra_id = :id"),
         {"id": muestra_id},
     ).scalar_one()
     return {"total": int(total), "pendientes": len(insumo.pendientes(conn, muestra_id, agente))}
-
-
-# ----- utilidades -----
-
-
-def _tool(nombre: str, contenido: str) -> dict:
-    """Un mensaje de resultado de herramienta, como lo espera Ollama."""
-    return {"role": "tool", "tool_name": nombre, "content": contenido}
-
-
-def _desempacar(llamada: dict) -> tuple[str, dict]:
-    """Nombre y argumentos de una `tool_call`; los argumentos pueden venir como JSON en texto."""
-    funcion = llamada.get("function", llamada)
-    args = funcion.get("arguments") or {}
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except json.JSONDecodeError:
-            args = {}
-    return str(funcion.get("name", "")), dict(args) if isinstance(args, dict) else {}
-
-
-def _anotar(vistas: dict[str, str], url: str, texto: str) -> None:
-    """Suma `texto` a lo visto de `url`: una URL puede salir en dos búsquedas y además leerse."""
-    clave = _normalizar(url)
-    vistas[clave] = f"{vistas.get(clave, '')}\n{texto}"
-
-
-def _fecha_sustentada(fecha: date, texto: str) -> bool:
-    """Si el mes y el año de `fecha` están escritos en `texto`.
-
-    Reconoce el mes en letra junto al año ("5 de noviembre de 2026",
-    "nov. 2026", "Nov 5, 2026") y las formas numéricas ("2026-11-05",
-    "05/11/2026", "11/2026"). El día no se comprueba: el modelo normaliza a
-    `AAAA-MM-DD` y un `AAAA-MM` llega aquí como día 1. Una fecha relativa
-    ("hace 3 días") NO sustenta nada: el agente no sabe qué día es hoy, y
-    resolverla sería justo la deducción que esto impide.
-
-    Args:
-        fecha: la `fecha_publicacion` que citó el modelo.
-        texto: lo visto de la URL de esa evidencia.
-
-    Returns:
-        bool: True si el texto la respalda.
-    """
-    t = texto.lower()
-    a, m = fecha.year, fecha.month
-    nombres = _MESES[m]
-    patrones = (
-        # mes en letra y despues el anio: "noviembre de 2026", "nov 5, 2026"
-        rf"\b(?:{nombres})\b\.?,?\s+(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s+)?(?:de\s+|del\s+)?{a}(?!\d)",
-        rf"(?<!\d){a}[-/.]0?{m}(?!\d)",  # 2026-11-05, 2026/11
-        rf"(?<!\d)0?{m}[-/.]{a}(?!\d)",  # 05/11/2026, 11/2026
-        rf"(?<!\d)0?{m}[-/.]\d{{1,2}}[-/.]{a}(?!\d)",  # 11/05/2026 (mes primero)
-    )
-    return any(re.search(p, t) for p in patrones)
-
-
-def _normalizar(url: str) -> str:
-    """Forma canónica para comparar URLs: sin esquema, sin `www.`, sin barra final."""
-    u = url.strip().lower()
-    for prefijo in ("https://", "http://"):
-        u = u.removeprefix(prefijo)
-    return u.removeprefix("www.").rstrip("/")
-
-
-def _fecha(valor: Any) -> tuple[date | None, str | None]:
-    """`AAAA-MM-DD` o `AAAA-MM` a `date`; (None, None) si viene vacío; (None, error) si no parsea."""
-    if valor in (None, "", "null"):
-        return None, None
-    texto = str(valor).strip()
-    for formato in ("%Y-%m-%d", "%Y-%m"):
-        try:
-            from datetime import datetime
-
-            return datetime.strptime(texto, formato).date(), None
-        except ValueError:
-            continue
-    return None, f"{texto!r} no es AAAA-MM-DD ni AAAA-MM"

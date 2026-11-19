@@ -129,7 +129,18 @@ class BuscadorBrave:
         ]
 
 
+FUENTE_DIRECTORIO_DENUE = "directorio_denue"
+"""Sitios que republican el propio DENUE: una ficha ahí no es evidencia independiente."""
+
 _FUENTES_POR_DOMINIO: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Primero: algunos tambien caerian en `directorio`, y lo que importa de
+    # ellos es que copian al INEGI. Que un negocio aparezca ahi dice que el
+    # DENUE lo listo alguna vez, no que siga abierto: comparar el DENUE contra
+    # si mismo. El decisor solo puede citarlos como senal `neutral`.
+    (
+        FUENTE_DIRECTORIO_DENUE,
+        ("inegi.org.mx", "mexicopymes", "municipiodata", "pueblosamerica"),
+    ),
     ("google_maps", ("google.com/maps", "maps.google", "goo.gl/maps", "maps.app.goo.gl")),
     ("facebook", ("facebook.com", "fb.com", "fb.me")),
     ("instagram", ("instagram.com",)),

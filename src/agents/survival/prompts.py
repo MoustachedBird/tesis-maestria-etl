@@ -1,54 +1,79 @@
-"""El prompt del verificador y las herramientas que puede llamar.
+"""Los prompts del equipo y las herramientas con que cada rol termina.
 
-Es la §5 de `verificacion_cierre.md` escrita para el modelo: el protocolo de
-búsqueda, las reglas de decisión y lo que NO puede hacer. Cambiarlo cambia
-los veredictos, así que `AGENTE_VERSION` sube con él.
+Tres roles, cada uno con un contexto chico y una sola tarea:
 
-Las herramientas van en el formato de funciones de Ollama/OpenAI. `concluir`
-es una herramienta y no "responde en JSON" porque así el formato lo valida
-el servidor y el modelo no puede terminar sin pasar por la validación de
-`verificador.py`.
+- **Especialista** (uno por fuente): lee lo que trajo SU fuente y responde
+  si es este negocio y qué indica, con citas.
+- **Decisor**: integra los informes de los especialistas y concluye.
+- **Juez**: relee el expediente crudo, primero a ciegas y luego viendo el
+  veredicto, y dictamina si las citas lo sostienen.
+
+Cambiar cualquier prompt cambia los veredictos, así que `AGENTE_VERSION`
+sube con él. Las herramientas terminales (`informar`, `concluir`, `estimar`,
+`dictaminar`) van en el formato de funciones de Ollama/OpenAI para que el
+formato lo valide el servidor y ningún rol pueda terminar sin pasar por la
+validación en código (`citas.py`, `equipo.py`, `juez.py`).
 """
 
 from __future__ import annotations
 
 from src.agents.survival.insumo import Negocio
-from src.shared.enums import Confianza, EstadoVerificado, SenalEvidencia
+from src.shared.enums import (
+    Confianza,
+    Dictamen,
+    EstadoVerificado,
+    Identificacion,
+    Recolector,
+    SenalEvidencia,
+)
 
-SISTEMA = """Eres un verificador de negocios de México. Te doy TODO lo que el Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) publicó de UN negocio, y tu trabajo es averiguar, buscando en internet, si ese negocio SIGUE ACTIVO o CERRÓ. El DENUE no reporta cierres: solo deja de listar negocios, y no sabemos por qué. Tu veredicto es independiente del DENUE.
+# ----- piezas comunes -----
 
-TIENES CUATRO HERRAMIENTAS
-- buscar_en_maps(consulta): abre Google Maps con esa búsqueda y devuelve lo que muestra: la ficha del lugar (estado, horario, reseñas con su antigüedad) o la lista de resultados. Devuelve también la URL que debes citar.
-- buscar_web(consulta): resultados de un buscador (título, URL, extracto y, cuando el buscador la da, la fecha de publicación).
-- leer_pagina(url): el texto de una página (Facebook e Instagram se abren con un navegador, sin sesión). Si responde ERROR (no abre, pide iniciar sesión, viene vacía) NO la leíste: de esa URL solo sabes lo que mostró el buscador.
-- concluir(...): tu veredicto. ES OBLIGATORIO terminar llamándola. No respondas en texto libre.
+IDENTIDAD = """IDENTIDAD
+La identidad de un negocio es nombre + lugar. Un homónimo en otro domicilio o municipio NO es este negocio. Un cambio de nombre en el mismo domicilio puede serlo (el DENUE lista los nombres con que apareció). Para cadenas y franquicias (OXXO, farmacias, bancos) exige el domicilio exacto."""
 
-PROTOCOLO, EN ESTE ORDEN (detente cuando tengas evidencia para confianza alta):
-1. Google Maps, SIEMPRE primero y con buscar_en_maps: "<nombre> <municipio> <estado>" y, si no aparece, "<nombre> <domicilio>". Es la fuente con estado explícito ("Cerrado permanentemente", "Cerrado temporalmente", horarios vigentes) y con la antigüedad de la última reseña. Comprueba que la ficha sea de ESE domicilio. Las fechas relativas ("hace 2 meses") vienen anotadas con su mes aproximado entre corchetes: ese mes es el que puedes citar como fecha.
-2. Redes sociales (Facebook, Instagram): página del negocio, fecha de la última publicación, avisos de cierre o de cambio de domicilio.
-3. Sitio web del negocio, si el DENUE trae uno: si responde y qué dice; si no responde, es señal.
-4. Directorios y marketplaces (Sección Amarilla, Cylex, Mercado Libre, Uber Eats, Rappi, DiDi Food).
-5. Noticias locales: cierres, clausuras, incendios, mudanzas.
-Usa varios nombres si el negocio tuvo varios. Busca en español. Un negocio HOMÓNIMO en otro domicilio o municipio NO es evidencia: la identidad es nombre + lugar. Para cadenas y franquicias (OXXO, farmacias, bancos) exige el domicilio exacto; si no lo encuentras, indeterminado.
+COMO_CITAR = """CÓMO CITAR
+Cada cita lleva:
+- pieza: el número [n] de la pieza.
+- extracto: COPIADO TEXTUALMENTE de esa pieza. Se rechaza si no aparece tal cual; puedes recortar con '...'.
+- fecha_publicacion: AAAA-MM-DD o AAAA-MM SOLO si está escrita en esa pieza; si no, null. No la deduzcas ni la estimes. Las fechas relativas que vienen anotadas como "hace 2 meses [≈ 2026-09]" valen como ese mes; las que no traen anotación no valen.
+- senal: hacia dónde apunta esa pieza por sí sola: activo, cerrado o neutral.
+Una pieza del negocio cuya actividad fechada más reciente es anterior a la última vez que el DENUE lo vio, y que no muestra nada después, apunta a cerrado. No se pueden citar piezas marcadas ERROR o SIN_RESULTADOS. Las piezas de fuente directorio_denue copian al propio DENUE: que el negocio aparezca ahí no prueba que siga abierto ni que cerró, así que su señal es neutral."""
 
-REGLAS DE DECISIÓN
-- cerrado / alta: estado explícito de cierre en una fuente con fecha (Maps "cerrado permanentemente", aviso propio del negocio), o el local con otro ocupante verificable en ese mismo domicilio.
-- cerrado / media: ninguna señal de actividad posterior a la fecha en que el DENUE lo vio por última vez, en al menos DOS fuentes que SÍ tenían actividad antes de esa fecha.
-- cerrado / baja: solo silencio: no aparece en ningún lado y tampoco aparecía antes.
-- activo / alta: actividad FECHADA posterior al último corte de la ventana del DENUE (reseña, publicación, horario vigente, pedido en marketplace).
-- activo / media: actividad fechada posterior a la última vez que el DENUE lo vio, pero anterior al último corte de la ventana.
-- activo / baja: ficha vigente sin fecha.
-- indeterminado: sin huella, huella ambigua, homónimos imposibles de separar, o cadena sin domicilio exacto. Es un resultado LEGÍTIMO; no lo fuerces a activo ni a cerrado.
+REGLAS_DE_DECISION = """REGLAS DE DECISIÓN
+- cerrado / alta: estado explícito de cierre ("Cerrado permanentemente" en Maps, aviso del propio negocio), o el local con otro ocupante verificable en ese mismo domicilio.
+- cerrado / media: ninguna señal de actividad posterior a la última vez que el DENUE lo vio, en al menos DOS fuentes donde SÍ se identificó al negocio con actividad anterior a esa fecha.
+- cerrado / baja: una sola fuente que identificó al negocio apunta a cierre, sin estado explícito (el sitio propio ahora es de otra cosa, la última publicación es vieja y no hay nada después).
+- activo / alta: actividad FECHADA en o después del último corte publicado del DENUE (reseña, publicación, pedido). Una ficha o un extracto sin fecha NO alcanza para alta.
+- activo / media: actividad fechada posterior a la última vez que el DENUE lo vio, pero anterior al último corte publicado.
+- activo / baja: ficha vigente (horario, "abierto") sin fecha.
+- indeterminado: sin huella, huella ambigua, homónimos imposibles de separar, o cadena sin domicilio exacto. El silencio solo (no aparece en ningún lado) es indeterminado: muchos negocios chicos nunca tuvieron huella en línea. Es un resultado LEGÍTIMO; no lo fuerces a activo ni a cerrado."""
 
-AL CONCLUIR
-- razonamiento: por qué llegaste a ese estado, en prosa breve, nombrando las fuentes y las fechas.
-- evidencias: UNA por pieza en que te apoyaste. Cada una con la URL EXACTA que viste en una búsqueda o leíste (no inventes ni reconstruyas URLs), el extracto CITADO (no parafraseado), la fecha de publicación SOLO si está escrita en el resultado del buscador o en la página (si no lo está va null: no la deduzcas ni la estimes; una fecha que no viste se rechaza), y hacia dónde apunta esa pieza por sí sola: cerrado, activo o neutral. Guarda también las contradictorias.
-- fecha_cierre_estimada: solo si la evidencia la da (último rastro de actividad, aviso).
-- Para activo o cerrado hace falta al menos una evidencia; para indeterminado puede no haber ninguna.
-- Sin una fecha escrita no hay "actividad FECHADA": lo más que sostiene una ficha o un extracto sin fecha es activo / baja.
 
-Trabaja con calma pero sin dar vueltas: cuando una herramienta te diga que se agotó el presupuesto, concluye con lo que tengas."""
-"""Prompt de sistema. Sube `AGENTE_VERSION` si cambia."""
+def _enum(valores: type) -> list[str]:
+    return [v.value for v in valores]
+
+
+_CITAS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "pieza": {"type": "integer", "description": "El número [n] de la pieza."},
+            "extracto": {"type": "string", "description": "Copiado textual de la pieza."},
+            "fecha_publicacion": {
+                "type": ["string", "null"],
+                "description": "AAAA-MM-DD o AAAA-MM, solo si está escrita en la pieza; null si no.",
+            },
+            "senal": {"type": "string", "enum": _enum(SenalEvidencia)},
+        },
+        "required": ["pieza", "extracto", "senal"],
+    },
+}
+"""Una lista de citas: la misma forma para especialista, decisor y juez."""
+
+
+# ----- el negocio -----
 
 
 def formatear_insumo(n: Negocio) -> str:
@@ -87,110 +112,179 @@ def formatear_insumo(n: Negocio) -> str:
             f"Apareció en los cortes: {periodos}",
             f"Primera vez: {n.primer_periodo:%Y-%m}. Última vez: {n.ultimo_periodo:%Y-%m}.",
             f"Último corte publicado del DENUE: {n.ultimo_corte_ventana:%Y-%m}.",
-            "",
-            "Averigua el estado actual del negocio y termina con `concluir`.",
         ]
     )
 
 
-def _enum(valores: type) -> list[str]:
-    return [v.value for v in valores]
+# ----- especialista -----
+
+FOCOS: dict[str, tuple[str, str]] = {
+    Recolector.MAPS.value: (
+        "Google Maps",
+        "Te tocan las fichas de Google Maps. Lo que más vale: el estado explícito "
+        '("Cerrado permanentemente", "Cerrado temporalmente"), el horario vigente y la '
+        "antigüedad de la reseña más reciente. Si la búsqueda devolvió una lista y no una "
+        "ficha, revisa si alguna coincide en nombre Y domicilio. Comprueba que la dirección "
+        "de la ficha sea la del DENUE.",
+    ),
+    Recolector.WEB.value: (
+        "el buscador web",
+        "Te tocan los resultados de un buscador (título, URL, extracto). Busca: avisos de "
+        "cierre, traspaso o cambio de domicilio; noticias (clausuras, incendios); presencia en "
+        "plataformas de entrega (Rappi, Uber Eats, DiDi Food) o en directorios con reseñas "
+        "fechadas. Los extractos casi nunca traen fecha: sin fecha escrita, no la inventes.",
+    ),
+    Recolector.REDES.value: (
+        "las redes sociales",
+        "Te tocan las páginas de Facebook e Instagram, abiertas sin iniciar sesión. Lo que "
+        "vale: la fecha de la última publicación, avisos de cierre o de mudanza, el horario. "
+        "Sin sesión a veces solo se ve el encabezado de la página: dilo así, no lo completes.",
+    ),
+    Recolector.SITIO.value: (
+        "el sitio web propio",
+        "Te toca el sitio web que el DENUE publicó del negocio. Si ahora es de otra cosa o "
+        "está en venta, es señal de cierre; si solo falló la conexión, es neutral; si muestra "
+        "actividad vigente con fecha, es señal de actividad.",
+    ),
+}
+"""Por fuente: cómo se llama para el modelo y en qué fijarse."""
+
+_AMPLIAR: dict[str, str] = {
+    Recolector.MAPS.value: "Puedes hacer hasta {k} búsquedas más con buscar_en_maps (otro nombre con que apareció, el domicilio) si las piezas no bastan para identificarlo.",
+    Recolector.WEB.value: "Puedes hacer hasta {k} búsquedas más con buscar_web.",
+    Recolector.REDES.value: "Puedes abrir hasta {k} páginas más con leer_red, solo de la lista que se te da.",
+}
+"""Cómo se le explica a cada especialista su herramienta de ampliación."""
 
 
-HERRAMIENTAS: list[dict] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_en_maps",
-            "description": "Busca un negocio en Google Maps. Devuelve la URL a citar y el texto de la ficha (estado, horario, reseñas) o de la lista de resultados.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "consulta": {
-                        "type": "string",
-                        "description": "Nombre del negocio y lugar, como en el buscador de Maps.",
-                    }
-                },
-                "required": ["consulta"],
+def sistema_especialista(recolector: str, max_ampliaciones: int) -> str:
+    """El prompt de sistema del especialista de una fuente."""
+    nombre, foco = FOCOS[recolector]
+    ampliar = _AMPLIAR.get(recolector, "").format(k=max_ampliaciones) if max_ampliaciones else ""
+    return f"""Eres el especialista en {nombre} de un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios. Tú solo ves lo que {nombre} dijo de este negocio; otro miembro del equipo junta los informes de todas las fuentes y decide. Tu trabajo es leer bien TU fuente.
+
+{foco}
+
+{ampliar}
+
+TU INFORME (herramienta informar, obligatoria para terminar)
+- identificado: si (las piezas son de ESTE negocio: nombre y lugar coinciden), no (no aparece, o solo hay homónimos), dudoso.
+- senal: activo, cerrado o neutral: lo que tu fuente, por sí sola, indica del negocio. Si identificado no es "si", la señal es neutral.
+- resumen: una a tres frases con lo que encontraste, nombrando fechas si las hay.
+- citas: las piezas que sostienen tu informe. Si la señal es activo o cerrado, al menos una cita con esa señal.
+
+{IDENTIDAD}
+
+{COMO_CITAR}"""
+
+
+HERRAMIENTA_INFORMAR = {
+    "type": "function",
+    "function": {
+        "name": "informar",
+        "description": "Tu informe sobre lo que tu fuente dice del negocio. Obligatoria para terminar.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "identificado": {"type": "string", "enum": _enum(Identificacion)},
+                "senal": {"type": "string", "enum": _enum(SenalEvidencia)},
+                "resumen": {"type": "string"},
+                "citas": _CITAS_SCHEMA,
             },
+            "required": ["identificado", "senal", "resumen", "citas"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_web",
-            "description": "Busca en la web. Devuelve título, URL, extracto y fecha de publicación (si el buscador la da) de los primeros resultados.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "consulta": {
-                        "type": "string",
-                        "description": "Lo que buscarías en Google, en español.",
-                    }
+}
+
+
+# ----- decisor -----
+
+SISTEMA_DECISOR = f"""Eres quien decide en un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios, y no sabemos por qué. Tu veredicto es independiente del DENUE.
+
+Recibes lo que el DENUE publicó del negocio y los INFORMES de los especialistas: uno por fuente (Google Maps, buscador web, redes sociales, sitio propio). Cada informe dice si la fuente identificó al negocio, qué indica y con qué piezas. Tú no puedes buscar: decides con los informes.
+
+Al pesar los informes: un estado explícito en Maps pesa más que una publicación; una pieza fechada pesa más que una sin fecha; una fuente que no identificó al negocio no aporta nada; si dos fuentes se contradicen, gana la más reciente con fecha y lo dices en el razonamiento.
+
+{REGLAS_DE_DECISION}
+
+AL CONCLUIR (herramienta concluir, obligatoria)
+- estado y confianza según las reglas.
+- razonamiento: por qué, en prosa breve, nombrando fuentes y fechas.
+- evidencias: las piezas en que te apoyas, SOLO de las que citó algún especialista, con el mismo formato de cita. Para activo o cerrado, al menos una evidencia con esa señal. Guarda también las contradictorias.
+- fecha_cierre_estimada: solo si la evidencia la da (último rastro de actividad, aviso).
+
+{COMO_CITAR}"""
+"""Prompt de sistema del decisor."""
+
+HERRAMIENTA_CONCLUIR = {
+    "type": "function",
+    "function": {
+        "name": "concluir",
+        "description": "Registra el veredicto final. Obligatoria para terminar.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "estado": {"type": "string", "enum": _enum(EstadoVerificado)},
+                "confianza": {"type": "string", "enum": _enum(Confianza)},
+                "razonamiento": {"type": "string"},
+                "fecha_cierre_estimada": {
+                    "type": ["string", "null"],
+                    "description": "AAAA-MM-DD o AAAA-MM si la evidencia la da; null si no.",
                 },
-                "required": ["consulta"],
+                "evidencias": _CITAS_SCHEMA,
             },
+            "required": ["estado", "confianza", "razonamiento", "evidencias"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "leer_pagina",
-            "description": "Devuelve el texto visible de una página web (recortado), o ERROR si no se pudo leer.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL exacta, tomada de una búsqueda."}
-                },
-                "required": ["url"],
+}
+
+
+# ----- juez -----
+
+SISTEMA_JUEZ = f"""Eres el juez de un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios. Tu papel es auditar, y trabajas en DOS pasos:
+
+PASO 1 (herramienta estimar). Recibes el negocio y el EXPEDIENTE completo: todo lo que trajo cada fuente, citado o no. Sin saber qué concluyó el equipo, di qué concluirías tú según las reglas.
+
+PASO 2 (herramienta dictaminar). Después verás el veredicto del equipo y las piezas que citó. Dictamina:
+- sostenido: las piezas citadas, tal como dicen en el expediente, son de ESTE negocio y alcanzan para ese estado CON esa confianza.
+- no_sostenido: alguna cita no dice lo que se le atribuye, es de un homónimo, es de un directorio que copia al DENUE usada como prueba, o la confianza excede lo que las piezas permiten. También si el expediente trae una pieza que contradice el veredicto y el equipo la ignoró.
+Lista en piezas_objetadas los [n] citados que rechazas. Tu dictamen no depende de tu estimación del paso 1: puedes haber concluido otra cosa y aun así sostener el veredicto si sus citas lo permiten.
+
+{IDENTIDAD}
+
+{REGLAS_DE_DECISION}"""
+"""Prompt de sistema del juez."""
+
+HERRAMIENTA_ESTIMAR = {
+    "type": "function",
+    "function": {
+        "name": "estimar",
+        "description": "Paso 1: tu propio veredicto, sin conocer el del equipo.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "estado": {"type": "string", "enum": _enum(EstadoVerificado)},
+                "confianza": {"type": "string", "enum": _enum(Confianza)},
+                "razonamiento": {"type": "string"},
             },
+            "required": ["estado", "confianza", "razonamiento"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "concluir",
-            "description": "Registra el veredicto final. Obligatoria para terminar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "estado": {"type": "string", "enum": _enum(EstadoVerificado)},
-                    "confianza": {"type": "string", "enum": _enum(Confianza)},
-                    "razonamiento": {
-                        "type": "string",
-                        "description": "Por qué, en prosa breve, con fuentes y fechas.",
-                    },
-                    "fecha_cierre_estimada": {
-                        "type": ["string", "null"],
-                        "description": "AAAA-MM-DD o AAAA-MM si la evidencia la da; null si no.",
-                    },
-                    "evidencias": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "url": {
-                                    "type": "string",
-                                    "description": "URL exacta vista en una búsqueda o leída.",
-                                },
-                                "titulo": {"type": ["string", "null"]},
-                                "extracto": {
-                                    "type": "string",
-                                    "description": "Cita textual de la pieza.",
-                                },
-                                "fecha_publicacion": {
-                                    "type": ["string", "null"],
-                                    "description": "AAAA-MM-DD o AAAA-MM, solo si está escrita en lo que viste de esa URL; null si no.",
-                                },
-                                "senal": {"type": "string", "enum": _enum(SenalEvidencia)},
-                            },
-                            "required": ["url", "extracto", "senal"],
-                        },
-                    },
-                },
-                "required": ["estado", "confianza", "razonamiento", "evidencias"],
+}
+
+HERRAMIENTA_DICTAMINAR = {
+    "type": "function",
+    "function": {
+        "name": "dictaminar",
+        "description": "Paso 2: si las citas del equipo sostienen su veredicto.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dictamen": {"type": "string", "enum": _enum(Dictamen)},
+                "motivo": {"type": "string"},
+                "piezas_objetadas": {"type": "array", "items": {"type": "integer"}},
             },
+            "required": ["dictamen", "motivo", "piezas_objetadas"],
         },
     },
-]
-"""Las tres herramientas, en el formato de funciones de Ollama."""
+}

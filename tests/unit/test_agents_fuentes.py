@@ -38,6 +38,11 @@ class TestClasificarFuente:
             ("https://www.informador.mx/jalisco/x", "noticia"),
             ("https://web.archive.org/web/2024/x", "wayback"),
             ("https://tacospaco.mx/", "sitio_web"),
+            # Copian al DENUE: aparecer ahi no es evidencia independiente.
+            ("https://mexicopymes.com/info/tienda-juanis-8DD1322C", "directorio_denue"),
+            ("https://www.municipiodata.com/municipios/mexico/lerma/x", "directorio_denue"),
+            ("https://mexico.pueblosamerica.com/i/la-cruz-92/", "directorio_denue"),
+            ("https://www.inegi.org.mx/app/mapa/denue/", "directorio_denue"),
         ],
     )
     def test_por_dominio(self, url, fuente):

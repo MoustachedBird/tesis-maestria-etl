@@ -1,26 +1,41 @@
-"""El bucle del verificador contra un modelo y un buscador FALSOS.
+"""El equipo (especialistas + decisor), las citas y el juez, contra un modelo FALSO.
 
-Sin red ni Ollama: lo que se prueba son las garantías del bucle, que el
-modelo por sí solo no da --que no cite URLs que no vio, que no se salga del
-vocabulario, que un `cerrado` lleve evidencia, que el presupuesto se
-respete, y que si nunca concluye quede `indeterminado` diciendo por qué.
+Sin red, sin Ollama, sin base: lo que se prueba son las garantías que el
+modelo por sí solo no da --que una cita apunte a una pieza que existe y
+diga lo que se le atribuye, que una fecha esté escrita, que un directorio
+que copia al DENUE no pruebe nada, que un especialista no cite fuera de su
+fuente, que `activo/alta` exija una fecha posterior al último corte, que el
+juez estime a ciegas antes de ver el veredicto--, y que cuando el modelo no
+produce algo válido la salida sea automática y lo diga.
 """
 
 from datetime import date
 
 import pytest
 
-from src.agents.survival.insumo import Negocio
-from src.agents.survival.prompts import HERRAMIENTAS, SISTEMA, formatear_insumo
-from src.agents.survival.sources.busqueda import Resultado as ResultadoBusqueda
-from src.agents.survival.verificador import (
-    Verificador,
-    _fecha,
-    _fecha_sustentada,
-    _normalizar,
+from src.agents.survival.citas import (
+    Cita,
+    extracto_en,
+    fecha_sustentada,
+    parsear_fecha,
+    validar_citas,
 )
+from src.agents.survival.equipo import Decisor, Especialista, Informe
+from src.agents.survival.insumo import Negocio
+from src.agents.survival.juez import Juez, JuezSinDictamen, VeredictoAuditado
+from src.agents.survival.llamada import pedir
+from src.agents.survival.prompts import (
+    SISTEMA_DECISOR,
+    SISTEMA_JUEZ,
+    formatear_insumo,
+    sistema_especialista,
+)
+from src.agents.survival.recoleccion import Pieza
+from src.agents.survival.verificador import Equipo
 
 VENTANA_FIN = date(2026, 5, 1)
+MAPS = "https://www.google.com/maps/search/TACOS%20PACO?hl=es"
+FACEBOOK = "https://www.facebook.com/tacospacogdl"
 
 
 def negocio(**extra) -> Negocio:
@@ -59,7 +74,7 @@ def respuesta(*llamadas: dict, texto: str = "") -> dict:
 
 
 class ClienteFalso:
-    """Devuelve respuestas en orden y recuerda la conversación que recibió."""
+    """Devuelve respuestas en orden y recuerda cada conversación que recibió."""
 
     modelo = "falso:1b"
 
@@ -70,300 +85,134 @@ class ClienteFalso:
     def chat(self, mensajes, herramientas=None):
         self.conversaciones.append([dict(m) for m in mensajes])
         if not self.respuestas:
-            # Sin libreto: el modelo se queda callado en prosa.
-            return respuesta(texto="...")
+            return respuesta(texto="...")  # sin libreto: se queda callado en prosa
         return self.respuestas.pop(0)
 
-    def mensajes_tool(self) -> list[str]:
+    def tools(self) -> list[str]:
         return [m["content"] for m in self.conversaciones[-1] if m.get("role") == "tool"]
 
 
-class BuscadorFalso:
-    nombre = "falso"
-
-    def __init__(self, resultados=None):
-        self.resultados = resultados or [
-            ResultadoBusqueda(
-                "Tacos Paco - Google Maps",
-                "https://www.google.com/maps/place/tacos-paco",
-                "Cerrado permanentemente",
-            ),
-            ResultadoBusqueda(
-                "Tacos Paco | Facebook",
-                "https://www.facebook.com/tacospacogdl",
-                "Última publicación 2024",
-            ),
-        ]
-        self.consultas: list[str] = []
-
-    def buscar(self, consulta, n=8):
-        self.consultas.append(consulta)
-        return self.resultados
-
-
-def leer_falso(url: str) -> str:
-    if "404" in url:
-        return f"ERROR: {url} respondio HTTP 404"
-    return f"TITULO: pagina de {url}\nCerrado permanentemente desde marzo de 2024."
-
-
-MAPS = "https://www.google.com/maps/search/TACOS%20PACO%20Guadalajara?hl=es"
-
-
-def maps_falso(consulta: str) -> tuple[str, str]:
-    if "nada" in consulta:
-        return MAPS, f"ERROR: {MAPS} no entregó contenido legible ni con navegador (12 caracteres)."
-    return (
-        MAPS,
-        "TITULO: Tacos Paco\nCerrado permanentemente · Última reseña hace 2 meses [≈ 2026-09]",
-    )
-
-
-def verificador(cliente, buscador=None, **kw) -> Verificador:
-    params = dict(version="v1", max_busquedas=8, max_paginas=6, max_vueltas=6)
-    params.update(kw)
-    return Verificador(cliente, buscador or BuscadorFalso(), leer_falso, maps_falso, **params)
+def expediente() -> list[Pieza]:
+    """Un expediente chico, con números 1..6."""
+    return [
+        Pieza(
+            "maps",
+            "TITULO: Tacos Paco\nAv Vallarta 1234 · Cerrado permanentemente · "
+            "reseña hace 2 meses [≈ 2026-09]",
+            "ok",
+            consulta="TACOS PACO Guadalajara",
+            url=MAPS,
+        ),
+        Pieza("maps", "ERROR: no entregó contenido legible", "error", consulta="otra", url=MAPS),
+        Pieza(
+            "web",
+            "Tacos Paco, Av Vallarta 1234. Promo 2x1 todos los martes.",
+            "ok",
+            consulta="TACOS PACO",
+            url=FACEBOOK,
+            titulo="Tacos Paco | Facebook",
+        ),
+        Pieza(
+            "web",
+            "TACOS PACO · Guadalajara · Restaurantes · Directorio de empresas",
+            "ok",
+            consulta="TACOS PACO",
+            url="https://www.mexicopymes.com/info/tacos-paco",
+        ),
+        Pieza(
+            "web",
+            "Publicado el 5 de noviembre de 2026: abrimos nueva sucursal",
+            "ok",
+            consulta="TACOS PACO",
+            url="https://nota.mx/1",
+            fecha=date(2026, 11, 5),
+        ),
+        Pieza(
+            "redes",
+            "Tacos Paco. Última publicación: 3 de junio de 2026. Horario 9-18",
+            "ok",
+            url=FACEBOOK,
+        ),
+    ]
 
 
-CONCLUSION_CERRADO = dict(
-    estado="cerrado",
-    confianza="alta",
-    razonamiento="Google Maps marca el local como cerrado permanentemente y la página lo confirma.",
-    fecha_cierre_estimada="2024-03",
-    evidencias=[
-        {
-            "url": "https://www.google.com/maps/place/tacos-paco",
-            "titulo": "Tacos Paco - Google Maps",
-            "extracto": "Cerrado permanentemente",
-            "fecha_publicacion": None,
-            "senal": "cerrado",
-        }
-    ],
-)
+def cita(pieza: int, extracto: str, senal: str, fecha=None) -> dict:
+    return {"pieza": pieza, "extracto": extracto, "senal": senal, "fecha_publicacion": fecha}
+
+
+# ----- citas -----
 
 
 @pytest.mark.unit
-class TestElCaminoFeliz:
-    def test_busca_lee_y_concluye(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO Guadalajara")),
-            respuesta(llamada("leer_pagina", url="https://www.google.com/maps/place/tacos-paco")),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
+class TestLasCitas:
+    def test_una_cita_textual_pasa(self):
+        citas, errores = validar_citas(
+            [cita(1, "Cerrado permanentemente", "cerrado")], expediente()
         )
-        r = verificador(cliente).verificar(negocio())
-        assert (r.estado, r.confianza) == ("cerrado", "alta")
-        assert r.fecha_cierre_estimada == date(2024, 3, 1)
-        assert r.n_busquedas == 1 and r.n_paginas == 1 and r.vueltas == 3
-        assert r.agente == "falso:1b/v1"
-        assert len(r.evidencias) == 1
-        assert r.evidencias[0].fuente == "google_maps"  # la clasifica el codigo, no el modelo
+        assert errores == [] and citas == [Cita(1, "Cerrado permanentemente", "cerrado")]
 
-    def test_indeterminado_sin_evidencias_es_legitimo(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(
-                llamada(
-                    "concluir",
-                    estado="indeterminado",
-                    confianza="baja",
-                    razonamiento="No hay huella del negocio en ninguna fuente consultada.",
-                    evidencias=[],
-                )
-            ),
+    def test_un_extracto_parafraseado_se_rechaza(self):
+        _, errores = validar_citas(
+            [cita(1, "el local cerró para siempre", "cerrado")], expediente()
         )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "indeterminado" and r.evidencias == []
+        assert any("no aparece textual" in e for e in errores)
 
-    def test_la_url_leida_tambien_cuenta_como_vista(self):
-        """Una página leída es evidencia válida aunque no saliera en una búsqueda."""
-        cliente = ClienteFalso(
-            respuesta(llamada("leer_pagina", url="https://tacospaco.mx/")),
-            respuesta(
-                llamada(
-                    "concluir",
-                    estado="activo",
-                    confianza="baja",
-                    razonamiento="El sitio del negocio responde y muestra el menú vigente.",
-                    evidencias=[
-                        {"url": "https://tacospaco.mx", "extracto": "menú", "senal": "activo"}
-                    ],
-                )
-            ),
+    def test_se_puede_recortar_con_puntos_suspensivos(self):
+        _, errores = validar_citas(
+            [cita(3, "Tacos Paco, Av Vallarta 1234... todos los martes", "activo")], expediente()
         )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "activo" and r.evidencias[0].fuente == "sitio_web"
+        assert errores == []
 
+    def test_mayusculas_espacios_y_comillas_no_importan(self):
+        assert extracto_en('"cerrado   PERMANENTEMENTE"', "Cerrado permanentemente")
 
-@pytest.mark.unit
-class TestLoQueSeRechaza:
-    """El modelo recibe el error y vuelve a intentar; el código no corrige por él."""
+    def test_un_extracto_demasiado_corto_no_vale(self):
+        assert not extracto_en("abierto", "abierto de 9 a 18")
 
-    def test_una_url_inventada(self):
-        inventada = dict(
-            CONCLUSION_CERRADO,
-            evidencias=[{"url": "https://inventada.mx/x", "extracto": "cerró", "senal": "cerrado"}],
+    def test_una_pieza_que_no_existe(self):
+        _, errores = validar_citas([cita(99, "x" * 10, "activo")], expediente())
+        assert any("no hay pieza [99]" in e for e in errores)
+
+    def test_una_pieza_con_error_no_se_cita(self):
+        _, errores = validar_citas(
+            [cita(2, "no entregó contenido legible", "neutral")], expediente()
         )
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(llamada("concluir", **inventada)),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
+        assert any("no se puede citar" in e for e in errores)
+
+    def test_fuera_de_las_permitidas(self):
+        _, errores = validar_citas(
+            [cita(1, "Cerrado permanentemente", "cerrado")], expediente(), {3}
         )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "cerrado" and r.vueltas == 3
-        rechazos = [m for m in cliente.mensajes_tool() if m.startswith("RECHAZADO")]
-        assert len(rechazos) == 1 and "no apareció en ninguna búsqueda" in rechazos[0]
+        assert any("no es de las que puedes citar" in e for e in errores)
 
-    def test_mayusculas_y_espacios_se_normalizan_no_se_rechazan(self):
-        """Rechazar "CERRADO " costaría otra vuelta del modelo por nada; el CHECK recibe el valor limpio."""
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(
-                llamada(
-                    "concluir", **dict(CONCLUSION_CERRADO, estado="CERRADO ", confianza=" Alta")
-                )
-            ),
+    def test_un_directorio_que_copia_al_denue_solo_es_neutral(self):
+        crudas = [cita(4, "TACOS PACO · Guadalajara · Restaurantes", "activo")]
+        _, errores = validar_citas(crudas, expediente())
+        assert any("copia al DENUE" in e for e in errores)
+        crudas[0]["senal"] = "neutral"
+        assert validar_citas(crudas, expediente())[1] == []
+
+    def test_una_fecha_que_no_esta_en_la_pieza_se_rechaza(self):
+        _, errores = validar_citas(
+            [cita(3, "Promo 2x1 todos los martes", "activo", "2026-11-05")], expediente()
         )
-        r = verificador(cliente).verificar(negocio())
-        assert (r.estado, r.confianza) == ("cerrado", "alta")
-
-    @pytest.mark.parametrize("estado", ["closed", "quebrado", ""])
-    def test_un_estado_fuera_del_vocabulario(self, estado):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(llamada("concluir", **dict(CONCLUSION_CERRADO, estado=estado))),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "cerrado"
-        assert any("estado" in m and "RECHAZADO" in m for m in cliente.mensajes_tool())
-
-    def test_un_cerrado_sin_evidencias(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(llamada("concluir", **dict(CONCLUSION_CERRADO, evidencias=[]))),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "cerrado" and len(r.evidencias) == 1
-        assert any("al menos una evidencia" in m for m in cliente.mensajes_tool())
-
-    def test_una_fecha_que_no_parsea(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(
-                llamada("concluir", **dict(CONCLUSION_CERRADO, fecha_cierre_estimada="marzo 2024"))
-            ),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.fecha_cierre_estimada == date(2024, 3, 1)
-        assert any("fecha_cierre_estimada" in m for m in cliente.mensajes_tool())
-
-    def test_prosa_sin_herramienta_recibe_el_recordatorio(self):
-        cliente = ClienteFalso(
-            respuesta(texto="Creo que cerró."),
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
-        )
-        verificador(cliente).verificar(negocio())
-        usuario = [m["content"] for m in cliente.conversaciones[-1] if m["role"] == "user"]
-        assert any("`concluir`" in m for m in usuario[1:])
-
-
-FACEBOOK = "https://www.facebook.com/tacospacogdl"
-
-
-def conclusion_activo(fecha, url=FACEBOOK) -> dict:
-    return dict(
-        estado="activo",
-        confianza="alta",
-        razonamiento="La página de Facebook del negocio tiene una publicación reciente.",
-        evidencias=[
-            {
-                "url": url,
-                "extracto": "Promo de la semana",
-                "fecha_publicacion": fecha,
-                "senal": "activo",
-            }
-        ],
-    )
-
-
-@pytest.mark.unit
-class TestNingunaFechaInventada:
-    """La fecha separa activo/alta de activo/baja: es lo que al modelo más le conviene suponer."""
-
-    def test_una_fecha_que_no_esta_en_lo_visto_se_rechaza(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
-            respuesta(llamada("concluir", **conclusion_activo(None))),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.evidencias[0].fecha_publicacion is None
-        assert any("no está escrita en lo que viste" in m for m in cliente.mensajes_tool())
+        assert any("no está escrita en la pieza [3]" in e for e in errores)
 
     def test_la_fecha_que_dio_el_buscador_vale(self):
-        buscador = BuscadorFalso(
-            [ResultadoBusqueda("Tacos Paco | Facebook", FACEBOOK, "Promo", date(2026, 11, 5))]
+        _, errores = validar_citas(
+            [cita(5, "abrimos nueva sucursal", "activo", "2026-11-05")], expediente()
         )
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
-        )
-        r = verificador(cliente, buscador).verificar(negocio())
-        assert r.evidencias[0].fecha_publicacion == date(2026, 11, 5)
+        assert errores == []
 
-    def test_la_fecha_escrita_en_el_extracto_vale(self):
-        buscador = BuscadorFalso(
-            [
-                ResultadoBusqueda(
-                    "Tacos Paco", FACEBOOK, "5 de noviembre de 2026 — Promo de la semana"
-                )
-            ]
+    def test_la_fecha_relativa_anotada_por_el_navegador_vale(self):
+        _, errores = validar_citas(
+            [cita(1, "Cerrado permanentemente", "cerrado", "2026-09")], expediente()
         )
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
-        )
-        assert verificador(cliente, buscador).verificar(negocio()).estado == "activo"
+        assert errores == []
 
-    def test_la_fecha_escrita_en_la_pagina_leida_vale(self):
-        """`leer_falso` dice "desde marzo de 2024"."""
-        url = "https://tacospaco.mx/aviso"
-        cliente = ClienteFalso(
-            respuesta(llamada("leer_pagina", url=url)),
-            respuesta(llamada("concluir", **conclusion_activo("2024-03", url=url))),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.evidencias[0].fecha_publicacion == date(2024, 3, 1)
-
-    def test_la_fecha_de_otra_url_no_se_presta(self):
-        """Cada evidencia se comprueba contra lo visto de SU url, no de la conversación entera."""
-        buscador = BuscadorFalso(
-            [
-                ResultadoBusqueda(
-                    "Nota", "https://nota.mx/1", "Publicado el 5 de noviembre de 2026"
-                ),
-                ResultadoBusqueda("Tacos Paco | Facebook", FACEBOOK, "Promo de la semana"),
-            ]
-        )
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="TACOS PACO")),
-            respuesta(llamada("concluir", **conclusion_activo("2026-11-05"))),
-            respuesta(llamada("concluir", **conclusion_activo(None))),
-        )
-        r = verificador(cliente, buscador).verificar(negocio())
-        assert r.evidencias[0].fecha_publicacion is None
-
-    def test_una_pagina_que_fallo_no_aporta_texto(self):
-        """Un ERROR de lectura no vuelve citable la URL ni sustenta fechas."""
-        cliente = ClienteFalso(
-            respuesta(llamada("leer_pagina", url="https://x.mx/404")),
-            respuesta(llamada("concluir", **conclusion_activo("2024-03", url="https://x.mx/404"))),
-        )
-        r = verificador(cliente, max_vueltas=2).verificar(negocio())
-        assert r.estado == "indeterminado"
+    def test_una_senal_fuera_del_vocabulario(self):
+        _, errores = validar_citas([cita(1, "Cerrado permanentemente", "closed")], expediente())
+        assert any("senal 'closed'" in e for e in errores)
 
     @pytest.mark.parametrize(
         "texto",
@@ -375,175 +224,31 @@ class TestNingunaFechaInventada:
             "November 5th, 2026",
             "Noviembre del 2026",
             "2026-11-05",
-            "fecha de publicación: 2026-11-05",
             "05/11/2026",
             "11/05/2026",
             "11/2026",
+            "hace 3 días [≈ 2026-11]",
         ],
     )
     def test_formas_que_sustentan(self, texto):
-        assert _fecha_sustentada(date(2026, 11, 5), f"Publicado: {texto}. Promo.")
+        assert fecha_sustentada(date(2026, 11, 5), f"Publicado: {texto}. Promo.")
 
     @pytest.mark.parametrize(
         "texto",
         [
             "",
             "hace 3 días",
-            "noviembre",  # sin año
-            "2026",  # sin mes
+            "noviembre",
+            "2026",
             "5 de octubre de 2026",
             "5 de noviembre de 2025",
-            "novedades 2026",  # empieza como el mes pero no lo es
+            "novedades 2026",
             "tel 3312026115",
             "12026-11",
         ],
     )
     def test_formas_que_no_sustentan(self, texto):
-        assert not _fecha_sustentada(date(2026, 11, 5), texto)
-
-
-def conclusion_maps(fecha=None) -> dict:
-    return dict(
-        estado="cerrado",
-        confianza="alta",
-        razonamiento="La ficha de Google Maps del domicilio marca cerrado permanentemente.",
-        evidencias=[
-            {
-                "url": MAPS,
-                "extracto": "Cerrado permanentemente",
-                "fecha_publicacion": fecha,
-                "senal": "cerrado",
-            }
-        ],
-    )
-
-
-@pytest.mark.unit
-class TestGoogleMaps:
-    def test_la_url_de_maps_llega_al_modelo_y_es_citable(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_en_maps", consulta="TACOS PACO Guadalajara")),
-            respuesta(llamada("concluir", **conclusion_maps())),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.estado == "cerrado" and r.evidencias[0].fuente == "google_maps"
-        assert r.n_paginas == 1 and r.n_busquedas == 0  # Maps gasta del tope de paginas
-        assert cliente.mensajes_tool()[0].startswith(f"URL: {MAPS}")
-
-    def test_la_fecha_relativa_anotada_sustenta_su_mes(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_en_maps", consulta="TACOS PACO Guadalajara")),
-            respuesta(llamada("concluir", **conclusion_maps("2026-09"))),
-        )
-        r = verificador(cliente).verificar(negocio())
-        assert r.evidencias[0].fecha_publicacion == date(2026, 9, 1)
-
-    def test_un_maps_que_fallo_no_es_citable(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_en_maps", consulta="nada")),
-            respuesta(llamada("concluir", **conclusion_maps())),
-        )
-        r = verificador(cliente, max_vueltas=2).verificar(negocio())
-        assert r.estado == "indeterminado"
-
-    def test_respeta_el_tope_de_paginas(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_en_maps", consulta="a")),
-            respuesta(llamada("buscar_en_maps", consulta="b")),
-            respuesta(llamada("concluir", **conclusion_maps())),
-        )
-        r = verificador(cliente, max_paginas=1).verificar(negocio())
-        assert r.n_paginas == 1
-        assert any("PRESUPUESTO AGOTADO" in m for m in cliente.mensajes_tool())
-
-
-@pytest.mark.unit
-class TestElPresupuesto:
-    def test_la_segunda_busqueda_se_niega_con_tope_en_una(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="uno")),
-            respuesta(llamada("buscar_web", consulta="dos")),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),
-        )
-        buscador = BuscadorFalso()
-        r = verificador(cliente, buscador, max_busquedas=1).verificar(negocio())
-        assert buscador.consultas == ["uno"]
-        assert r.n_busquedas == 1
-        assert any(m.startswith("PRESUPUESTO AGOTADO") for m in cliente.mensajes_tool())
-
-    def test_si_nunca_concluye_queda_indeterminado_y_lo_dice(self):
-        cliente = ClienteFalso()  # sin libreto: siempre prosa
-        r = verificador(cliente, max_vueltas=3).verificar(negocio())
-        assert (r.estado, r.confianza) == ("indeterminado", "baja")
-        assert "no concluyó" in r.razonamiento
-        assert r.vueltas == 4  # las 3 mas la ultima oportunidad
-        assert len(cliente.conversaciones) == 4
-
-    def test_la_ultima_oportunidad_cuenta_si_concluye(self):
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="uno")),
-            respuesta(llamada("buscar_web", consulta="dos")),
-            respuesta(llamada("concluir", **CONCLUSION_CERRADO)),  # llega en la vuelta extra
-        )
-        r = verificador(cliente, max_vueltas=2).verificar(negocio())
-        assert r.estado == "cerrado" and r.vueltas == 3
-
-    def test_el_buscador_caido_no_tumba_el_veredicto(self):
-        class BuscadorRoto(BuscadorFalso):
-            def buscar(self, consulta, n=8):
-                raise ConnectionError("searxng abajo")
-
-        cliente = ClienteFalso(
-            respuesta(llamada("buscar_web", consulta="x")),
-            respuesta(
-                llamada(
-                    "concluir",
-                    estado="indeterminado",
-                    confianza="baja",
-                    razonamiento="El buscador no respondió, así que no hay con qué decidir.",
-                    evidencias=[],
-                )
-            ),
-        )
-        r = verificador(cliente, BuscadorRoto()).verificar(negocio())
-        assert r.estado == "indeterminado"
-        assert any(m.startswith("ERROR del buscador") for m in cliente.mensajes_tool())
-
-
-@pytest.mark.unit
-class TestElInsumoEsCiego:
-    def test_no_menciona_la_hipotesis(self):
-        """Ni `cerrado`, ni meses de ausencia, ni huecos: el veredicto no puede saber qué se mide."""
-        texto = formatear_insumo(negocio()).lower()
-        for prohibido in ("cerrado", "cerró", "hueco", "meses sin", "hipótesis", "estrato"):
-            assert prohibido not in texto, prohibido
-
-    def test_si_lleva_lo_que_el_denue_publico(self):
-        texto = formatear_insumo(negocio())
-        for esperado in (
-            "TACOS PACO",
-            "TAQUERIA DON PACO",
-            "Guadalajara",
-            "3312345678",
-            "2024-11",
-            "2026-05",
-        ):
-            assert esperado in texto
-
-    def test_el_negocio_no_tiene_atributo_de_la_hipotesis(self):
-        for campo in ("cerrado", "cerrado_gold", "meses_sin_aparecer", "huecos"):
-            assert not hasattr(negocio(), campo)
-
-    def test_el_prompt_exige_concluir_y_admite_indeterminado(self):
-        assert "concluir" in SISTEMA and "indeterminado" in SISTEMA
-        nombres = {h["function"]["name"] for h in HERRAMIENTAS}
-        assert nombres == {"buscar_en_maps", "buscar_web", "leer_pagina", "concluir"}
-
-
-@pytest.mark.unit
-class TestUtilidades:
-    def test_normalizar_compara_sin_esquema_ni_www_ni_barra(self):
-        assert _normalizar("https://www.Tacos.mx/") == _normalizar("http://tacos.mx")
+        assert not fecha_sustentada(date(2026, 11, 5), texto)
 
     @pytest.mark.parametrize(
         "valor,esperado",
@@ -552,12 +257,428 @@ class TestUtilidades:
             ("2024-03", date(2024, 3, 1)),
             (None, None),
             ("", None),
-            ("null", None),
         ],
     )
-    def test_fecha_valida(self, valor, esperado):
-        assert _fecha(valor) == (esperado, None)
+    def test_parsear_fecha(self, valor, esperado):
+        assert parsear_fecha(valor) == (esperado, None)
 
-    def test_fecha_invalida_devuelve_el_error(self):
-        fecha, error = _fecha("marzo 2024")
-        assert fecha is None and "AAAA-MM" in error
+    def test_parsear_fecha_invalida(self):
+        fecha, error = parsear_fecha("marzo 2024")
+        assert fecha is None and "no es AAAA-MM-DD" in error
+
+
+# ----- el bucle compartido -----
+
+FIN = [{"function": {"name": "fin"}}]
+
+
+@pytest.mark.unit
+class TestPedir:
+    def test_prosa_recibe_el_recordatorio_y_luego_vale(self):
+        cliente = ClienteFalso(
+            respuesta(texto="creo que está cerrado"), respuesta(llamada("fin", x=1))
+        )
+        mensajes = [{"role": "user", "content": "hola"}]
+        salida = pedir(cliente, mensajes, FIN, {"fin"}, lambda n, a: (a["x"], []), max_vueltas=3)
+        assert salida.valor == 1 and salida.vueltas == 2
+        assert any("Responde únicamente llamando a: fin" in m["content"] for m in mensajes)
+
+    def test_un_rechazo_vuelve_con_el_error(self):
+        cliente = ClienteFalso(respuesta(llamada("fin", x=0)), respuesta(llamada("fin", x=2)))
+        mensajes: list[dict] = []
+
+        def validar(_n, a):
+            return a["x"], ([] if a["x"] else ["x no puede ser 0"])
+
+        salida = pedir(cliente, mensajes, FIN, {"fin"}, validar, max_vueltas=3)
+        assert salida.valor == 2
+        assert any("RECHAZADO" in m["content"] for m in mensajes if m.get("role") == "tool")
+
+    def test_se_agota(self):
+        assert pedir(ClienteFalso(), [], FIN, {"fin"}, lambda n, a: (0, []), max_vueltas=2) is None
+
+
+# ----- especialista -----
+
+
+class FuenteFalsa:
+    """Una fuente cuya ampliación agrega una pieza fija."""
+
+    def __init__(self, recolector="maps", herramienta=True):
+        self.recolector = recolector
+        self.herramienta = (
+            {"type": "function", "function": {"name": "buscar_en_maps"}} if herramienta else None
+        )
+        self.ampliaciones: list[dict] = []
+
+    def recolectar(self, n, expediente):
+        return []
+
+    def ampliar(self, n, args, expediente):
+        self.ampliaciones.append(args)
+        return [
+            Pieza(
+                self.recolector,
+                "Taquería Don Paco · Av Vallarta 1234 · Abierto · reseña de mayo de 2026",
+                "ok",
+                consulta=args.get("consulta"),
+                url=MAPS + "&2",
+                ampliada=True,
+            )
+        ]
+
+    def contexto(self, expediente):
+        return ""
+
+
+def informar(**kw) -> dict:
+    base = dict(
+        identificado="si",
+        senal="cerrado",
+        resumen="La ficha de Maps en el domicilio del DENUE dice cerrado permanentemente.",
+        citas=[cita(1, "Cerrado permanentemente", "cerrado")],
+    )
+    base.update(kw)
+    return llamada("informar", **base)
+
+
+def especialista(cliente, ampliaciones=0, intentos=3) -> Especialista:
+    return Especialista(cliente, max_ampliaciones=ampliaciones, max_intentos=intentos)
+
+
+@pytest.mark.unit
+class TestElEspecialista:
+    def test_informa_con_citas_de_su_fuente(self):
+        cliente = ClienteFalso(respuesta(informar()))
+        i = especialista(cliente, 2).informar(negocio(), FuenteFalsa(), expediente())
+        assert (i.identificado, i.senal, i.automatico) == ("si", "cerrado", False)
+        assert i.citas[0].pieza == 1
+        # Solo vio las piezas de SU fuente, con su número global.
+        visto = cliente.conversaciones[0][1]["content"]
+        assert "[1] maps" in visto and "[3] web" not in visto
+
+    def test_no_puede_citar_otra_fuente(self):
+        malo = informar(senal="activo", citas=[cita(3, "Promo 2x1 todos los martes", "activo")])
+        cliente = ClienteFalso(respuesta(malo), respuesta(informar()))
+        i = especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        assert i.senal == "cerrado"
+        assert any("no es de las que puedes citar" in t for t in cliente.tools())
+
+    def test_sin_identificar_la_senal_es_neutral(self):
+        malo = informar(identificado="no")
+        bueno = informar(identificado="no", senal="neutral", citas=[])
+        cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
+        i = especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        assert (i.identificado, i.senal) == ("no", "neutral")
+        assert any("la señal es neutral" in t for t in cliente.tools())
+
+    def test_una_senal_sin_cita_que_la_sostenga(self):
+        cliente = ClienteFalso(respuesta(informar(citas=[])), respuesta(informar()))
+        especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        assert any("al menos una cita con esa señal" in t for t in cliente.tools())
+
+    def test_amplia_su_fuente_y_puede_citar_lo_nuevo(self):
+        exp = expediente()
+        nueva = len(exp) + 1
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="TAQUERIA DON PACO Guadalajara")),
+            respuesta(
+                informar(
+                    senal="activo",
+                    citas=[cita(nueva, "Abierto · reseña de mayo de 2026", "activo", "2026-05")],
+                )
+            ),
+        )
+        fuente = FuenteFalsa()
+        i = especialista(cliente, 2).informar(negocio(), fuente, exp)
+        assert fuente.ampliaciones == [{"consulta": "TAQUERIA DON PACO Guadalajara"}]
+        assert len(exp) == nueva and exp[-1].ampliada
+        assert i.senal == "activo" and i.fecha_mas_reciente == date(2026, 5, 1)
+
+    def test_respeta_el_tope_de_ampliaciones(self):
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_maps", consulta="a")),
+            respuesta(llamada("buscar_en_maps", consulta="b")),
+            respuesta(informar()),
+        )
+        fuente = FuenteFalsa()
+        especialista(cliente, 1).informar(negocio(), fuente, expediente())
+        assert len(fuente.ampliaciones) == 1
+        assert any("PRESUPUESTO AGOTADO" in t for t in cliente.tools())
+
+    def test_sin_nada_citable_ni_herramienta_no_llama_al_modelo(self):
+        cliente = ClienteFalso()
+        i = especialista(cliente, 2).informar(
+            negocio(), FuenteFalsa("sitio", herramienta=False), expediente()
+        )
+        assert i.automatico and (i.identificado, i.senal) == ("no", "neutral")
+        assert cliente.conversaciones == []
+
+    def test_si_nunca_informa_queda_automatico_y_lo_dice(self):
+        i = especialista(ClienteFalso(), intentos=2).informar(
+            negocio(), FuenteFalsa(), expediente()
+        )
+        assert i.automatico and i.identificado == "dudoso" and "no produjo" in i.resumen
+
+
+# ----- decisor -----
+
+
+def concluir(**kw) -> dict:
+    base = dict(
+        estado="cerrado",
+        confianza="alta",
+        razonamiento="Maps marca el local del domicilio del DENUE como cerrado permanentemente.",
+        fecha_cierre_estimada=None,
+        evidencias=[cita(1, "Cerrado permanentemente", "cerrado")],
+    )
+    base.update(kw)
+    return llamada("concluir", **base)
+
+
+INFORMES = [
+    Informe(
+        "maps",
+        "si",
+        "cerrado",
+        "Maps dice cerrado.",
+        [Cita(1, "Cerrado permanentemente", "cerrado")],
+    ),
+    Informe(
+        "web",
+        "si",
+        "activo",
+        "Hay una nota fechada.",
+        [Cita(5, "abrimos nueva sucursal", "activo", date(2026, 11, 5))],
+    ),
+]
+
+
+@pytest.mark.unit
+class TestElDecisor:
+    def test_concluye_con_los_informes_y_no_con_el_expediente_crudo(self):
+        cliente = ClienteFalso(respuesta(concluir()))
+        d = Decisor(cliente, max_intentos=3).decidir(negocio(), INFORMES, expediente())
+        assert (d.estado, d.confianza, d.automatica) == ("cerrado", "alta", False)
+        visto = cliente.conversaciones[0][1]["content"]
+        assert "INFORME DE GOOGLE MAPS" in visto and "TITULO: Tacos Paco" not in visto
+
+    def test_no_puede_citar_lo_que_ningun_especialista_cito(self):
+        malo = concluir(
+            estado="activo", confianza="baja", evidencias=[cita(6, "Horario 9-18 ok", "activo")]
+        )
+        cliente = ClienteFalso(respuesta(malo), respuesta(concluir()))
+        Decisor(cliente, max_intentos=3).decidir(negocio(), INFORMES, expediente())
+        assert any("no es de las que puedes citar" in t for t in cliente.tools())
+
+    def test_activo_alta_exige_fecha_desde_el_ultimo_corte(self):
+        sin_fecha = concluir(
+            estado="activo", evidencias=[cita(5, "abrimos nueva sucursal", "activo")]
+        )
+        con_fecha = concluir(
+            estado="activo",
+            evidencias=[cita(5, "abrimos nueva sucursal", "activo", "2026-11-05")],
+        )
+        cliente = ClienteFalso(respuesta(sin_fecha), respuesta(con_fecha))
+        d = Decisor(cliente, max_intentos=3).decidir(negocio(), INFORMES, expediente())
+        assert (d.estado, d.confianza) == ("activo", "alta")
+        assert any("activo/alta exige" in t for t in cliente.tools())
+
+    def test_una_fecha_anterior_al_ultimo_corte_no_alcanza_para_alta(self):
+        n = negocio(ultimo_corte_ventana=date(2026, 12, 1))
+        cliente = ClienteFalso(
+            respuesta(
+                concluir(
+                    estado="activo",
+                    evidencias=[cita(5, "abrimos nueva sucursal", "activo", "2026-11-05")],
+                )
+            )
+        )
+        d = Decisor(cliente, max_intentos=1).decidir(n, INFORMES, expediente())
+        assert d.automatica and d.estado == "indeterminado"
+
+    def test_cerrado_sin_evidencia_de_cierre(self):
+        malo = concluir(evidencias=[cita(5, "abrimos nueva sucursal", "activo")])
+        cliente = ClienteFalso(respuesta(malo), respuesta(concluir()))
+        Decisor(cliente, max_intentos=3).decidir(negocio(), INFORMES, expediente())
+        assert any("al menos una evidencia con esa señal" in t for t in cliente.tools())
+
+    def test_sin_nada_citado_es_indeterminado_sin_llamar_al_modelo(self):
+        cliente = ClienteFalso()
+        vacios = [
+            Informe("maps", "no", "neutral", "nada", []),
+            Informe("web", "dudoso", "neutral", "nada", []),
+        ]
+        d = Decisor(cliente, max_intentos=3).decidir(negocio(), vacios, expediente())
+        assert (d.estado, d.confianza, d.automatica) == ("indeterminado", "baja", True)
+        assert "maps: no; web: dudoso" in d.razonamiento
+        assert cliente.conversaciones == []
+
+    def test_si_nunca_concluye_queda_indeterminado(self):
+        d = Decisor(ClienteFalso(), max_intentos=2).decidir(negocio(), INFORMES, expediente())
+        assert d.automatica and d.estado == "indeterminado" and "2 intentos" in d.razonamiento
+
+
+# ----- el equipo completo -----
+
+
+class FuenteFija:
+    """Recolecta piezas fijas; no amplía."""
+
+    herramienta = None
+
+    def __init__(self, recolector, piezas):
+        self.recolector = recolector
+        self.piezas = piezas
+
+    def recolectar(self, n, expediente):
+        return list(self.piezas)
+
+    def ampliar(self, n, args, expediente):
+        return []
+
+    def contexto(self, expediente):
+        return ""
+
+
+@pytest.mark.unit
+def test_el_equipo_recolecta_informa_por_fuente_y_decide():
+    exp = expediente()
+    fuentes = [
+        FuenteFija("maps", exp[:2]),
+        FuenteFija("web", exp[2:5]),
+        FuenteFija("redes", exp[5:]),
+        FuenteFija("sitio", []),  # nada que leer: informe automatico, sin modelo
+    ]
+    cliente = ClienteFalso(
+        respuesta(informar()),
+        respuesta(
+            informar(
+                senal="activo",
+                resumen="Una nota fechada dice que abrieron otra sucursal.",
+                citas=[cita(5, "abrimos nueva sucursal", "activo", "2026-11-05")],
+            )
+        ),
+        respuesta(
+            informar(
+                senal="activo",
+                resumen="La página tiene una publicación de junio de 2026.",
+                citas=[cita(6, "Última publicación: 3 de junio de 2026", "activo", "2026-06-03")],
+            )
+        ),
+        respuesta(concluir()),
+    )
+    r = Equipo(cliente, fuentes, version="v4", max_ampliaciones=0, max_intentos=2).verificar(
+        negocio()
+    )
+    assert r.agente == "falso:1b/v4"
+    assert [i.especialista for i in r.informes] == ["maps", "web", "redes", "sitio"]
+    assert r.informes[-1].automatico
+    assert (r.estado, r.confianza) == ("cerrado", "alta")
+    assert len(r.expediente) == 6 and r.n_consultas >= 4
+
+
+# ----- juez -----
+
+
+VEREDICTO = VeredictoAuditado(
+    veredicto_id="v1",
+    estado="cerrado",
+    confianza="alta",
+    evidencias=[Cita(1, "Cerrado permanentemente", "cerrado")],
+)
+
+
+def estimar(**kw) -> dict:
+    base = dict(
+        estado="cerrado",
+        confianza="alta",
+        razonamiento="La ficha de Maps del domicilio dice cerrado permanentemente.",
+    )
+    base.update(kw)
+    return llamada("estimar", **base)
+
+
+def dictaminar(**kw) -> dict:
+    base = dict(
+        dictamen="sostenido",
+        motivo="La pieza [1] es la ficha del domicilio y dice cerrado permanentemente.",
+        piezas_objetadas=[],
+    )
+    base.update(kw)
+    return llamada("dictaminar", **base)
+
+
+def juez(cliente, intentos=3) -> Juez:
+    return Juez(cliente, version="v4", max_intentos=intentos)
+
+
+@pytest.mark.unit
+class TestElJuez:
+    def test_estima_a_ciegas_y_luego_dictamina(self):
+        cliente = ClienteFalso(
+            respuesta(estimar(estado="activo", confianza="media")), respuesta(dictaminar())
+        )
+        r = juez(cliente).auditar(negocio(), expediente(), VEREDICTO)
+        assert (r.estado_ciego, r.confianza_ciega, r.dictamen) == ("activo", "media", "sostenido")
+        assert r.juez == "falso:1b/v4"
+        # El paso 1 se pidió SIN el veredicto; ve el expediente crudo, no los informes.
+        paso_1 = cliente.conversaciones[0]
+        assert not any("PASO 2" in m.get("content", "") for m in paso_1)
+        assert "[4] web · directorio_denue" in paso_1[1]["content"]
+        # El paso 2 trae el veredicto, sin el razonamiento del equipo.
+        paso_2 = cliente.conversaciones[1][-1]["content"]
+        assert "estado: cerrado · confianza: alta" in paso_2 and "[1] cerrado" in paso_2
+
+    def test_solo_objeta_piezas_citadas(self):
+        malo = dictaminar(dictamen="no_sostenido", piezas_objetadas=[3])
+        bueno = dictaminar(dictamen="no_sostenido", piezas_objetadas=[1])
+        cliente = ClienteFalso(respuesta(estimar()), respuesta(malo), respuesta(bueno))
+        r = juez(cliente).auditar(negocio(), expediente(), VEREDICTO)
+        assert r.piezas_objetadas == [1]
+        assert any("no están entre las citadas" in t for t in cliente.tools())
+
+    def test_un_dictamen_fuera_del_vocabulario(self):
+        cliente = ClienteFalso(
+            respuesta(estimar()),
+            respuesta(dictaminar(dictamen="correcto")),
+            respuesta(dictaminar()),
+        )
+        assert juez(cliente).auditar(negocio(), expediente(), VEREDICTO).dictamen == "sostenido"
+
+    def test_si_no_estima_falla_con_nombre(self):
+        with pytest.raises(JuezSinDictamen, match="no estimó"):
+            juez(ClienteFalso(), intentos=2).auditar(negocio(), expediente(), VEREDICTO)
+
+
+# ----- lo que ningún rol recibe -----
+
+
+@pytest.mark.unit
+class TestNadieVeLaHipotesis:
+    def test_el_insumo_no_menciona_la_hipotesis(self):
+        texto = formatear_insumo(negocio()).lower()
+        for palabra in ("cerrado_gold", "meses_sin_aparecer", "huecos", "estrato"):
+            assert palabra not in texto
+
+    def test_el_insumo_si_lleva_lo_que_el_denue_publico(self):
+        texto = formatear_insumo(negocio())
+        for dato in (
+            "TACOS PACO",
+            "TAQUERIA DON PACO",
+            "3312345678",
+            "AV VALLARTA 1234",
+            "2026-05",
+        ):
+            assert dato in texto
+
+    def test_el_negocio_no_tiene_atributo_de_la_hipotesis(self):
+        for campo in ("cerrado", "cerrado_gold", "meses_sin_aparecer", "huecos"):
+            assert not hasattr(negocio(), campo)
+
+    def test_los_prompts_explican_las_citas_y_admiten_indeterminado(self):
+        assert "indeterminado" in SISTEMA_DECISOR and "indeterminado" in SISTEMA_JUEZ
+        assert "COPIADO TEXTUALMENTE" in SISTEMA_DECISOR
+        assert "directorio_denue" in sistema_especialista("web", 2)
+        assert "buscar_en_maps" in sistema_especialista("maps", 2)
+        assert "buscar_en_maps" not in sistema_especialista("maps", 0)

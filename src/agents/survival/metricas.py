@@ -8,6 +8,11 @@ La muestra iguala los estratos (100 cada uno) y la población no, así que los
 números globales se **reponderan** por el tamaño real de cada estrato en gold
 (`muestreo.tamanos_poblacion`). Sin eso, la precisión global sería la de una
 población imaginaria con tantos cerrados como activos.
+
+Con `solo_sostenidos` se cuentan únicamente los veredictos que el juez
+sostuvo; los demás pasan a "sin veredicto". Es la versión conservadora de
+la medida: menos negocios, pero cada uno con dos lecturas que coinciden en
+que la evidencia alcanza.
 """
 
 from __future__ import annotations
@@ -58,8 +63,11 @@ class FilaEstrato:
 _SQL = """
 WITH ultimo AS (
     SELECT DISTINCT ON (muestra_id, clee) muestra_id, clee, estado
-    FROM verificacion.veredictos
+    FROM verificacion.veredictos v
     WHERE muestra_id = :id AND (CAST(:agente AS text) IS NULL OR agente = CAST(:agente AS text))
+      AND (NOT CAST(:solo_sostenidos AS boolean) OR EXISTS (
+              SELECT 1 FROM verificacion.auditorias a
+              WHERE a.veredicto_id = v.veredicto_id AND a.dictamen = 'sostenido'))
     ORDER BY muestra_id, clee, verificado_en DESC
 )
 SELECT mn.estrato,
@@ -77,7 +85,9 @@ GROUP BY mn.estrato
 """
 
 
-def calcular(conn: Connection, nombre: str, agente: str | None = None) -> list[FilaEstrato]:
+def calcular(
+    conn: Connection, nombre: str, agente: str | None = None, *, solo_sostenidos: bool = False
+) -> list[FilaEstrato]:
     """La tabla de confusión por estrato de una muestra.
 
     Args:
@@ -85,6 +95,7 @@ def calcular(conn: Connection, nombre: str, agente: str | None = None) -> list[F
         nombre: la muestra.
         agente: `modelo/version` cuyo veredicto se cuenta; None = el más
             reciente de cualquiera.
+        solo_sostenidos: contar solo los veredictos que algún juez sostuvo.
 
     Returns:
         list[FilaEstrato]: una por estrato, en el orden de `ESTRATOS`.
@@ -93,7 +104,11 @@ def calcular(conn: Connection, nombre: str, agente: str | None = None) -> list[F
     poblacion = tamanos_poblacion(conn)
     filas = {
         f["estrato"]: f
-        for f in conn.execute(text(_SQL), {"id": muestra_id, "agente": agente}).mappings().all()
+        for f in conn.execute(
+            text(_SQL), {"id": muestra_id, "agente": agente, "solo_sostenidos": solo_sostenidos}
+        )
+        .mappings()
+        .all()
     }
     salida = []
     for estrato, _ in ESTRATOS:
@@ -136,3 +151,66 @@ def tasa_falsos_negativos_reponderada(filas: list[FilaEstrato]) -> float | None:
     if not total:
         return None
     return sum(p * v for p, v in pesos) / total
+
+
+@dataclass
+class FilaAuditoria:
+    """Lo que dijo el juez de los veredictos de un estrato."""
+
+    estrato: str
+    auditados: int
+    sostenidos: int
+    acuerdo: int
+
+    @property
+    def tasa_sostenidos(self) -> float | None:
+        """Fracción de veredictos cuyas citas el juez consideró suficientes."""
+        return self.sostenidos / self.auditados if self.auditados else None
+
+    @property
+    def tasa_acuerdo(self) -> float | None:
+        """Fracción en que el juez, a ciegas, llegó al mismo estado que el equipo."""
+        return self.acuerdo / self.auditados if self.auditados else None
+
+
+_SQL_AUDITORIA = """
+SELECT mn.estrato,
+       count(*)                                        AS auditados,
+       count(*) FILTER (WHERE a.dictamen = 'sostenido') AS sostenidos,
+       count(*) FILTER (WHERE a.estado_ciego = v.estado) AS acuerdo
+FROM verificacion.auditorias a
+JOIN verificacion.veredictos v USING (veredicto_id)
+JOIN verificacion.muestra_negocios mn USING (muestra_id, clee)
+WHERE v.muestra_id = :id
+  AND (CAST(:agente AS text) IS NULL OR v.agente = CAST(:agente AS text))
+GROUP BY mn.estrato
+"""
+
+
+def auditoria(conn: Connection, nombre: str, agente: str | None = None) -> list[FilaAuditoria]:
+    """Dictámenes y acuerdo a ciegas del juez, por estrato.
+
+    Args:
+        conn: conexión de lectura.
+        nombre: la muestra.
+        agente: `modelo/version` del equipo cuyos veredictos se cuentan; None = todos.
+
+    Returns:
+        list[FilaAuditoria]: una por estrato, en el orden de `ESTRATOS`.
+    """
+    muestra_id, _ = insumo.muestra_por_nombre(conn, nombre)
+    filas = {
+        f["estrato"]: f
+        for f in conn.execute(text(_SQL_AUDITORIA), {"id": muestra_id, "agente": agente})
+        .mappings()
+        .all()
+    }
+    return [
+        FilaAuditoria(
+            estrato=estrato,
+            auditados=int(filas[estrato]["auditados"]) if estrato in filas else 0,
+            sostenidos=int(filas[estrato]["sostenidos"]) if estrato in filas else 0,
+            acuerdo=int(filas[estrato]["acuerdo"]) if estrato in filas else 0,
+        )
+        for estrato, _ in ESTRATOS
+    ]

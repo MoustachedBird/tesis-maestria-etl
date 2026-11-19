@@ -16,12 +16,17 @@ from sqlalchemy import insert, text
 from sqlalchemy.orm import Session
 
 from src.agents.survival import insumo, metricas, muestreo
-from src.agents.survival.verificador import (
-    EvidenciaDecidida,
-    Resultado,
-    guardar,
-    verificar_muestra,
+from src.agents.survival.citas import Cita
+from src.agents.survival.equipo import Informe
+from src.agents.survival.juez import (
+    ResultadoAuditoria,
+    auditar_muestra,
+    cargar_expediente,
+    cargar_veredicto,
+    pendientes_auditoria,
 )
+from src.agents.survival.recoleccion import Pieza
+from src.agents.survival.verificador import Resultado, guardar, verificar_muestra
 from src.shared.db.base import Base, get_table, tables_for
 from src.shared.db.copy import copy_dataframe
 from src.shared.db.models.silver import ActividadEconomica, Entidad, Municipio
@@ -321,10 +326,14 @@ class TestElInsumo:
 
 
 class VerificadorFalso:
-    """Decide por el prefijo del clee, y falla a propósito en uno."""
+    """Decide por el prefijo del clee, y falla a propósito en uno.
 
-    agente = "falso:1b/v1"
-    max_busquedas = max_paginas = max_vueltas = 1
+    Devuelve lo mismo que el equipo real: un expediente de dos piezas (una
+    ficha de Maps y una búsqueda sin resultados), un informe y, si decide,
+    una evidencia que cita la pieza [1].
+    """
+
+    agente = "falso:1b/v4"
 
     def __init__(self, falla: str | None = None):
         self.falla = falla
@@ -334,13 +343,22 @@ class VerificadorFalso:
         self.vistos.append(negocio.clee)
         if negocio.clee == self.falla:
             raise RuntimeError("se cayo la red")
+        expediente = [
+            Pieza(
+                "maps",
+                "Tacos Paco · Cerrado permanentemente",
+                "ok",
+                consulta=f"{negocio.nombre} Guadalajara",
+                url="https://www.google.com/maps/search/x",
+            ),
+            Pieza("web", "(sin resultados)", "sin_resultados", consulta="q"),
+        ]
         if negocio.clee.startswith("AI"):
-            estado, evidencias = "indeterminado", []
+            estado, evidencias, informes = "indeterminado", [], []
         else:
             estado = "cerrado" if negocio.clee.startswith("C") else "activo"
-            evidencias = [
-                EvidenciaDecidida("https://maps.google.com/x", "cita", estado, "google_maps")
-            ]
+            evidencias = [Cita(1, "Cerrado permanentemente", estado)]
+            informes = [Informe("maps", "si", estado, "Maps lo dice.", evidencias)]
         return Resultado(
             muestra_id=negocio.muestra_id,
             clee=negocio.clee,
@@ -349,8 +367,8 @@ class VerificadorFalso:
             razonamiento="porque si, con fuentes",
             agente=self.agente,
             evidencias=evidencias,
-            n_busquedas=2,
-            vueltas=3,
+            expediente=expediente,
+            informes=informes,
             duracion_s=1.5,
         )
 
@@ -372,10 +390,25 @@ class TestVerificarYGuardar:
                 conn.execute(text("SELECT count(*) FROM verificacion.evidencias")).scalar()
                 == 3 * CUOTA
             )
+            # El expediente completo se guarda, citado o no, y la evidencia apunta a su pieza.
+            assert (
+                conn.execute(text("SELECT count(*) FROM verificacion.consultas")).scalar()
+                == 2 * CUOTA * 4
+            )
+            assert (
+                conn.execute(
+                    text("""
+                        SELECT count(*) FROM verificacion.evidencias e
+                        JOIN verificacion.consultas c USING (pieza_id)
+                        WHERE c.orden = 1 AND c.recolector = 'maps' AND e.url = c.url
+                    """)
+                ).scalar()
+                == 3 * CUOTA
+            )
             muestra_id, _ = insumo.muestra_por_nombre(conn, "piloto")
             assert insumo.pendientes(conn, muestra_id, v.agente) == []
             # Otro agente tiene su propia lista: sus veredictos son otras filas.
-            assert len(insumo.pendientes(conn, muestra_id, "otro:7b/v1")) == CUOTA * 4
+            assert len(insumo.pendientes(conn, muestra_id, "otro:7b/v4")) == CUOTA * 4
         # Segunda corrida: nada que hacer, y no duplica.
         assert verificar_muestra(db, tracker, v, "piloto")["verificados"] == 0
 
@@ -401,7 +434,7 @@ class TestVerificarYGuardar:
                 {"j": "agente_supervivencia_verificar"},
             ).scalar_one()
             muestra_id, _ = insumo.muestra_por_nombre(conn, "piloto")
-            assert insumo.pendientes(conn, muestra_id, "falso:1b/v1") == [(1, caido)]
+            assert insumo.pendientes(conn, muestra_id, "falso:1b/v4") == [(1, caido)]
         assert corrida == JobStatus.PARTIAL.value
 
     def test_guardar_respeta_el_vocabulario_de_la_base(self, db, tracker):
@@ -457,5 +490,98 @@ class TestLasMetricas:
             )
             assert all(
                 f.sin_veredicto == 0
-                for f in metricas.calcular(conn, "piloto", agente="falso:1b/v1")
+                for f in metricas.calcular(conn, "piloto", agente="falso:1b/v4")
             )
+
+
+class JuezFalso:
+    """Sostiene los cerrados y objeta el resto; a ciegas siempre dice cerrado."""
+
+    juez = "juez:1b/v4"
+
+    def __init__(self):
+        self.vistos: list[tuple[int, str]] = []
+
+    def auditar(self, negocio, expediente, veredicto) -> ResultadoAuditoria:
+        self.vistos.append((len(expediente), veredicto.estado))
+        sostenido = veredicto.estado == "cerrado"
+        return ResultadoAuditoria(
+            juez=self.juez,
+            estado_ciego="cerrado",
+            confianza_ciega="alta",
+            razonamiento_ciego="Maps dice cerrado permanentemente.",
+            dictamen="sostenido" if sostenido else "no_sostenido",
+            motivo="La pieza [1] dice lo que se le atribuye." if sostenido else "No alcanza.",
+            piezas_objetadas=[] if sostenido else [1],
+        )
+
+
+@pytest.mark.unit
+class TestElJuezContraLaBase:
+    def test_lo_que_lee_es_lo_que_se_guardo(self, db, tracker):
+        muestra(db, tracker)
+        verificar_muestra(db, tracker, VerificadorFalso(), "piloto", limite=1)
+        with db.connect() as conn:
+            veredicto_id = conn.execute(
+                text("SELECT veredicto_id FROM verificacion.veredictos")
+            ).scalar_one()
+            expediente = cargar_expediente(conn, veredicto_id)
+            v = cargar_veredicto(conn, veredicto_id)
+        assert [p.recolector for p in expediente] == ["maps", "web"]
+        assert expediente[1].estado == "sin_resultados" and not expediente[1].citable
+        assert [(c.pieza, c.extracto) for c in v.evidencias] == [(1, "Cerrado permanentemente")]
+
+    def test_audita_inline_y_luego_no_hay_pendientes(self, db, tracker):
+        muestra(db, tracker)
+        juez = JuezFalso()
+        conteos = verificar_muestra(db, tracker, VerificadorFalso(), "piloto", juez=juez)
+        assert conteos["auditados"] == CUOTA * 4 and conteos["sostenidos"] == 2 * CUOTA
+        assert conteos["acuerdo"] == 2 * CUOTA  # a ciegas dice cerrado: coincide con los C*
+        assert all(n == 2 for n, _ in juez.vistos)  # vio el expediente guardado completo
+        with db.connect() as conn:
+            muestra_id, _ = insumo.muestra_por_nombre(conn, "piloto")
+            assert pendientes_auditoria(conn, muestra_id, juez.juez) == []
+            # Otro juez tiene su propia lista.
+            assert len(pendientes_auditoria(conn, muestra_id, "otro:7b/v4")) == CUOTA * 4
+
+    def test_auditar_despues_es_reanudable(self, db, tracker):
+        muestra(db, tracker)
+        verificar_muestra(db, tracker, VerificadorFalso(), "piloto")
+        juez = JuezFalso()
+        assert auditar_muestra(db, tracker, juez, "piloto", limite=3)["auditados"] == 3
+        resto = auditar_muestra(db, tracker, juez, "piloto")
+        assert resto["auditados"] == CUOTA * 4 - 3
+        assert auditar_muestra(db, tracker, juez, "piloto")["auditados"] == 0
+
+    def test_un_veredicto_sin_expediente_no_se_audita(self, db, tracker):
+        """Los v1-v3 no guardaban lo visto: no hay contra qué auditarlos."""
+        muestra(db, tracker)
+        clee = negocios_de(db, "piloto")[0].clee
+        with db.connect() as conn:
+            muestra_id, _ = insumo.muestra_por_nombre(conn, "piloto")
+        viejo = Resultado(
+            muestra_id=muestra_id,
+            clee=clee,
+            estado="activo",
+            confianza="alta",
+            razonamiento="de cuando se buscaba con herramientas",
+            agente="qwen3:32b/v2",
+        )
+        with db.begin() as conn:
+            guardar(conn, viejo)
+        with db.connect() as conn:
+            assert pendientes_auditoria(conn, muestra_id, "juez:1b/v4") == []
+
+    def test_las_metricas_del_juez_y_solo_sostenidos(self, db, tracker):
+        muestra(db, tracker)
+        verificar_muestra(db, tracker, VerificadorFalso(), "piloto", juez=JuezFalso())
+        with db.connect() as conn:
+            jueces = {j.estrato: j for j in metricas.auditoria(conn, "piloto")}
+            sostenidos = {
+                f.estrato: f for f in metricas.calcular(conn, "piloto", solo_sostenidos=True)
+            }
+        cr, cn, ai, ac = (e for e, _ in muestreo.ESTRATOS)
+        assert (jueces[cr].auditados, jueces[cr].tasa_sostenidos) == (CUOTA, 1.0)
+        assert (jueces[ac].tasa_sostenidos, jueces[ac].tasa_acuerdo) == (0.0, 0.0)
+        # Solo cuentan los sostenidos: los activos objetados pasan a "sin veredicto".
+        assert sostenidos[cr].vp == CUOTA and sostenidos[ac].sin_veredicto == CUOTA

@@ -132,19 +132,31 @@ class Settings(BaseSettings):
     # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
     # las reglas de decision: dos veredictos con distinta version no son
     # comparables aunque sean del mismo modelo.
-    AGENTE_VERSION: str = "v3"
+    AGENTE_VERSION: str = "v4"
     # Buscador web. SearXNG es el servicio de compose (gratis, sin llave, sin
     # cuota); si hay BRAVE_API_KEY se usa la API de Brave en su lugar, que
     # tiene indice propio y no cae en la zona gris de raspar un motor
     # (crear_agentes.md §11.3).
     SEARXNG_URL: str = "http://searxng:8080"
     BRAVE_API_KEY: str = ""
-    # Presupuesto por negocio. Acotan el costo de un veredicto y evitan que
-    # el modelo busque en circulo: agotado un tope, la herramienta responde
-    # que se agoto y pide concluir.
-    AGENTE_MAX_BUSQUEDAS: int = 8
-    AGENTE_MAX_PAGINAS: int = 6
-    AGENTE_MAX_VUELTAS: int = 16
+    # Recoleccion base: lo que se consulta de cada fuente, igual para todos
+    # los negocios. Resultados por busqueda web, paginas de redes que se
+    # abren y sitios propios del DENUE que se leen.
+    AGENTE_MAX_RESULTADOS: int = 8
+    AGENTE_MAX_REDES: int = 2
+    AGENTE_MAX_SITIOS: int = 2
+    # Consultas extra que cada especialista puede pedir DENTRO de su fuente
+    # (otro nombre en Maps, otra busqueda). 0 apaga la ampliacion y deja solo
+    # la recoleccion base.
+    AGENTE_MAX_AMPLIACIONES: int = 2
+    # Vueltas que tiene cada rol (especialista, decisor, juez) para producir
+    # una salida que pase la validacion; agotadas, su salida es automatica
+    # (y lo dice) en vez de inventarse una.
+    AGENTE_MAX_INTENTOS: int = 3
+    # Modelo del juez. Vacio = el mismo que el equipo (OLLAMA_MODEL). Uno
+    # distinto da una auditoria mas independiente, pero dos modelos de ~20 GB
+    # no caben juntos en la 5090: Ollama los alternaria en VRAM cada negocio.
+    JUEZ_MODEL: str = ""
     # Caracteres de una pagina que se le entregan al modelo. Mas no cabe en
     # el contexto junto con el resto; lo util (estado, fechas, resenas) suele
     # estar al principio.

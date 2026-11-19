@@ -282,16 +282,17 @@ services:
   # `etl-ollama-modelo` lo descarga si falta: el agente no arranca hasta que el
   # servidor responde y el modelo esta en el volumen. Ver ARRANQUE.md §11.
   #
-  # Corre sobre la imagen `etl` y no sobre `tools` porque necesita Chrome:
-  # Google Maps y Facebook solo se leen con un navegador. El codigo se monta
-  # igual, asi que editar src/ no pide rebuild.
+  # Imagen propia (`--target agente`): la base + Chrome, para Google Maps y
+  # Facebook, sin el codigo ni el CLI del ETL. El codigo se monta, asi que
+  # editar src/ no pide rebuild; `docker compose build agente` solo cuando
+  # cambian dependencias.
   agente:
     profiles: ["agente"]
     build:
       context: .
       dockerfile: Dockerfile.etl
-      target: etl
-    image: tesis-etl:local
+      target: agente
+    image: tesis-agente:local
 
     depends_on:
       migrate:
@@ -309,8 +310,6 @@ services:
       # base es "postgres". Se fija aqui para que un OLLAMA_URL viejo en el
       # .env no mande al agente a buscarlo en el host.
       OLLAMA_URL: http://etl-ollama:11434
-
-    entrypoint: ["uv", "run", "python", "-m", "src.agents.main"]
 
     # Chrome se cae en Docker sin memoria compartida.
     shm_size: ${AGENTE_SHM_SIZE:-2gb}

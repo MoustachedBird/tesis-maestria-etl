@@ -24,12 +24,24 @@ from sqlalchemy.orm import Session
 from src.shared.db.base import SCHEMAS, tables_for
 from src.shared.db.models.verificacion import (
     SCHEMA,
+    Auditoria,
+    Consulta,
     Evidencia,
+    Informe,
     Muestra,
     MuestraNegocio,
     Veredicto,
 )
-from src.shared.enums import Confianza, EstadoVerificado, Layer, SenalEvidencia
+from src.shared.enums import (
+    Confianza,
+    Dictamen,
+    EstadoConsulta,
+    EstadoVerificado,
+    Identificacion,
+    Layer,
+    Recolector,
+    SenalEvidencia,
+)
 
 VENTANA = [date(2021, 5, 1), date(2021, 11, 1), date(2022, 5, 1)]
 
@@ -83,13 +95,16 @@ class TestElEsquemaSinBase:
         assert Layer.VERIFICACION.value == "verificacion"
         assert SCHEMA in SCHEMAS
 
-    def test_las_cuatro_tablas(self):
-        assert [t.name for t in tables_for(SCHEMA)] == [
+    def test_las_siete_tablas(self):
+        assert {t.name for t in tables_for(SCHEMA)} == {
             "muestras",
             "muestra_negocios",
             "veredictos",
+            "consultas",
+            "informes",
             "evidencias",
-        ]
+            "auditorias",
+        }
 
     def test_ninguna_fk_apunta_a_gold(self):
         """Es lo que permite `TRUNCATE gold.*` sin perder veredictos."""
@@ -99,19 +114,37 @@ class TestElEsquemaSinBase:
 
     def test_los_check_salen_de_los_enums(self):
         """Agregar un valor al enum lo admite; escribir otro falla."""
-        # La convencion de nombres de `base.py` los deja como `ck_<tabla>_<nombre>`.
         checks = {
-            c.name.rsplit("_", 1)[-1]: str(c.sqltext)
+            (t.name, c.name): str(c.sqltext)
             for t in tables_for(SCHEMA)
             for c in t.constraints
             if hasattr(c, "sqltext")
         }
-        for estado in EstadoVerificado:
-            assert f"'{estado.value}'" in checks["estado"]
-        for confianza in Confianza:
-            assert f"'{confianza.value}'" in checks["confianza"]
-        for senal in SenalEvidencia:
-            assert f"'{senal.value}'" in checks["senal"]
+
+        def check(tabla: str, nombre: str) -> str:
+            # La convencion de `base.py` los nombra `ck_<tabla>_<nombre>`, pero
+            # segun la version el nombre llega ya expandido o sin expandir.
+            for (t, c), sql in checks.items():
+                if t == tabla and c.endswith(nombre):
+                    return sql
+            raise KeyError((tabla, nombre))
+
+        casos = [
+            ("veredictos", "estado", EstadoVerificado),
+            ("veredictos", "confianza", Confianza),
+            ("evidencias", "senal", SenalEvidencia),
+            ("consultas", "recolector", Recolector),
+            ("consultas", "estado", EstadoConsulta),
+            ("informes", "especialista", Recolector),
+            ("informes", "identificado", Identificacion),
+            ("informes", "senal_informe", SenalEvidencia),
+            ("auditorias", "estado_ciego", EstadoVerificado),
+            ("auditorias", "confianza_ciega", Confianza),
+            ("auditorias", "dictamen", Dictamen),
+        ]
+        for tabla, nombre, enum in casos:
+            for valor in enum:
+                assert f"'{valor.value}'" in check(tabla, nombre), (tabla, nombre, valor)
 
     def test_indeterminado_es_un_estado_legitimo(self):
         """Forzarlo a activo o cerrado contaminaría la medida con adivinanzas."""
@@ -280,3 +313,133 @@ def test_truncar_gold_no_toca_la_verificacion(verificacion_engine):
         conn.execute(text("TRUNCATE gold.negocios_clee_oficial"))
     with verificacion_engine.connect() as conn:
         assert conn.execute(text(f"SELECT count(*) FROM {SCHEMA}.veredictos")).scalar() == 1
+
+
+def _expediente(s: Session, v: Veredicto) -> Consulta:
+    pieza = Consulta(
+        pieza_id=str(uuid4()),
+        veredicto_id=v.veredicto_id,
+        orden=1,
+        recolector=Recolector.MAPS.value,
+        fuente="google_maps",
+        consulta="TACOS PACO Guadalajara",
+        url="https://www.google.com/maps/search/x",
+        contenido="Cerrado permanentemente",
+        estado=EstadoConsulta.OK.value,
+    )
+    s.add(pieza)
+    s.flush()
+    return pieza
+
+
+def _auditoria(v: Veredicto, juez: str = "qwen3:32b/v4", **extra) -> Auditoria:
+    campos = dict(
+        auditoria_id=str(uuid4()),
+        veredicto_id=v.veredicto_id,
+        juez=juez,
+        estado_ciego=EstadoVerificado.CERRADO.value,
+        confianza_ciega=Confianza.ALTA.value,
+        razonamiento_ciego="La ficha de Maps dice cerrado permanentemente.",
+        dictamen=Dictamen.SOSTENIDO.value,
+        motivo="La pieza citada es la ficha del domicilio.",
+        piezas_objetadas=[],
+    )
+    campos.update(extra)
+    return Auditoria(**campos)
+
+
+@pytest.mark.unit
+@pytest.mark.postgres
+class TestElExpedienteYElJuez:
+    def test_un_veredicto_con_expediente_informe_evidencia_y_auditoria(self, verificacion_engine):
+        with Session(verificacion_engine) as s:
+            m = _muestra()
+            n = _negocio(m)
+            v = _veredicto(n)
+            s.add_all([m, n, v])
+            s.flush()
+            pieza = _expediente(s, v)
+            s.add_all(
+                [
+                    Informe(
+                        informe_id=str(uuid4()),
+                        veredicto_id=v.veredicto_id,
+                        especialista=Recolector.MAPS.value,
+                        identificado=Identificacion.SI.value,
+                        senal=SenalEvidencia.CERRADO.value,
+                        resumen="Maps dice cerrado permanentemente.",
+                        citas=[{"pieza": 1, "extracto": "Cerrado permanentemente"}],
+                    ),
+                    Evidencia(
+                        evidencia_id=str(uuid4()),
+                        veredicto_id=v.veredicto_id,
+                        pieza_id=pieza.pieza_id,
+                        fuente="google_maps",
+                        extracto="Cerrado permanentemente",
+                        senal=SenalEvidencia.CERRADO.value,
+                    ),
+                    _auditoria(v),
+                ]
+            )
+            s.commit()
+            assert s.get(Consulta, pieza.pieza_id).ampliada is False  # server_default
+            assert s.query(Informe).one().automatico is False
+
+    def test_una_auditoria_por_veredicto_y_juez(self, verificacion_engine):
+        """Es lo que vuelve reanudable `auditar`; otro juez es otra fila."""
+        with Session(verificacion_engine) as s:
+            m = _muestra()
+            n = _negocio(m)
+            v = _veredicto(n)
+            s.add_all([m, n, v])
+            s.flush()
+            s.add_all([_auditoria(v), _auditoria(v, juez="otro:7b/v4")])
+            s.commit()
+            s.add(_auditoria(v))
+            with pytest.raises(IntegrityError):
+                s.commit()
+
+    @pytest.mark.parametrize(
+        "campo,valor",
+        [("dictamen", "correcto"), ("estado_ciego", "closed"), ("confianza_ciega", "0.9")],
+    )
+    def test_el_juez_tiene_vocabulario_cerrado(self, verificacion_engine, campo, valor):
+        with Session(verificacion_engine) as s:
+            m = _muestra()
+            n = _negocio(m)
+            v = _veredicto(n)
+            s.add_all([m, n, v])
+            s.flush()
+            s.add(_auditoria(v, **{campo: valor}))
+            with pytest.raises(IntegrityError):
+                s.commit()
+
+    def test_borrar_el_veredicto_arrastra_expediente_informes_evidencias_y_auditoria(
+        self, verificacion_engine
+    ):
+        with Session(verificacion_engine) as s:
+            m = _muestra()
+            n = _negocio(m)
+            v = _veredicto(n)
+            s.add_all([m, n, v])
+            s.flush()
+            pieza = _expediente(s, v)
+            s.add_all(
+                [
+                    Evidencia(
+                        evidencia_id=str(uuid4()),
+                        veredicto_id=v.veredicto_id,
+                        pieza_id=pieza.pieza_id,
+                        fuente="google_maps",
+                        extracto="Cerrado permanentemente",
+                        senal=SenalEvidencia.CERRADO.value,
+                    ),
+                    _auditoria(v),
+                ]
+            )
+            s.commit()
+            s.delete(m)
+            s.commit()
+        with verificacion_engine.connect() as conn:
+            for tabla in ("veredictos", "consultas", "evidencias", "auditorias"):
+                assert conn.execute(text(f"SELECT count(*) FROM {SCHEMA}.{tabla}")).scalar() == 0

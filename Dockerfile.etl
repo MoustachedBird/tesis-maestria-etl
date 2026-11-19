@@ -1,14 +1,20 @@
 # ============================================================================
-# Imagen del ETL — base portable + Chrome solo donde hace falta
+# Imagenes del proyecto — base portable + Chrome solo donde hace falta
 # ============================================================================
-# Chrome lo usan DOS archivos (`utils/browser.py`, `utils/denue_scraping.py`),
-# ambos del scraping de DENUE. Tenerlo en la base obligaba a que las
-# migraciones y los tests cargaran un navegador amd64 de ~500 MB que no usan,
-# y de paso volvia la imagen inconstruible en arm64 --o sea, en la Mac de
-# desarrollo. Por eso Chrome vive solo en la etapa que lo necesita:
+# Chrome lo usan dos consumidores que no se conocen entre si: el scraping de
+# DENUE (`src/etl/utils/browser.py`) y el agente de supervivencia, que lee
+# Google Maps y Facebook (`src/agents/survival/sources/navegador.py`). Tenerlo
+# en la base obligaba a que migraciones y tests cargaran un navegador amd64
+# de ~500 MB que no usan. Por eso vive en una etapa propia, `navegador`, de
+# la que salen las dos imagenes que lo necesitan:
 #
-#   --target tools   migraciones, pytest, scripts. Portable (arm64 y amd64).
-#   --target etl     el pipeline. Lleva Chrome; amd64.
+#   --target tools    migraciones, pytest, scripts. Portable (arm64 y amd64).
+#   --target etl      el pipeline: navegador + src/ horneado + CLI del ETL.
+#   --target agente   los agentes: navegador + CLI de los agentes, codigo montado.
+#
+# `agente` NO sale de `etl`: el agente no importa del ETL
+# (tests/unit/test_layer_boundaries.py) y su imagen tampoco lo lleva. Lo que
+# comparten es el navegador, que es infraestructura, no codigo de una capa.
 
 # ─── base: interprete y dependencias del proyecto ───────────────────────────
 FROM python:3.12-slim AS base
@@ -39,11 +45,11 @@ RUN uv sync --frozen
 ENTRYPOINT ["uv", "run"]
 CMD ["pytest"]
 
-# ─── etl: el pipeline, con el navegador del scraping ────────────────────────
-FROM base AS etl
-
+# ─── navegador: base + Chrome, sin codigo ───────────────────────────────────
 # amd64 unicamente, que es lo que corre la workstation; en arm64 habria que
 # cambiar a chromium (arquitectura.md §2.3.3).
+FROM base AS navegador
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates \
     && mkdir -p /etc/apt/keyrings \
@@ -56,8 +62,18 @@ http://dl.google.com/linux/chrome/deb/ stable main" \
     && apt-get install -y --no-install-recommends google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
+# ─── etl: el pipeline, con el codigo horneado ───────────────────────────────
+FROM navegador AS etl
+
 # Todo src/ de una vez: etl, meta y api dependen de src/shared (copiarlos por
 # separado dejaba la imagen sin el paquete compartido).
 COPY src/ ./src/
 
 ENTRYPOINT ["uv", "run", "python", "-m", "src.etl.main"]
+
+# ─── agente: los agentes LLM, con el navegador y el codigo montado ──────────
+# Sin COPY de src/: compose monta src/ (editar el prompt no pide rebuild,
+# igual que en `tools`). Solo se reconstruye si cambian dependencias o Chrome.
+FROM navegador AS agente
+
+ENTRYPOINT ["uv", "run", "python", "-m", "src.agents.main"]

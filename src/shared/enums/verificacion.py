@@ -51,3 +51,58 @@ class SenalEvidencia(StrEnum):
     CERRADO = "cerrado"
     ACTIVO = "activo"
     NEUTRAL = "neutral"
+
+
+class Recolector(StrEnum):
+    """Qué paso del recolector produjo una pieza del expediente.
+
+    El expediente se arma siempre con los mismos pasos y en este orden, para
+    que dos negocios se verifiquen con las mismas fuentes y sus veredictos
+    sean comparables. Es el eje para medir qué aporta cada fuente ("¿cuántos
+    veredictos firmes salieron de Maps?").
+    """
+
+    MAPS = "maps"
+    WEB = "web"
+    REDES = "redes"
+    SITIO = "sitio"
+
+
+class EstadoConsulta(StrEnum):
+    """Cómo terminó una consulta del recolector.
+
+    Se guarda también lo que falló: que Maps no tenga ficha o que Facebook
+    pida sesión es información sobre la cobertura de cada fuente, y sin la
+    fila no se distingue "no se consultó" de "se consultó y no había nada".
+    """
+
+    OK = "ok"
+    SIN_RESULTADOS = "sin_resultados"
+    ERROR = "error"
+
+
+class Dictamen(StrEnum):
+    """Lo que el juez concluye del veredicto que audita.
+
+    `SOSTENIDO`: las piezas que el decisor citó dicen lo que les atribuye y
+    alcanzan para ese estado con esa confianza. `NO_SOSTENIDO`: alguna cita
+    no dice eso, es de un homónimo o de un directorio que copia al DENUE, o
+    la confianza excede lo que las piezas permiten.
+    """
+
+    SOSTENIDO = "sostenido"
+    NO_SOSTENIDO = "no_sostenido"
+
+
+class Identificacion(StrEnum):
+    """Si lo que trajo una fuente es de ESTE negocio, según su especialista.
+
+    La identidad es nombre + lugar: una taquería homónima en otro municipio
+    no dice nada de la del DENUE. Se separa de la señal porque son errores
+    distintos --encontrar al negocio equivocado y leer mal al correcto-- y
+    el análisis los cuenta por separado.
+    """
+
+    SI = "si"
+    NO = "no"
+    DUDOSO = "dudoso"
