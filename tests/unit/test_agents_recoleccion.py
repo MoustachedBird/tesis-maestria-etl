@@ -283,3 +283,50 @@ def test_una_pieza_nace_sin_nul():
     p = Pieza("web", "Tienda\x00 Fabys", "ok", titulo="T\x00", url="https://a.mx/\x00")
     assert "\x00" not in p.contenido + p.titulo + p.url
     assert p.contenido == "Tienda Fabys"
+
+
+@pytest.mark.unit
+class TestQueEsUnaFichaDePlataforma:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.tripadvisor.com.mx/Restaurant_Review-g150801-d123-Tacos_Paco.html",
+            "https://www.yelp.com.mx/biz/tacos-paco-guadalajara",
+            "https://www.rappi.com.mx/restaurantes/123-tacos-paco",
+            "https://restaurantguru.com/Tacos-Paco-Guadalajara",
+        ],
+    )
+    def test_fichas(self, url):
+        from src.agents.survival.recoleccion import es_plataforma
+
+        assert es_plataforma(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.seccionamarilla.com.mx/",
+            "https://www.tripadvisor.com.mx/Attractions-g60880-Activities-Anchorage_Alaska.html",
+            "https://www.yelp.com.mx/search?find_desc=tacos",
+            "https://nota.mx/rappi.",
+        ],
+    )
+    def test_portadas_listas_y_otros_dominios_no(self, url):
+        from src.agents.survival.recoleccion import es_plataforma
+
+        assert not es_plataforma(url)
+
+
+@pytest.mark.unit
+def test_maps_en_vista_limitada_no_busca_resenas():
+    class NavLimitado(NavegadorFalso):
+        def __init__(self):
+            super().__init__(
+                texto="Dulceria Ilse · Estás en una vista limitada de Google Maps. " * 5
+            )
+            self.ultima_url = "https://www.google.com/maps/place/Dulceria+Ilse/@20,-100"
+
+        def resenas_recientes(self, *a, **k):
+            raise AssertionError("no debía buscar la pestaña de reseñas")
+
+    piezas = FuenteMaps(NavLimitado(), 6000, 200).recolectar(negocio(), [])
+    assert all(p.consulta != "reseñas más recientes de la ficha" for p in piezas)

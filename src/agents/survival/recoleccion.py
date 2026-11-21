@@ -295,6 +295,13 @@ class FuenteMaps:
         ]
         ficha = getattr(self.navegador, "ultima_url", None) or ""
         ya_leidas = {_clave_ficha(p.url) for p in previas if p.consulta == _RESENAS}
+        if piezas[0].citable and _VISTA_LIMITADA in piezas[0].contenido.lower():
+            # Google le da a un navegador sin sesion una version recortada de
+            # Maps, sin pestana de resenas: buscarla solo gasta tiempo.
+            logger.info(
+                "         🌐 Maps en vista limitada: sin reseñas para un visitante sin sesión"
+            )
+            return piezas
         if piezas[0].citable and "/maps/place/" in ficha and _clave_ficha(ficha) not in ya_leidas:
             resenas = self.navegador.resenas_recientes(self.max_caracteres, self.min_caracteres)
             piezas.append(
@@ -741,11 +748,38 @@ Fragmentos del dominio: `tripadvisor.` cubre `.com.mx` y `.com`.
 """
 
 
-def es_plataforma(url: str) -> bool:
-    """Si la URL es de una plataforma de reseñas o de entrega de `PLATAFORMAS`."""
-    dominio = urlparse(url.lower()).netloc
-    return any(p in dominio for p in PLATAFORMAS)
+_RUTAS_DE_FICHA: dict[str, tuple[str, ...]] = {
+    "tripadvisor.": ("restaurant_review", "attraction_review", "hotel_review", "showuserreviews"),
+    "yelp.": ("/biz/",),
+    "foursquare.com": ("/v/",),
+    "seccionamarilla.": ("/informacion/", "/negocio/"),
+    "opentable.": ("/r/",),
+    "rappi.": ("/restaurantes/", "/tiendas/"),
+    "ubereats.com": ("/store/",),
+    "didi-food.com": ("/store/",),
+    "food.didiglobal": ("/store/",),
+}
+"""Por plataforma, fragmentos de la ruta que solo tiene la ficha de UN negocio.
 
+Sin esto se abría cualquier página del dominio: la portada de Sección
+Amarilla o "Atracciones en Anchorage, Alaska" de TripAdvisor (v6-piloto).
+Una plataforma sin entrada (Restaurant Guru) acepta cualquier ruta que no
+sea la portada.
+"""
+
+
+def es_plataforma(url: str) -> bool:
+    """Si la URL es la FICHA de un negocio en una plataforma de `PLATAFORMAS` (no una portada ni una lista)."""
+    u = urlparse(url.lower())
+    plataforma = next((p for p in PLATAFORMAS if p in u.netloc), None)
+    if plataforma is None or u.path.strip("/") == "":
+        return False
+    rutas = _RUTAS_DE_FICHA.get(plataforma)
+    return rutas is None or any(r in u.path for r in rutas)
+
+
+_VISTA_LIMITADA = "vista limitada de google maps"
+"""Lo que Maps escribe cuando sirve su versión recortada (sin reseñas) a un visitante sin sesión."""
 
 _RESENAS = "reseñas más recientes de la ficha"
 """La `consulta` de la pieza con las reseñas ordenadas por fecha de una ficha de Maps."""

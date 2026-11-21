@@ -118,9 +118,11 @@ def validar_citas(
             continue
         extracto = str(c.get("extracto", "")).strip()
         if not extracto_en(extracto, texto):
+            parecido = fragmento_parecido(extracto, texto)
+            pista = f' Lo más parecido que dice la pieza es: "{parecido}"' if parecido else ""
             errores.append(
                 f"cita {i}: el extracto no aparece textual en la pieza [{n}]; cópialo tal cual "
-                "(puedes recortar con '...')"
+                f"(puedes recortar con '...').{pista}"
             )
         senal = str(c.get("senal", "")).strip().lower()
         if senal not in {s.value for s in SenalEvidencia}:
@@ -156,6 +158,28 @@ def extracto_en(extracto: str, texto: str) -> bool:
     if not fragmentos or max(len(f) for f in fragmentos) < _MIN_EXTRACTO:
         return False
     return all(f in fuente for f in fragmentos)
+
+
+_MIN_PARECIDO = 60
+"""Por debajo de esto el fragmento más parecido no es lo que el modelo quiso citar."""
+
+
+def fragmento_parecido(extracto: str, texto: str) -> str | None:
+    """El tramo del texto que más se parece al extracto, para que el modelo lo copie bien.
+
+    Sin esto, un modelo que parafrasea una cita la repite igual en cada
+    vuelta hasta agotar el presupuesto (v6-piloto: cuatro veces la misma).
+    Se le devuelve el texto real; sigue teniendo que copiarlo.
+    """
+    from rapidfuzz import fuzz
+
+    plano_e, plano_t = _plano(extracto), _plano(texto)
+    if len(plano_e) < _MIN_EXTRACTO or not plano_t:
+        return None
+    alineacion = fuzz.partial_ratio_alignment(plano_e, plano_t)
+    if alineacion is None or alineacion.score < _MIN_PARECIDO:
+        return None
+    return plano_t[alineacion.dest_start : alineacion.dest_end][:300]
 
 
 def fecha_sustentada(fecha: date, texto: str) -> bool:

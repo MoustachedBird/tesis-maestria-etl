@@ -299,6 +299,14 @@ class TestPedir:
         assert pedir(ClienteFalso(), [], FIN, {"fin"}, lambda n, a: (0, []), max_vueltas=2) is None
 
 
+@pytest.mark.unit
+def test_una_cita_mal_copiada_recibe_el_texto_real_para_corregirla():
+    exp = expediente()
+    _, errores = validar_citas([cita(1, "Cerrada permanentemente desde ayer", "cerrado")], exp)
+    assert errores and "Lo más parecido que dice la pieza es" in errores[0]
+    assert "cerrado permanentemente" in errores[0]
+
+
 # ----- especialista -----
 
 

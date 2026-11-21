@@ -132,7 +132,7 @@ class Settings(BaseSettings):
     # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
     # las reglas de decision: dos veredictos con distinta version no son
     # comparables aunque sean del mismo modelo.
-    AGENTE_VERSION: str = "v6"
+    AGENTE_VERSION: str = "v7"
     # Cuantos nombres de busqueda puede elegir el planificador (v6): el primero
     # va a las consultas especificas (domicilio, telefono), los demas se buscan
     # ademas en Maps y en los buscadores. El criterio lo decide el modelo.

@@ -114,16 +114,27 @@ FROM_HECHOS = """silver.establecimientos e
                   LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id"""
 """Los hechos con las etiquetas de vialidad y asentamiento: para escribir el domicilio completo."""
 
+
+def _dato(columna: str) -> str:
+    """Una columna de texto del DENUE sin los rellenos de la encuesta: vacío o "NINGUNO".
+
+    El encuestador anota "NINGUNO" cuando no hay entre calle o tipo de
+    vialidad; sin quitarlo, el planificador escribió "entre Calle Ninguno"
+    (v6-piloto).
+    """
+    return f"NULLIF(NULLIF(NULLIF({columna}, ''), 'NINGUNO'), 'NINGUNA')"
+
+
 _DOMICILIO = (
-    "concat_ws(' ', NULLIF(tv.tipo_vial, ''), NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
-    "NULLIF(ta.tipo_asent, ''), NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
+    f"concat_ws(' ', {_dato('tv.tipo_vial')}, {_dato('e.nom_vial')}, {_dato('e.numero_ext')}, "
+    f"{_dato('ta.tipo_asent')}, {_dato('e.nomb_asent')}, {_dato('e.cod_postal')})"
 )
 """El domicilio de una observación como una línea: tipo y nombre de vialidad, número,
 tipo y nombre de asentamiento, CP ("CALLE FRANCISCO 20 COLONIA CENTRO 37630")."""
 
 _ENTRE_CALLES = (
-    "concat_ws(' Y ', NULLIF(concat_ws(' ', NULLIF(e.tipo_v_e_1, ''), NULLIF(e.nom_v_e_1, '')), ''), "
-    "NULLIF(concat_ws(' ', NULLIF(e.tipo_v_e_2, ''), NULLIF(e.nom_v_e_2, '')), ''))"
+    f"concat_ws(' Y ', NULLIF(concat_ws(' ', {_dato('e.tipo_v_e_1')}, {_dato('e.nom_v_e_1')}), ''), "
+    f"NULLIF(concat_ws(' ', {_dato('e.tipo_v_e_2')}, {_dato('e.nom_v_e_2')}), ''))"
 )
 """Entre qué calles está: contexto para que el planificador escriba un domicilio buscable."""
 
