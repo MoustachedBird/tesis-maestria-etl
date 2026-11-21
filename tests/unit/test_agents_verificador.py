@@ -670,7 +670,9 @@ class TestElJuez:
         assert r.juez == "falso:1b/v4"
         # El paso 1 se pidió SIN el veredicto; ve el expediente crudo, no los informes.
         paso_1 = cliente.conversaciones[0]
-        assert not any("PASO 2" in m.get("content", "") for m in paso_1)
+        # (El prompt de sistema describe los dos pasos; lo que no puede estar es el veredicto.)
+        assert not any("El veredicto del equipo" in m.get("content", "") for m in paso_1)
+        assert not any("estado: cerrado · confianza: alta" in m.get("content", "") for m in paso_1)
         assert "[4] web · directorio_denue" in paso_1[1]["content"]
         # El paso 2 trae el veredicto, sin el razonamiento del equipo.
         paso_2 = cliente.conversaciones[1][-1]["content"]
