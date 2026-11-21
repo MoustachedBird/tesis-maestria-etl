@@ -324,6 +324,8 @@ def auditar_veredicto(
         f"{resultado.confianza_ciega} ({acuerdo} {veredicto.estado}) · "
         f"objetadas {resultado.piezas_objetadas or '—'} · {resultado.duracion_s / 60:.1f} min"
     )
+    logger.info(f"      📝 juez a ciegas: {resultado.razonamiento_ciego}")
+    logger.info(f"      📝 juez dictamen: {resultado.motivo}")
     return resultado
 
 

@@ -145,14 +145,16 @@ class Equipo:
         n.nombres_busqueda = planeacion.nombres
         n.domicilios_busqueda = planeacion.domicilios
         n.telefono_busqueda = planeacion.telefono
+        n.lugar_busqueda = planeacion.lugar
         marca = " (automático)" if planeacion.automatica else ""
         logger.info(
             f"      🏷  nombres: {' | '.join(planeacion.nombres) or '—'} · domicilio: "
-            f"{' | '.join(planeacion.domicilios) or '—'} · teléfono: {planeacion.telefono or '—'}{marca}"
+            f"{' | '.join(planeacion.domicilios) or '—'} · lugar: {planeacion.lugar or '—'} · "
+            f"teléfono: {planeacion.telefono or '—'}{marca}"
         )
         logger.info(
             f"      🏷  consistentes: {', '.join(planeacion.consistentes) or 'ninguno'} · "
-            f"{planeacion.razonamiento[:200]}"
+            f"{planeacion.razonamiento}"
         )
         expediente: list[Pieza] = []
         informes: list[Informe] = []
@@ -173,12 +175,14 @@ class Equipo:
                 for r in (f.recolector for f in grupo.fuentes)
             )
             marca = " (automático)" if informe.automatico else ""
+            logger.info(f"         📝 {grupo.especialidad}: {informe.resumen}")
             logger.info(
                 f"      {_ICONOS.get(grupo.especialidad, '·')} {grupo.especialidad} [{por_fuente}] · "
                 f"{informe.identificado}/{informe.senal} · {len(informe.citas)} citas{marca} · "
                 f"recolección {t_recoleccion:.0f}s, modelo {informe.duracion_s:.0f}s"
             )
         decision = self.decisor.decidir(n, informes, expediente)
+        logger.info(f"      📝 decisor: {decision.razonamiento}")
         return Resultado(
             muestra_id=n.muestra_id,
             clee=n.clee,
@@ -225,13 +229,15 @@ def guardar(conn: Connection, r: Resultado) -> str:
             text("""
                 UPDATE verificacion.muestra_negocios
                 SET nombres_elegidos = :nombres, domicilios_elegidos = :domicilios,
-                    telefono_elegido = :telefono, nombres_elegidos_por = :agente
+                    telefono_elegido = :telefono, lugar_elegido = :lugar,
+                    nombres_elegidos_por = :agente
                 WHERE muestra_id = :id AND clee = :clee
             """),
             {
                 "nombres": r.planeacion.nombres,
                 "domicilios": r.planeacion.domicilios,
                 "telefono": r.planeacion.telefono,
+                "lugar": r.planeacion.lugar,
                 "agente": r.agente,
                 "id": r.muestra_id,
                 "clee": r.clee,

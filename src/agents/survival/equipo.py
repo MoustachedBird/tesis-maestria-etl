@@ -45,7 +45,13 @@ from src.agents.survival.prompts import (
     formatear_insumo,
     sistema_especialista,
 )
-from src.agents.survival.recoleccion import Grupo, Pieza, formatear_expediente, nombre_de
+from src.agents.survival.recoleccion import (
+    Grupo,
+    Pieza,
+    formatear_expediente,
+    lugar_de,
+    nombre_de,
+)
 from src.shared.enums import (
     Confianza,
     EstadoVerificado,
@@ -84,6 +90,8 @@ class Planeacion:
     razonamiento: str
     domicilios: list[str] = field(default_factory=list)
     telefono: str | None = None
+    lugar: str | None = None
+    """Cómo se nombra el lugar en las búsquedas por nombre (qué de localidad, municipio y estado)."""
     consistentes: list[str] = field(default_factory=list)
     """Los campos que dijeron lo mismo en todos los cortes: esos no los decidió el modelo."""
     automatica: bool = False
@@ -95,6 +103,7 @@ class Planeacion:
             "nombres": self.nombres,
             "domicilios": self.domicilios,
             "telefono": self.telefono,
+            "lugar": self.lugar,
             "consistentes": self.consistentes,
             "razonamiento": self.razonamiento,
             "automatica": self.automatica,
@@ -152,12 +161,17 @@ class Planificador:
             if len(_distintos(c, valores[c])) <= 1 and not (c == "domicilio" and n.domicilios)
         ]
         a_decidir = [c for c in CAMPOS_DE_BUSQUEDA if c not in consistentes]
+        lugares = [x for x in (n.localidad, n.municipio, n.entidad) if x]
+        if lugares:
+            # Como nombrar el lugar no tiene regla: siempre lo razona el modelo.
+            a_decidir.append("lugar")
 
         def plan_base(razon: str, automatica: bool) -> Planeacion:
             return Planeacion(
                 nombres=[recientes["nombre"]] if recientes["nombre"] else [],
                 domicilios=recientes["domicilio"],
                 telefono=recientes["telefono"],
+                lugar=lugar_de(n) or None,
                 consistentes=consistentes,
                 razonamiento=razon,
                 automatica=automatica,
@@ -179,7 +193,12 @@ class Planificador:
             ]
         )
         pedido = ", ".join(
-            {"nombre": "nombres", "domicilio": "domicilios", "telefono": "telefono"}[c]
+            {
+                "nombre": "nombres",
+                "domicilio": "domicilios",
+                "telefono": "telefono",
+                "lugar": "lugar",
+            }[c]
             for c in a_decidir
         )
         mensajes = [
@@ -196,7 +215,13 @@ class Planificador:
 
         def validar(_nombre: str, args: dict) -> tuple[Planeacion, list[str]]:
             plan, errores = _validar_datos(
-                args, a_decidir, valores, contexto, self.max_nombres, self.max_domicilios
+                args,
+                a_decidir,
+                valores,
+                contexto,
+                self.max_nombres,
+                self.max_domicilios,
+                " ".join(lugares),
             )
             plan.consistentes = consistentes
             if "nombre" in consistentes:
@@ -234,8 +259,9 @@ def _validar_datos(
     contexto_domicilio: str,
     max_nombres: int,
     max_domicilios: int,
+    lugares: str = "",
 ) -> tuple[Planeacion, list[str]]:
-    """Los campos pedidos, sin nombres, calles, números ni teléfonos que el DENUE no publicó."""
+    """Los campos pedidos, sin nombres, calles, números, lugares ni teléfonos que el DENUE no publicó."""
     errores: list[str] = []
     nombres: list[str] = []
     domicilios: list[str] = []
@@ -291,7 +317,24 @@ def _validar_datos(
     razonamiento = str(args.get("razonamiento", "")).strip()
     if len(razonamiento) < MIN_TEXTO:
         errores.append("razonamiento vacío o demasiado corto: di por qué esos datos")
-    return Planeacion(nombres, razonamiento, domicilios=domicilios, telefono=telefono), errores
+    lugar = None
+    if "lugar" in a_decidir:
+        lugar = " ".join(str(args.get("lugar") or "").split()) or None
+        if not lugar:
+            errores.append("falta el lugar (localidad, municipio y/o estado) con que se buscará")
+        else:
+            ajenas = sorted(_palabras(lugar) - _palabras(lugares) - _CONECTORES)
+            if ajenas:
+                errores.append(
+                    f"el lugar «{lugar}» trae {ajenas}, que no son de la localidad, el municipio "
+                    "ni el estado del DENUE"
+                )
+    plan = Planeacion(nombres, razonamiento, domicilios=domicilios, telefono=telefono, lugar=lugar)
+    return plan, errores
+
+
+_CONECTORES = frozenset({"DE", "DEL", "LA", "LAS", "LOS", "EL", "Y", "E"})
+"""Palabras que el lugar puede llevar aunque no estén en los nombres del DENUE."""
 
 
 def _lista(valor: Any) -> list[str]:

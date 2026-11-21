@@ -249,6 +249,13 @@ class MuestraNegocio(Base):
     telefono_elegido: Mapped[str | None] = mapped_column(
         Text, comment="El telefono con que lo busco el planificador la ultima vez"
     )
+    lugar_elegido: Mapped[str | None] = mapped_column(
+        Text,
+        comment=(
+            "Como nombro el planificador el lugar en las busquedas (que de localidad, municipio "
+            "y estado), la ultima vez"
+        ),
+    )
     alias_razones_sociales: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), comment="Las razones sociales distintas del DENUE, la mas reciente primero"
     )

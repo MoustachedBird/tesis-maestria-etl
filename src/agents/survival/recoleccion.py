@@ -204,7 +204,7 @@ def recolectar_con_bitacora(fuente: Fuente, n: Negocio, expediente: list[Pieza])
     logger.info(
         f"      ✔ {fuente.recolector}: {len(piezas)} piezas "
         f"(ok {conteo['ok']}, sin resultados {conteo['sin_resultados']}, error {conteo['error']}) "
-        f"en {time.monotonic() - inicio:.0f}s" + (f" · {error[:140]}" if error else "")
+        f"en {time.monotonic() - inicio:.0f}s" + (f" · {error}" if error else "")
     )
     return piezas
 
@@ -258,11 +258,10 @@ class FuenteMaps:
         """
         consultas = [f"{nombre_de(n)} {lugar_de(n)}"]
         if domicilio_de(n):
-            consultas.append(f"{nombre_de(n)} {domicilio_de(n)}, {lugar_de(n)}".strip(" ,"))
+            consultas.append(f"{nombre_de(n)} {con_lugar(n, domicilio_de(n))}")
         consultas += [f"{otro} {lugar_de(n)}" for otro in nombres_de_busqueda(n)[1:]]
         consultas += [
-            f"{nombre_de(n)} {otro}, {lugar_de(n)}".strip(" ,")
-            for otro in domicilios_de_busqueda(n)[1:]
+            f"{nombre_de(n)} {con_lugar(n, otro)}" for otro in domicilios_de_busqueda(n)[1:]
         ]
         piezas: list[Pieza] = []
         for c in consultas:
@@ -351,15 +350,14 @@ class FuenteWeb:
         """Nombre + lugar, nombre + domicilio, teléfono, y dos dirigidas: redes y reseñas."""
         consultas = [f'"{nombre_de(n)}" {lugar_de(n)}']
         if domicilio_de(n):
-            consultas.append(f"{nombre_de(n)} {domicilio_de(n)}, {lugar_de(n)}".strip(" ,"))
+            consultas.append(f"{nombre_de(n)} {con_lugar(n, domicilio_de(n))}")
         if telefono_de(n):
             consultas.append(telefono_de(n))
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
         consultas += [f'"{otro}" {lugar_de(n)}' for otro in nombres_de_busqueda(n)[1:]]
         consultas += [
-            f"{nombre_de(n)} {otro}, {lugar_de(n)}".strip(" ,")
-            for otro in domicilios_de_busqueda(n)[1:]
+            f"{nombre_de(n)} {con_lugar(n, otro)}" for otro in domicilios_de_busqueda(n)[1:]
         ]
         piezas: list[Pieza] = []
         for consulta in consultas:
@@ -674,6 +672,16 @@ def nombre_de(n: Negocio) -> str:
     return n.nombre or (n.nombres[0] if n.nombres else "")
 
 
+def con_lugar(n: Negocio, domicilio: str | None) -> str:
+    """El domicilio para buscarse: tal cual si lo escribió el planificador (él decide qué lugar
+    lleva); si es el crudo del DENUE, con el lugar al final."""
+    if not domicilio:
+        return ""
+    if n.domicilios_busqueda:
+        return domicilio
+    return f"{domicilio}, {lugar_de(n)}".strip(" ,")
+
+
 def domicilios_de_busqueda(n: Negocio) -> list[str]:
     """Los domicilios con que se busca: los del planificador, o el más reciente del DENUE."""
     return list(n.domicilios_busqueda) or n.domicilios[:1]
@@ -696,13 +704,15 @@ def nombres_de_busqueda(n: Negocio) -> list[str]:
 
 
 def lugar_de(n: Negocio) -> str:
-    """`localidad, municipio, estado`, sin repetir: "Xalapa, Veracruz" si la localidad es el municipio.
+    """Cómo se nombra el lugar en las búsquedas por nombre.
 
-    La localidad ubica al negocio en zonas rurales (un municipio tiene
-    decenas) y el estado desambigua municipios homónimos (hay un Ocampo en
-    seis estados). Si localidad y municipio se llaman igual, se escribe una
-    vez y el estado es lo que agrega información.
+    Lo decide el planificador (`n.lugar_busqueda`): qué de la localidad, el
+    municipio y el estado ayuda a encontrar al negocio no tiene una regla.
+    Si no decidió (no hubo modelo o no dio una respuesta válida), el respaldo
+    es la localidad, el municipio y el estado sin repetir.
     """
+    if n.lugar_busqueda:
+        return n.lugar_busqueda
     partes: list[str] = []
     for x in (n.localidad, n.municipio, n.entidad):
         if x and _llave_lugar(x) not in {_llave_lugar(p) for p in partes}:

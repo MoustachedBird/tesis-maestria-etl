@@ -1214,7 +1214,8 @@ planificador (LLM)                       con qué nombres, domicilios y teléfon
                                          SIEMPRE lo lee el modelo: concilia variantes ("NO.
                                          VEINTE" = "20") y lo escribe como Google Maps, con
                                          vialidad, colonia, CP y entre calles; sin inventar calles
-                                         ni números
+                                         ni números. Y razona cómo nombrar el lugar (qué de
+                                         localidad, municipio y estado): no hay regla
 por cada grupo, en el orden de `Especialidad` (mapas -> buscadores -> redes ->
 plataformas -> huella digital -> registros -> fachada):
     recolección base, en código          mismas consultas para todos, fuente por fuente
@@ -1622,7 +1623,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 16 revisiones, b0000 (baseline) -> b0015
+├── alembic/versions/              # 17 revisiones, b0000 (baseline) -> b0016
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -2280,6 +2281,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0013nombres_buscados` | v6: `veredictos.nombres_buscados` (JSONB): con qué nombres buscó el planificador y por qué. Solo aditiva |
 | `b0014alias_en_la_muestra` | `muestra_negocios.alias` (los `nom_estab` distintos, el más reciente primero), `nombres_elegidos` y `nombres_elegidos_por` (lo último que eligió el planificador). Rellena las muestras existentes donde está NULL |
 | `b0015alias_de_cada_campo` | `muestra_negocios.alias_domicilios`, `alias_telefonos`, `alias_razones_sociales`, `alias_sitios`, `alias_correos` (el más reciente primero) y `domicilios_elegidos`, `telefono_elegido`. Rellena donde está NULL |
+| `b0016lugar_elegido` | `muestra_negocios.lugar_elegido`: cómo nombró el planificador el lugar (qué de localidad, municipio y estado). Solo aditiva |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse

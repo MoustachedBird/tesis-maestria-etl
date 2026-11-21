@@ -146,7 +146,9 @@ Recibes cada variante con los cortes en que apareció, la más reciente primero.
 
 NOMBRES. Cómo es probable que aparezca en Google Maps o en Facebook. Puedes quitar "SA DE CV" o el giro genérico, reordenar y combinar; si hubo un cambio de nombre real, conviene buscar los dos. Solo con palabras que aparezcan en las variantes o en la razón social: no agregues ni corrijas palabras.
 
-DOMICILIOS. No copies el más reciente: LÉELO. Usa todas las variantes y el contexto (tipo de vialidad, colonia o asentamiento, código postal, entre qué calles, municipio) para entender cuál es el domicilio real y escríbelo como lo escribiría Google Maps: tipo y nombre de la vialidad, número en dígitos, colonia, código postal. Por ejemplo, si un corte dice "CALLE FRANCISCO NUMERO 20" y otro "CALLE FRANCISCO NO. VEINTE", son el mismo domicilio: "Calle Francisco 20". Escribe solo la parte de la calle (vialidad, número, colonia, código postal): la localidad, el municipio y el estado los agrega el equipo a cada búsqueda. Corrige el formato (números escritos con letra a dígitos, abreviaturas como C., AV., COL., NO. desarrolladas o quitadas, "SN" como "sin número"), pero NO inventes una calle, un número ni una colonia que no estén en las variantes. Si se mudó, da primero el domicilio actual y, si sirve para encontrar rastros del negocio, el anterior. Si la vialidad tiene nombre poco buscable, puedes dar una segunda forma con la esquina ("Calle Francisco esquina Hidalgo").
+DOMICILIOS. No copies el más reciente: LÉELO. Usa todas las variantes y el contexto (tipo de vialidad, colonia o asentamiento, código postal, entre qué calles, municipio) para entender cuál es el domicilio real y escríbelo como lo escribiría Google Maps: tipo y nombre de la vialidad, número en dígitos, colonia, código postal. Por ejemplo, si un corte dice "CALLE FRANCISCO NUMERO 20" y otro "CALLE FRANCISCO NO. VEINTE", son el mismo domicilio: "Calle Francisco 20". Cada domicilio se busca TAL CUAL lo escribas: incluye de la localidad, el municipio y el estado lo que ayude a encontrarlo (tú decides). Corrige el formato (números escritos con letra a dígitos, abreviaturas como C., AV., COL., NO. desarrolladas o quitadas, "SN" como "sin número"), pero NO inventes una calle, un número ni una colonia que no estén en las variantes. Si se mudó, da primero el domicilio actual y, si sirve para encontrar rastros del negocio, el anterior. Si la vialidad tiene nombre poco buscable, puedes dar una segunda forma con la esquina ("Calle Francisco esquina Hidalgo").
+
+LUGAR. Cómo nombrar el lugar en las búsquedas por nombre ("Tacos Paco" + lugar). Decide qué de la localidad, el municipio y el estado ayuda: si la localidad y el municipio se llaman igual, una vez basta y el estado desambigua; si la localidad es un pueblo dentro de un municipio grande, la localidad es lo que lo ubica; si el municipio tiene un nombre que se repite en otros estados, el estado hace falta. Solo con palabras de la localidad, el municipio y el estado del DENUE.
 
 TELÉFONO. Uno de los publicados, el que más probablemente siga vigente.
 
@@ -154,6 +156,7 @@ AL TERMINAR (herramienta elegir_datos, obligatoria)
 - nombres: de 1 a {k}, el MEJOR primero. Solo si se te pide.
 - domicilios: de 1 a {d}, el MEJOR primero, escritos para buscarse. Solo si se te pide.
 - telefono: el que se usará. Solo si se te pide.
+- lugar: cómo se nombra el lugar en las búsquedas por nombre. Solo si se te pide.
 - razonamiento: por qué, en una a tres frases (si corregiste un domicilio, di qué corregiste)."""
 """Prompt de sistema del planificador; `{k}` es AGENTE_MAX_NOMBRES y `{d}` AGENTE_MAX_DOMICILIOS."""
 
@@ -168,6 +171,7 @@ HERRAMIENTA_ELEGIR_DATOS = {
                 "nombres": {"type": "array", "items": {"type": "string"}},
                 "domicilios": {"type": "array", "items": {"type": "string"}},
                 "telefono": {"type": ["string", "null"]},
+                "lugar": {"type": ["string", "null"]},
                 "razonamiento": {"type": "string"},
             },
             "required": ["razonamiento"],

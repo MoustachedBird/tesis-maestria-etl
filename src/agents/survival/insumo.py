@@ -70,6 +70,9 @@ class Negocio:
     (números en dígitos, sin abreviaturas); vacío = el más reciente del DENUE."""
     telefono_busqueda: str | None = None
     """El teléfono con que se busca (planificador); None = el más reciente del DENUE."""
+    lugar_busqueda: str | None = None
+    """Cómo se nombra el lugar en las búsquedas (planificador); None = la regla de respaldo de
+    `recoleccion.lugar_de` (localidad, municipio y estado sin repetir)."""
 
 
 def muestra_por_nombre(conn: Connection, nombre: str) -> tuple[str, list[date]]:

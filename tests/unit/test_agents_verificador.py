@@ -642,7 +642,7 @@ def test_el_equipo_recolecta_informa_por_fuente_y_decide():
 def elegir(
     nombres=None, razonamiento="El más repetido y el más reciente, sin el giro.", **kw
 ) -> dict:
-    args = {"razonamiento": razonamiento, **kw}
+    args = {"razonamiento": razonamiento, "lugar": "Guadalajara, Jalisco", **kw}
     if nombres is not None:
         args["nombres"] = nombres
     return llamada("elegir_datos", **args)
@@ -679,19 +679,34 @@ class TestElPlanificador:
         assert p.consistentes == ["telefono"] and p.telefono == "3312345678"
         visto = cliente.conversaciones[0][1]["content"]
         assert (
-            "«POLLO FELIZ» (2024-11, 2025-05)" in visto and "DECIDE: nombres, domicilios." in visto
+            "«POLLO FELIZ» (2024-11, 2025-05)" in visto
+            and "DECIDE: nombres, domicilios, lugar." in visto
         )
 
-    def test_todo_consistente_y_sin_domicilio_no_llama_al_modelo(self):
-        cliente = ClienteFalso()
+    def test_el_lugar_siempre_lo_razona_el_modelo(self):
+        cliente = ClienteFalso(respuesta(elegir(lugar="Guadalajara, Jalisco")))
         n = negocio(nombre="TACOS PACO", nombres=["TACOS PACO", "Tacos  Paco"], domicilios=[])
         p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(n)
+        assert p.lugar == "Guadalajara, Jalisco" and not p.automatica
+        assert set(p.consistentes) == {"nombre", "domicilio", "telefono"}
+        assert "DECIDE: lugar." in cliente.conversaciones[0][1]["content"]
+
+    def test_el_lugar_no_puede_inventar(self):
+        n = negocio(nombre="TACOS PACO", nombres=["TACOS PACO"], domicilios=[])
+        cliente = ClienteFalso(
+            respuesta(elegir(lugar="Zapopan, Jalisco")), respuesta(elegir(lugar="Guadalajara"))
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(n)
+        assert p.lugar == "Guadalajara"
+        assert any("ZAPOPAN" in t for t in cliente.tools())
+
+    def test_sin_lugar_ni_variantes_no_llama_al_modelo(self):
+        cliente = ClienteFalso()
+        n = negocio(
+            nombre="TACOS PACO", nombres=["TACOS PACO"], domicilios=[], municipio=None, entidad=None
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(n)
         assert p.automatica and cliente.conversaciones == []
-        assert p.nombres == ["TACOS PACO"] and set(p.consistentes) == {
-            "nombre",
-            "domicilio",
-            "telefono",
-        }
 
     def test_no_puede_inventar_palabras_en_el_nombre(self):
         cliente = ClienteFalso(
@@ -785,6 +800,7 @@ class TestElPlanificador:
         p = Planificador(ClienteFalso(), max_nombres=3, max_intentos=2).elegir(self._negocio())
         assert p.automatica and p.nombres == ["EL POLLO FELIZ"]
         assert p.domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+        assert p.lugar == "Guadalajara, Jalisco"  # la regla de respaldo
 
 
 @pytest.mark.unit

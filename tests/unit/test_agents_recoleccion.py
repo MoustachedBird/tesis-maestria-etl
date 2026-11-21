@@ -355,3 +355,17 @@ class TestElLugar:
         n = negocio(localidad="XALAPA", municipio="Xalapa", entidad="Veracruz")
         FuenteMaps(nav, 6000, 200).recolectar(n, [])
         assert nav.maps[1] == "TACOS PACO AV VALLARTA 1234 AMERICANA 44160, XALAPA, Veracruz"
+
+
+@pytest.mark.unit
+def test_un_domicilio_del_planificador_se_busca_tal_cual():
+    nav = NavegadorFalso()
+    n = negocio(
+        domicilios_busqueda=["Av. Vallarta 1234, Americana, Guadalajara, Jal."],
+        lugar_busqueda="Guadalajara, Jalisco",
+    )
+    FuenteMaps(nav, 6000, 200).recolectar(n, [])
+    assert nav.maps == [
+        "TACOS PACO Guadalajara, Jalisco",
+        "TACOS PACO Av. Vallarta 1234, Americana, Guadalajara, Jal.",
+    ]

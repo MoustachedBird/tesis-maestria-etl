@@ -105,7 +105,7 @@ def pedir(
             if nombre in terminales:
                 valor, errores = validar(nombre, args)
                 if errores:
-                    logger.info(f"         ✗ {rol}: {nombre} rechazado: {'; '.join(errores)[:300]}")
+                    logger.info(f"         ✗ {rol}: {nombre} rechazado: {'; '.join(errores)}")
                     mensajes.append(tool(nombre, "RECHAZADO:\n- " + "\n- ".join(errores)))
                     continue
                 return Salida(nombre, valor, vuelta)
