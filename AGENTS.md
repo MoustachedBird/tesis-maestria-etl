@@ -67,13 +67,21 @@ El pipeline corre en la workstation Linux (`docs/entorno_linux.md`), así que
 desacoplado de la terminal**, con su salida a un archivo:
 
 ```bash
-nohup docker compose run --rm etl transform --only clee-radio > clee.log 2>&1 &
+setsid nohup docker compose run --rm -T etl transform --only clee-radio > clee.log 2>&1 < /dev/null &
 sleep 10
 tail -f clee.log      # Ctrl+C corta el tail, no la corrida
 ```
 
 Razón: las corridas duran horas o días y un SSH que se cae no debe
 llevárselas. `ARRANQUE.md` trae el runbook completo con esta forma.
+
+**`nohup` solo no basta con `docker compose run`.** Compose reenvía al
+contenedor las señales que recibe, y con eso deshace el `nohup`: el
+2026-11-21 la sesión SSH se cerró a las 23:27 y la verificación del agente
+murió ese mismo minuto, sin una línea de error. `setsid` saca el proceso de
+la sesión (el cierre del SSH ya no le llega) y `-T` evita que compose pida
+una terminal. Los ejemplos con `nohup` a secas de este documento y de
+`ARRANQUE.md` se leen con esos dos agregados.
 
 Si por excepción se lanza desde la Mac, ahí la amenaza es el reposo y el
 comando va con **`caffeinate -dims` antepuesto** — un sleep/wake a medio
