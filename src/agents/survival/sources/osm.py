@@ -115,7 +115,7 @@ def buscar_cerca(
     url: str,
     timeout: int = 30,
     pausador: Pausador | None = None,
-    intentos: int = 1,
+    intentos: int = 3,
     max_objetos: int = 8,
 ) -> list[Objeto]:
     """Los negocios mapeados alrededor del punto, del que más se parece al que menos.
@@ -160,6 +160,9 @@ def buscar_cerca(
         if r is not None:
             break
         if intento < intentos:
+            logger.info(
+                f"         🗺  Overpass: ningún servidor contestó; vuelta {intento + 1}/{intentos} en {10 * intento}s"
+            )
             time.sleep(10 * intento)
     if r is None:
         raise ultimo or requests.RequestException("Overpass no contestó")
