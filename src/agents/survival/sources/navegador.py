@@ -222,7 +222,7 @@ class Navegador:
             return f"ERROR: el navegador no pudo abrir {url} ({e.__class__.__name__})"
         self.ultima_url = destino
 
-        motivo = detectar_bloqueo(texto, destino)
+        motivo = detectar_bloqueo(f"{titulo} {texto}", destino)
         if motivo:
             logger.info(f"         ⛔ bloqueo en {url[:120]}: {motivo}")
             return f"ERROR: {url} respondió con un bloqueo anti-bot ({motivo}). NO la leíste."
@@ -290,6 +290,7 @@ class Navegador:
             texto = self._texto_cuando_pinte(driver, min_caracteres)
             destino = driver.current_url
             fuente = driver.page_source or ""
+            texto = f"{driver.title or ''} {texto}"
         except Exception as e:
             self.cerrar()
             raise RuntimeError(f"el navegador no pudo abrir {url} ({e.__class__.__name__})") from e

@@ -138,11 +138,12 @@ class Settings(BaseSettings):
     # manda el orden fijo de `Especialidad` (los buscadores van antes que
     # redes, plataformas y archivo, que abren lo que ellos encontraron).
     # Quitar una fuente cambia el expediente: sube AGENTE_VERSION con ello.
-    # `google` y `duckduckgo` existen pero no van por default: en indominus
-    # bloquean desde la primera consulta (sondeo del 2026-11-21); sus
-    # resultados llegan igual por los motores de SearXNG (`web`).
+    # `google`, `duckduckgo` y `brave` existen pero no van por default: en
+    # indominus responden con un CAPTCHA desde la primera consulta (sondeo
+    # del 2026-11-21); sus resultados llegan igual por los motores de
+    # SearXNG (`web`).
     AGENTE_FUENTES: str = (
-        "maps,osm,web,bing,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat"
+        "maps,osm,web,bing,redes,plataformas,sitio,wayback,common_crawl,dominio,sat"
     )
     # Segundos minimos entre dos peticiones al mismo dominio (mas un azar de
     # hasta la mitad). Es lo que mantiene a Google, Bing y Maps sin CAPTCHA

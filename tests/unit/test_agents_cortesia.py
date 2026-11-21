@@ -103,3 +103,11 @@ class TestElNavegadorNoLeeUnBloqueo:
         n, _ = navegador(DriverFalso(destino=ficha))
         n.leer("https://www.google.com/maps/search/tacos")
         assert n.ultima_url == ficha
+
+
+@pytest.mark.unit
+def test_el_desafio_de_brave_es_bloqueo_aunque_la_pagina_sea_larga():
+    texto = (
+        "Captcha - Brave Search Verificando que no eres un bot. Arrastra el control deslizante. "
+    )
+    assert detectar_bloqueo(texto + "x " * 3000)

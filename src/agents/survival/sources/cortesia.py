@@ -39,7 +39,20 @@ _SENALES_DE_BLOQUEO: tuple[tuple[str, str], ...] = (
     ("desafío anti-bot", r"bots use duckduckgo too|anomaly-modal"),
     ("acceso denegado", r"access denied|acceso denegado|request blocked|too many requests"),
 )
-"""Frases de una página de bloqueo, en inglés y español, con el motivo que se reporta."""
+"""Frases de una página de bloqueo, en inglés y español, con el motivo que se reporta.
+
+Solo cuentan en una página corta (`_MAX_TEXTO_BLOQUEO`): en una larga, una
+mención de "captcha" o "access denied" es contenido.
+"""
+
+_SENALES_INEQUIVOCAS: tuple[tuple[str, str], ...] = (
+    ("tráfico inusual", r"unusual traffic|tr[aá]fico inusual|our systems have detected"),
+    ("verificación humana", r"verify you are (a )?human|are you a robot|no soy un robot"),
+    # El desafio de Brave Search (sondeo del 2026-11-21): un control deslizante.
+    ("verificación humana", r"no eres un bot|arrastra el control deslizante"),
+    ("verificación humana", r"flagged as being suspicious|schedule a captcha"),
+)
+"""Frases que solo aparecen en una página de bloqueo: cuentan a cualquier largo."""
 
 _URLS_DE_BLOQUEO: tuple[str, ...] = ("/sorry/", "google.com/sorry", "/captcha", "challenge")
 """Fragmentos de la URL a la que redirige un bloqueo (Google manda a /sorry/)."""
@@ -64,12 +77,11 @@ def detectar_bloqueo(texto: str, url: str = "") -> str | None:
     if any(f in u for f in _URLS_DE_BLOQUEO):
         return "redirigió a una página de verificación"
     t = (texto or "").lower()
+    for motivo, patron in _SENALES_INEQUIVOCAS:
+        if re.search(patron, t[:_MAX_TEXTO_BLOQUEO]):
+            return motivo
     if len(t) > _MAX_TEXTO_BLOQUEO:
-        # Las frases inequivocas cuentan a cualquier largo; "captcha" suelto no.
-        for motivo, patron in _SENALES_DE_BLOQUEO[1:3]:
-            if re.search(patron, t[:_MAX_TEXTO_BLOQUEO]):
-                return motivo
-        return None
+        return None  # "captcha" suelto en una pagina larga es contenido
     for motivo, patron in _SENALES_DE_BLOQUEO:
         if re.search(patron, t):
             return motivo

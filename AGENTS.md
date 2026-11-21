@@ -1335,7 +1335,7 @@ diseño y lo que falta (PSM, DOF, fachada con visión) está en
 | | `osm` | Overpass (gratis) | negocios mapeados a `AGENTE_RADIO_METROS` del punto, con distancia, parecido del nombre, etiquetas `disused:`/`was:` y `check_date` |
 | buscadores | `web` | SearXNG del compose (o la API de Brave con `BRAVE_API_KEY`) | nombre + lugar; + domicilio; teléfono; + facebook; + opiniones |
 | | `bing`, `duckduckgo` | su página de resultados por `requests` | las mismas cinco |
-| | `google`, `brave` | su página de resultados en Chrome | las mismas cinco. `google` (y `duckduckgo`) no van por default: bloquean desde indominus |
+| | `google`, `brave` | su página de resultados en Chrome | las mismas cinco. `google`, `duckduckgo` y `brave` no van por default: piden CAPTCHA desde indominus |
 | redes | `redes` | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajeron los buscadores: páginas antes que publicaciones, grupos al final |
 | plataformas | `plataformas` | TripAdvisor, Yelp, Rappi, Uber Eats... en Chrome | las primeras `AGENTE_MAX_PLATAFORMAS` que trajeron los buscadores |
 | huella digital | `sitio` | `requests`, Chrome de respaldo | los primeros `AGENTE_MAX_SITIOS` del DENUE |
@@ -2392,7 +2392,7 @@ OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
 AGENTE_VERSION=v5
-AGENTE_FUENTES=maps,osm,web,bing,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
+AGENTE_FUENTES=maps,osm,web,bing,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
 AGENTE_PAUSA_SEGUNDOS=3
 AGENTE_MAX_BLOQUEOS=3
 AGENTE_PERFIL_CHROME=data/agente/chrome
