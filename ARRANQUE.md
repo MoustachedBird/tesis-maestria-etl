@@ -598,14 +598,23 @@ experimento funciona, se saca una muestra mayor con otro nombre:
 
 ```bash
 docker compose run --rm agente muestrear --nombre v5-piloto --cuota 10
-nohup docker compose run --rm agente verificar --muestra v5-piloto > agente-v5.log 2>&1 &
+setsid nohup docker compose run --rm -T agente verificar --muestra v5-piloto \
+  > agente-v5.log 2>&1 < /dev/null &
 sleep 10
-tail -f agente-v5.log
+tail -f agente-v5.log        # o data/agente.log, que trae lo mismo
 docker compose run --rm agente metricas --muestra v5-piloto     # tiempos y proyección
 ```
 
 Se reanuda solo: los pendientes son los que ESTE equipo (`modelo/version`)
 no ha verificado.
+
+**`setsid` y `-T`, no solo `nohup`.** El 2026-11-21 la corrida murió sin
+una línea de error a media llamada al modelo: `docker compose run` reenvía
+al contenedor las señales que recibe, y con eso deshace el `nohup` cuando
+se cae la sesión SSH. `setsid` saca el proceso de la sesión y `-T` evita que
+compose pida terminal. Mientras una llamada al modelo no vuelve, el log
+escribe "⏳ ... sigue pensando" cada minuto: si eso deja de salir, el
+proceso murió.
 
 Si el juez falló en algunos negocios, o se quiere otro modelo como juez:
 

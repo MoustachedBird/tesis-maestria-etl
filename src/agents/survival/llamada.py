@@ -11,6 +11,7 @@ una sola vez.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +24,13 @@ logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 _MAX_ARGS_LOG = 160
 """Caracteres de los argumentos de una herramienta que se escriben en el log."""
+
+LATIDO_SEGUNDOS = 60
+"""Cada cuánto se escribe "sigue pensando" mientras una llamada al modelo no vuelve.
+
+Sin esto, una llamada de varios minutos (un modelo recién cargado, un
+contexto grande) se ve en el log igual que un proceso muerto.
+"""
 
 Validador = Callable[[str, dict], tuple[Any, list[str]]]
 """`(herramienta, argumentos) -> (valor, errores)`; con errores, el valor no vale."""
@@ -73,7 +81,8 @@ def pedir(
     for vuelta in range(1, max_vueltas + 1):
         logger.info(f"         🤖 {rol} · vuelta {vuelta}/{max_vueltas}: pensando...")
         inicio = time.monotonic()
-        respuesta = cliente.chat(mensajes, herramientas)
+        with _latido(rol, inicio):
+            respuesta = cliente.chat(mensajes, herramientas)
         mensajes.append({k: v for k, v in respuesta.items() if not k.startswith("_")})
         llamadas = respuesta.get("tool_calls") or []
         tokens = respuesta.get("_tokens") or {}
@@ -109,6 +118,28 @@ def pedir(
                 {"role": "user", "content": f"Última oportunidad: llama a {nombres} AHORA."}
             )
     return None
+
+
+class _latido:
+    """Un hilo que escribe cada `LATIDO_SEGUNDOS` que la llamada sigue en curso."""
+
+    def __init__(self, rol: str, inicio: float):
+        self.rol = rol
+        self.inicio = inicio
+        self._fin = threading.Event()
+        self._hilo = threading.Thread(target=self._latir, daemon=True)
+
+    def __enter__(self) -> _latido:
+        self._hilo.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._fin.set()
+
+    def _latir(self) -> None:
+        while not self._fin.wait(LATIDO_SEGUNDOS):
+            minutos = (time.monotonic() - self.inicio) / 60
+            logger.info(f"         ⏳ {self.rol} sigue pensando · {minutos:.0f} min")
 
 
 def _resumen(nombre: str, args: dict) -> str:
