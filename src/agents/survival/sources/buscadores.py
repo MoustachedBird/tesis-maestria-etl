@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import base64
 import re
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, quote_plus, urlparse
 
@@ -42,6 +44,9 @@ from src.agents.survival.sources.cortesia import (
     Pausador,
     detectar_bloqueo,
 )
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 UA_NAVEGADOR = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -96,7 +101,7 @@ class BuscadorBing:
             self.timeout,
             params={"q": consulta, "setlang": "es", "cc": "MX", "mkt": "es-MX"},
         )
-        return resultados_bing(html)[:n]
+        return _o_guardar(self.nombre, html, resultados_bing(html))[:n]
 
 
 class BuscadorDuckDuckGo:
@@ -127,7 +132,8 @@ class BuscadorGoogle:
 
     def buscar(self, consulta: str, n: int = 8) -> list[Resultado]:
         url = f"https://www.google.com/search?q={quote_plus(consulta)}&hl=es&gl=mx&num=10&pws=0"
-        return resultados_google(self.navegador.html(url))[:n]
+        html = self.navegador.html(url)
+        return _o_guardar(self.nombre, html, resultados_google(html))[:n]
 
 
 class BuscadorBravePagina:
@@ -140,7 +146,8 @@ class BuscadorBravePagina:
 
     def buscar(self, consulta: str, n: int = 8) -> list[Resultado]:
         url = f"https://search.brave.com/search?q={quote_plus(consulta)}&source=web"
-        return resultados_brave(self.navegador.html(url))[:n]
+        html = self.navegador.html(url)
+        return _o_guardar(self.nombre, html, resultados_brave(html))[:n]
 
 
 class BuscadorVigilado:
@@ -235,6 +242,32 @@ def resultados_brave(html: str) -> list[Resultado]:
 
 
 # ----- internos -----
+
+CARPETA_HTML = Path("data/agente/html")
+"""Dónde se guarda una página de resultados que no dio ningún resultado, para revisarla."""
+
+_MAX_HTML_GUARDADOS = 30
+"""Tope de páginas guardadas por motor: es diagnóstico, no archivo."""
+
+
+def _o_guardar(motor: str, html: str, resultados: list[Resultado]) -> list[Resultado]:
+    """Devuelve `resultados`; si no hay ninguno, guarda el HTML para ver por qué.
+
+    Una página sin resultados es o una búsqueda sin coincidencias o un motor
+    que cambió su HTML (o un desafío que `detectar_bloqueo` no reconoce). Sin
+    la página no se distinguen.
+    """
+    if resultados:
+        return resultados
+    try:
+        CARPETA_HTML.mkdir(parents=True, exist_ok=True)
+        if len(list(CARPETA_HTML.glob(f"{motor}-*.html"))) < _MAX_HTML_GUARDADOS:
+            destino = CARPETA_HTML / f"{motor}-{datetime.now():%Y%m%d-%H%M%S-%f}.html"
+            destino.write_text(html, encoding="utf-8")
+            logger.info(f"         💾 {motor} sin resultados: página guardada en {destino}")
+    except OSError:
+        pass  # el diagnostico no tumba la busqueda
+    return resultados
 
 
 def _pedir(

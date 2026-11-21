@@ -215,7 +215,12 @@ class FuenteWayback:
 
 
 class FuenteCommonCrawl:
-    """Common Crawl: si el sitio y las redes aparecieron en los crawls más recientes."""
+    """Common Crawl: si el sitio propio apareció en los crawls más recientes.
+
+    Solo el sitio: Facebook e Instagram no se dejan rastrear por Common
+    Crawl, y consultarlos costaba ~70 s por URL para nada (sondeo del
+    2026-11-21).
+    """
 
     recolector = Recolector.COMMON_CRAWL.value
     herramienta = None
@@ -230,12 +235,10 @@ class FuenteCommonCrawl:
         self._crawls: list[dict] | None = None
 
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
-        """Una pieza por URL, con su presencia en cada crawl reciente."""
-        urls = urls_para_archivo(n, expediente, self.max_urls)
+        """Una pieza por sitio, con su presencia en cada crawl reciente."""
+        urls = urls_para_archivo(n, [], self.max_urls)  # sin las redes halladas
         if not urls:
-            return [
-                _pieza(self.recolector, "capturas", "(no hay sitio ni redes que buscar)", False)
-            ]
+            return [_pieza(self.recolector, "capturas", "(el DENUE no publicó sitio)", False)]
         try:
             if self._crawls is None:
                 self._crawls = archivo.crawls_recientes(self.n_crawls, timeout=self.timeout)

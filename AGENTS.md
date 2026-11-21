@@ -1335,12 +1335,12 @@ diseño y lo que falta (PSM, DOF, fachada con visión) está en
 | | `osm` | Overpass (gratis) | negocios mapeados a `AGENTE_RADIO_METROS` del punto, con distancia, parecido del nombre, etiquetas `disused:`/`was:` y `check_date` |
 | buscadores | `web` | SearXNG del compose (o la API de Brave con `BRAVE_API_KEY`) | nombre + lugar; + domicilio; teléfono; + facebook; + opiniones |
 | | `bing`, `duckduckgo` | su página de resultados por `requests` | las mismas cinco |
-| | `google`, `brave` | su página de resultados en Chrome | las mismas cinco |
-| redes | `redes` | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajeron los buscadores |
+| | `google`, `brave` | su página de resultados en Chrome | las mismas cinco. `google` (y `duckduckgo`) no van por default: bloquean desde indominus |
+| redes | `redes` | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajeron los buscadores: páginas antes que publicaciones, grupos al final |
 | plataformas | `plataformas` | TripAdvisor, Yelp, Rappi, Uber Eats... en Chrome | las primeras `AGENTE_MAX_PLATAFORMAS` que trajeron los buscadores |
 | huella digital | `sitio` | `requests`, Chrome de respaldo | los primeros `AGENTE_MAX_SITIOS` del DENUE |
 | | `wayback` | índice CDX del Internet Archive | primera y últimas capturas del sitio y las redes; lectura de la última buena |
-| | `common_crawl` | índice de los `AGENTE_CRAWLS_COMMON_CRAWL` crawls recientes | presencia del sitio y las redes en cada uno |
+| | `common_crawl` | índice de los `AGENTE_CRAWLS_COMMON_CRAWL` crawls recientes | presencia del sitio propio en cada uno (Facebook no se deja rastrear) |
 | | `dominio` | WHOIS de `.mx`, RDAP del resto, DNS | registro y vencimiento del dominio propio del sitio o del correo |
 | registros | `sat` | lista de no localizados del SAT (CSV, en caché `AGENTE_CACHE_DIAS`) | razón social exacta |
 
@@ -2392,7 +2392,7 @@ OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
 AGENTE_VERSION=v5
-AGENTE_FUENTES=maps,osm,web,bing,duckduckgo,google,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
+AGENTE_FUENTES=maps,osm,web,bing,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
 AGENTE_PAUSA_SEGUNDOS=3
 AGENTE_MAX_BLOQUEOS=3
 AGENTE_PERFIL_CHROME=data/agente/chrome
@@ -2401,12 +2401,12 @@ AGENTE_MAX_ARCHIVO=3
 AGENTE_CRAWLS_COMMON_CRAWL=3
 AGENTE_RADIO_METROS=150
 AGENTE_CACHE_DIAS=30
-OVERPASS_URL=https://overpass-api.de/api/interpreter
+OVERPASS_URL=https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter
 SAT_NO_LOCALIZADOS_URL=http://omawww.sat.gob.mx/cifras_sat/Documents/No%20localizados.csv
 SEARXNG_URL=http://searxng:8080
 BRAVE_API_KEY=
 AGENTE_MAX_RESULTADOS=8
-AGENTE_MAX_REDES=2
+AGENTE_MAX_REDES=3
 AGENTE_MAX_SITIOS=2
 AGENTE_MAX_AMPLIACIONES=2
 AGENTE_MAX_INTENTOS=3

@@ -138,9 +138,11 @@ class Settings(BaseSettings):
     # manda el orden fijo de `Especialidad` (los buscadores van antes que
     # redes, plataformas y archivo, que abren lo que ellos encontraron).
     # Quitar una fuente cambia el expediente: sube AGENTE_VERSION con ello.
+    # `google` y `duckduckgo` existen pero no van por default: en indominus
+    # bloquean desde la primera consulta (sondeo del 2026-11-21); sus
+    # resultados llegan igual por los motores de SearXNG (`web`).
     AGENTE_FUENTES: str = (
-        "maps,osm,web,bing,duckduckgo,google,brave,redes,plataformas,"
-        "sitio,wayback,common_crawl,dominio,sat"
+        "maps,osm,web,bing,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat"
     )
     # Segundos minimos entre dos peticiones al mismo dominio (mas un azar de
     # hasta la mitad). Es lo que mantiene a Google, Bing y Maps sin CAPTCHA
@@ -168,9 +170,15 @@ class Settings(BaseSettings):
     AGENTE_RADIO_METROS: int = 150
     # Dias que vale la copia local de una lista descargada (la del SAT).
     AGENTE_CACHE_DIAS: int = 30
-    # Servidor de Overpass (OpenStreetMap). El publico es gratuito con uso
-    # razonable; a volumen de muestra sobra.
-    OVERPASS_URL: str = "https://overpass-api.de/api/interpreter"
+    # Servidores de Overpass (OpenStreetMap), separados por coma: se prueba
+    # el siguiente si uno no contesta. Los publicos son gratuitos con uso
+    # razonable, pero se saturan (el principal no contesto en 30 s el
+    # 2026-11-21).
+    OVERPASS_URL: str = (
+        "https://overpass-api.de/api/interpreter,"
+        "https://overpass.kumi.systems/api/interpreter,"
+        "https://overpass.private.coffee/api/interpreter"
+    )
     # Lista de contribuyentes NO LOCALIZADOS del SAT (art. 69 CFF), en CSV.
     # Si el SAT la mueve, se cambia aqui; `sondear` dice si se pudo bajar.
     SAT_NO_LOCALIZADOS_URL: str = (
@@ -186,7 +194,7 @@ class Settings(BaseSettings):
     # los negocios. Resultados por busqueda web, paginas de redes que se
     # abren y sitios propios del DENUE que se leen.
     AGENTE_MAX_RESULTADOS: int = 8
-    AGENTE_MAX_REDES: int = 2
+    AGENTE_MAX_REDES: int = 3
     AGENTE_MAX_SITIOS: int = 2
     # Consultas extra que cada especialista puede pedir DENTRO de su fuente
     # (otro nombre en Maps, otra busqueda). 0 apaga la ampliacion y deja solo

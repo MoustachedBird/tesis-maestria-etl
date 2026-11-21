@@ -255,7 +255,28 @@ class Navegador:
             evidencia) y el texto o el `ERROR`.
         """
         url = _MAPS_BUSQUEDA.format(consulta=quote(consulta.strip()))
-        return url, self.leer(url, max_caracteres, min_caracteres)
+        texto = self.leer(url, max_caracteres, min_caracteres)
+        if not texto.startswith("ERROR"):
+            self._esperar_ficha()
+        return url, texto
+
+    def _esperar_ficha(self) -> None:
+        """Maps cambia la URL a `/maps/place/` un momento después de pintar la ficha: se espera.
+
+        Sin esto `ultima_url` se queda en `/maps/search/` y la fuente no sabe
+        que cayó en una ficha (no lee sus reseñas). Si en `espera` segundos no
+        cambia, era una lista de resultados.
+        """
+        limite = time.monotonic() + self.espera
+        while time.monotonic() < limite:
+            try:
+                actual = self._abrir().current_url
+            except Exception:  # noqa: BLE001  (sin driver no hay que esperar)
+                return
+            if "/maps/place/" in actual:
+                self.ultima_url = actual
+                return
+            time.sleep(0.5)
 
     def html(self, url: str, min_caracteres: int = 200) -> str:
         """El HTML de una página tras ejecutar su JavaScript: para leer resultados de un buscador.

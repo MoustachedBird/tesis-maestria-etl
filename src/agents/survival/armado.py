@@ -115,7 +115,7 @@ class Armado:
             Recolector.OSM.value: lambda: FuenteOsm(
                 url=a.OVERPASS_URL,
                 radio_m=a.AGENTE_RADIO_METROS,
-                timeout=max(timeout, 30),
+                timeout=max(timeout, 45),
                 pausador=self.pausador,
             ),
             Recolector.PLATAFORMAS.value: lambda: FuentePlataformas(

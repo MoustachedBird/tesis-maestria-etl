@@ -251,6 +251,7 @@ def sondear(
                 except Exception as e:  # noqa: BLE001  (el sondeo reporta, no se cae)
                     tabla.add_row(f.recolector, "ERROR", f"{e.__class__.__name__}: {e}"[:120])
             console.print(tabla)
+            _comprobar_servicios()
             return
 
         from src.shared.db.session import get_engine
@@ -318,6 +319,57 @@ def sondear(
         console.print(f"   expediente completo ({len(expediente)} piezas): {destino}")
     finally:
         navegador.cerrar()
+
+
+def _comprobar_servicios() -> None:
+    """Una consulta de prueba a cada servicio de datos abiertos, con su tiempo y resultado.
+
+    Con un negocio sin sitio, sin correo ni razón social, `sondear` no toca
+    el registro de dominios ni el SAT; esto los prueba siempre.
+    """
+    import time
+    from pathlib import Path
+
+    from src.agents.survival.armado import DATOS_AGENTE
+    from src.agents.survival.sources import archivo, dominio, osm
+    from src.agents.survival.sources.sat import ListaSat
+
+    a = get_settings()
+    pruebas = {
+        "overpass (OSM)": lambda: (
+            f"{len(osm.buscar_cerca(19.43260, -99.13320, ['CATEDRAL'], radio_m=100, url=a.OVERPASS_URL, timeout=45))} objetos cerca del Zócalo"
+        ),
+        "internet archive": lambda: (
+            f"{len(archivo.capturas_wayback('inegi.org.mx', timeout=30)[1])} capturas recientes de inegi.org.mx"
+        ),
+        "common crawl": lambda: archivo.crawls_recientes(1, timeout=60)[0]["id"],
+        "rdap (gTLD)": lambda: "; ".join(dominio.consultar_registro("google.com").lineas[:2]),
+        "whois (.mx)": lambda: "; ".join(dominio.consultar_registro("unam.mx").lineas[:2]),
+        "lista del SAT": lambda: _filas_sat(
+            ListaSat(
+                a.SAT_NO_LOCALIZADOS_URL,
+                Path(DATOS_AGENTE) / "sat",
+                dias_validez=a.AGENTE_CACHE_DIAS,
+            )
+        ),
+    }
+    tabla = Table(title="servicios de datos abiertos")
+    for col in ("servicio", "segundos", "resultado"):
+        tabla.add_column(col)
+    for nombre, prueba in pruebas.items():
+        inicio = time.monotonic()
+        try:
+            resultado = str(prueba())
+        except Exception as e:  # noqa: BLE001  (el sondeo reporta, no se cae)
+            resultado = f"ERROR {e.__class__.__name__}: {e}"[:150]
+        tabla.add_row(nombre, f"{time.monotonic() - inicio:.0f}", resultado)
+    console.print(tabla)
+
+
+def _filas_sat(lista: Any) -> str:
+    """Carga la lista del SAT (descargándola si hace falta) y dice cuántos registros trae."""
+    lista.buscar("PRUEBA")
+    return f"{lista.filas:,} registros, descargada el {lista.descargada}"
 
 
 @app.command()

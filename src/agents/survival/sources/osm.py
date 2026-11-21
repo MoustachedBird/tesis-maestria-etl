@@ -120,29 +120,42 @@ def buscar_cerca(
         lat, lon: el punto del DENUE.
         nombres: los nombres con que apareció el negocio, para la similitud.
         radio_m: radio de búsqueda.
-        url: el servidor Overpass.
+        url: el servidor Overpass, o varios separados por coma: se prueba el
+            siguiente si uno no contesta (los públicos se saturan seguido).
         timeout: segundos por petición.
         pausador: la pausa por dominio de la corrida.
-        intentos: Overpass responde 429/504 cuando está saturado; se reintenta.
+        intentos: vueltas sobre la lista de servidores.
         max_objetos: cuántos se devuelven.
 
     Raises:
-        requests.RequestException: si Overpass no contesta tras los intentos.
+        requests.RequestException: si ningún servidor contesta tras los intentos.
     """
+    servidores = [u.strip() for u in url.split(",") if u.strip()]
+    ultimo: Exception | None = None
+    r = None
     for intento in range(1, intentos + 1):
-        if pausador is not None:
-            pausador.esperar(url)
-        r = requests.post(
-            url,
-            data={"data": consulta_overpass(lat, lon, radio_m)},
-            headers={"User-Agent": _UA},
-            timeout=timeout,
-        )
-        if r.status_code in (429, 504) and intento < intentos:
+        for servidor in servidores:
+            if pausador is not None:
+                pausador.esperar(servidor)
+            try:
+                r = requests.post(
+                    servidor,
+                    data={"data": consulta_overpass(lat, lon, radio_m)},
+                    headers={"User-Agent": _UA},
+                    timeout=timeout,
+                )
+                if r.status_code in (429, 502, 503, 504):
+                    raise requests.HTTPError(f"{servidor} respondió HTTP {r.status_code}")
+                r.raise_for_status()
+                break
+            except requests.RequestException as e:
+                ultimo, r = e, None
+        if r is not None:
+            break
+        if intento < intentos:
             time.sleep(10 * intento)
-            continue
-        r.raise_for_status()
-        break
+    if r is None:
+        raise ultimo or requests.RequestException("Overpass no contestó")
     objetos = [
         o for o in (_objeto(e, lat, lon, nombres) for e in r.json().get("elements", [])) if o
     ]

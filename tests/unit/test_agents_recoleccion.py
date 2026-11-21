@@ -152,6 +152,15 @@ class TestRedes:
         FuenteRedes(nav, 2, 6000, 200).recolectar(negocio(), _web(IG, recolector="duckduckgo"))
         assert nav.leidas == [IG]
 
+    def test_la_pagina_del_negocio_antes_que_publicaciones_y_grupos(self):
+        nav = NavegadorFalso()
+        grupo = "https://www.facebook.com/groups/1803558436594459/posts/4691821994434741/"
+        post = "https://www.facebook.com/100083341502594/posts/526093946845318/"
+        pagina = "https://www.facebook.com/p/Dulceria-El-Kiosco-100083341502594/"
+        ig_post = "https://www.instagram.com/p/C1x2y3/"
+        FuenteRedes(nav, 3, 6000, 200).recolectar(negocio(), _web(grupo, post, ig_post, pagina))
+        assert nav.leidas == [pagina, post, ig_post]
+
     def test_respeta_el_tope(self):
         nav = NavegadorFalso()
         FuenteRedes(nav, 1, 6000, 200).recolectar(negocio(), _web(FB, IG))

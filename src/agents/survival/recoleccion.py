@@ -355,6 +355,10 @@ class FuenteWeb:
                 )
             ]
         if not resultados:
+            logger.info(
+                f"         🔎 {self.recolector} «{consulta}»: 0 resultados · "
+                f"{time.monotonic() - inicio:.0f}s"
+            )
             return [
                 Pieza(
                     recolector=self.recolector,
@@ -412,14 +416,23 @@ class FuenteHallada:
         """Si la URL es de las que abre esta fuente."""
         raise NotImplementedError
 
+    def prioridad(self, url: str) -> int:
+        """Orden en que se abren (menor primero); por default, el de los buscadores."""
+        return 0
+
+    def halladas(self, expediente: list[Pieza]) -> list[str]:
+        """Las de este tipo que trajeron los buscadores, por prioridad y luego en su orden."""
+        urls = urls_halladas(expediente, self.es)
+        return sorted(urls, key=lambda u: (self.prioridad(u), urls.index(u)))
+
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
         """Las primeras `maximo` páginas de este tipo que aparecieron en los buscadores."""
-        return [self._leer(url) for url in urls_halladas(expediente, self.es)[: self.maximo]]
+        return [self._leer(url) for url in self.halladas(expediente)[: self.maximo]]
 
     def ampliar(self, n: Negocio, args: dict[str, Any], expediente: list[Pieza]) -> list[Pieza]:
         """Abre otra de las que aparecieron. Una URL que no salió de un buscador no se abre."""
         url = str(args.get("url", "")).strip()
-        if clave_url(url) not in {clave_url(u) for u in urls_halladas(expediente, self.es)}:
+        if clave_url(url) not in {clave_url(u) for u in self.halladas(expediente)}:
             return [
                 Pieza(
                     recolector=self.recolector,
@@ -436,7 +449,7 @@ class FuenteHallada:
         abiertas = {
             clave_url(p.url) for p in expediente if p.recolector == self.recolector and p.url
         }
-        pendientes = [u for u in urls_halladas(expediente, self.es) if clave_url(u) not in abiertas]
+        pendientes = [u for u in self.halladas(expediente) if clave_url(u) not in abiertas]
         if not pendientes:
             return f"No quedan otras páginas {self.tipo} en el expediente."
         return f"Páginas {self.tipo} que salieron en los buscadores y no se han abierto:\n" + (
@@ -458,6 +471,25 @@ class FuenteRedes(FuenteHallada):
     def es(self, url: str) -> bool:
         """Facebook o Instagram."""
         return es_red(url)
+
+    def prioridad(self, url: str) -> int:
+        """Primero la página del negocio, luego sus publicaciones, al final los grupos.
+
+        Una publicación suelta o un grupo de compraventa dicen poco del
+        negocio; la página trae el encabezado, el horario y la última
+        publicación (sondeo del 2026-11-21: se abrían dos publicaciones y la
+        página quedaba fuera). En Facebook `/p/<nombre>` es una página; en
+        Instagram `/p/<código>` es una publicación.
+        """
+        u = urlparse(url.lower())
+        if "/groups/" in u.path:
+            return 2
+        publicacion = ("/posts/", "/photos/", "/videos/", "/reel", "/stories/", "/permalink")
+        if any(f in u.path for f in publicacion):
+            return 1
+        if "instagram.com" in u.netloc and u.path.startswith("/p/"):
+            return 1
+        return 0
 
 
 class FuentePlataformas(FuenteHallada):
