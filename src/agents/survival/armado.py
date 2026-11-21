@@ -22,6 +22,7 @@ from src.agents.survival.fuentes_abiertas import (
 from src.agents.survival.recoleccion import (
     Fuente,
     FuenteMaps,
+    FuentePlataformas,
     FuenteRedes,
     FuenteSitio,
     FuenteWeb,
@@ -116,6 +117,9 @@ class Armado:
                 radio_m=a.AGENTE_RADIO_METROS,
                 timeout=max(timeout, 30),
                 pausador=self.pausador,
+            ),
+            Recolector.PLATAFORMAS.value: lambda: FuentePlataformas(
+                self.navegador, a.AGENTE_MAX_PLATAFORMAS, caracteres, minimo
             ),
             Recolector.SITIO.value: lambda: FuenteSitio(
                 lambda url: leer_con_respaldo(url, self.navegador, caracteres, timeout, minimo),

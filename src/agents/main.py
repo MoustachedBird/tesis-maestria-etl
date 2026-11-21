@@ -348,11 +348,14 @@ def metricas(
     ),
 ) -> None:
     """La tabla de confusión por estrato (gold contra el equipo) y lo que dijo el juez."""
+    from sqlalchemy import text
+
     from src.agents.survival.metricas import (
         auditoria,
         calcular,
         precision_cerrado_reponderada,
         tasa_falsos_negativos_reponderada,
+        tiempos,
     )
     from src.shared.db.session import get_engine
 
@@ -360,6 +363,14 @@ def metricas(
         try:
             filas = calcular(conn, muestra, agente, solo_sostenidos=solo_sostenidos)
             jueces = auditoria(conn, muestra, agente)
+            t = tiempos(conn, muestra, agente)
+            total = conn.execute(
+                text(
+                    "SELECT count(*) FROM verificacion.muestra_negocios mn "
+                    "JOIN verificacion.muestras m USING (muestra_id) WHERE m.nombre = :n"
+                ),
+                {"n": muestra},
+            ).scalar_one()
         except ValueError as e:
             console.print(f"[red]   ✖ {e}[/red]")
             raise typer.Exit(code=1) from e
@@ -416,6 +427,25 @@ def metricas(
             f"{j.acuerdo} ({pct(j.tasa_acuerdo)})",
         )
     console.print(tabla_juez)
+
+    def minutos(v: float | None) -> str:
+        return "—" if v is None else f"{v:.1f} min"
+
+    console.print(
+        f"   tiempo por negocio ({t.verificados} verificados): promedio {minutos(t.promedio_min)}, "
+        f"mediana {minutos(t.mediana_min)}, p90 {minutos(t.p90_min)}; "
+        f"juez {minutos(t.juez_promedio_min)}"
+    )
+    for especialista, informes, segundos in t.por_especialista:
+        console.print(
+            f"      {especialista:<12} {informes:>5} informes · {segundos:6.0f} s promedio"
+        )
+    faltan = max(int(total) - t.verificados, 0)
+    for n in sorted({faltan, 400, 1000} - {0}):
+        horas = t.proyeccion_horas(n)
+        if horas is not None:
+            etiqueta = "los que faltan de esta muestra" if n == faltan else "negocios"
+            console.print(f"   a este ritmo, {n} {etiqueta}: {horas:.1f} h ({horas / 24:.1f} días)")
 
 
 if __name__ == "__main__":

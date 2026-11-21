@@ -493,6 +493,21 @@ class TestLasMetricas:
                 for f in metricas.calcular(conn, "piloto", agente="falso:1b/v4")
             )
 
+    def test_los_tiempos_por_negocio_y_por_especialista(self, db, tracker):
+        muestra(db, tracker)
+        with db.connect() as conn:
+            vacio = metricas.tiempos(conn, "piloto")
+        assert vacio.verificados == 0 and vacio.proyeccion_horas(10) is None
+        verificar_muestra(db, tracker, VerificadorFalso(), "piloto")
+        with db.connect() as conn:
+            t = metricas.tiempos(conn, "piloto", agente="falso:1b/v4")
+        assert t.verificados == 4 * CUOTA
+        assert t.promedio_min == pytest.approx(1.5 / 60)
+        assert t.mediana_min == pytest.approx(1.5 / 60)
+        # Solo los que decidieron traen informe (el de Maps).
+        assert [e for e, _, _ in t.por_especialista] == ["maps"]
+        assert t.proyeccion_horas(60) == pytest.approx(60 * 1.5 / 3600)
+
 
 class JuezFalso:
     """Sostiene los cerrados y objeta el resto; a ciegas siempre dice cerrado."""

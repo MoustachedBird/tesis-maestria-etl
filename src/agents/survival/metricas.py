@@ -18,6 +18,7 @@ que la evidencia alcanza.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -214,3 +215,75 @@ def auditoria(conn: Connection, nombre: str, agente: str | None = None) -> list[
         )
         for estrato, _ in ESTRATOS
     ]
+
+
+# ----- tiempos -----
+
+
+@dataclass
+class Tiempos:
+    """Cuánto cuesta verificar un negocio: lo que decide el tamaño de la muestra siguiente."""
+
+    verificados: int
+    promedio_min: float | None
+    mediana_min: float | None
+    p90_min: float | None
+    juez_promedio_min: float | None
+    por_especialista: list[tuple[str, int, float]]
+    """(especialista, informes, segundos promedio): recolección de ampliaciones + modelo."""
+
+    def proyeccion_horas(self, negocios: int) -> float | None:
+        """Horas para `negocios` más, al ritmo promedio (equipo + juez)."""
+        if self.promedio_min is None:
+            return None
+        return negocios * (self.promedio_min + (self.juez_promedio_min or 0)) / 60
+
+
+_SQL_TIEMPOS = """
+SELECT count(*)                                                        AS verificados,
+       avg(v.duracion_s) / 60                                          AS promedio,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY v.duracion_s) / 60  AS mediana,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY v.duracion_s) / 60  AS p90,
+       (SELECT avg(a.duracion_s) / 60 FROM verificacion.auditorias a
+         JOIN verificacion.veredictos w USING (veredicto_id)
+         WHERE w.muestra_id = :id
+           AND (CAST(:agente AS text) IS NULL OR w.agente = CAST(:agente AS text))) AS juez
+FROM verificacion.veredictos v
+WHERE v.muestra_id = :id
+  AND (CAST(:agente AS text) IS NULL OR v.agente = CAST(:agente AS text))
+"""
+
+_SQL_TIEMPOS_ESPECIALISTA = """
+SELECT i.especialista, count(*) AS informes, avg(i.duracion_s) AS segundos
+FROM verificacion.informes i
+JOIN verificacion.veredictos v USING (veredicto_id)
+WHERE v.muestra_id = :id
+  AND (CAST(:agente AS text) IS NULL OR v.agente = CAST(:agente AS text))
+GROUP BY 1 ORDER BY 3 DESC NULLS LAST
+"""
+
+
+def tiempos(conn: Connection, nombre: str, agente: str | None = None) -> Tiempos:
+    """Duración por negocio (promedio, mediana, p90), del juez y por especialista.
+
+    `veredictos.duracion_s` es el equipo completo (recolección + especialistas
+    + decisor); el juez va aparte en `auditorias.duracion_s`.
+    """
+    muestra_id, _ = insumo.muestra_por_nombre(conn, nombre)
+    params = {"id": muestra_id, "agente": agente}
+    f = conn.execute(text(_SQL_TIEMPOS), params).mappings().one()
+
+    def num(x: Any) -> float | None:
+        return None if x is None else float(x)
+
+    return Tiempos(
+        verificados=int(f["verificados"]),
+        promedio_min=num(f["promedio"]),
+        mediana_min=num(f["mediana"]),
+        p90_min=num(f["p90"]),
+        juez_promedio_min=num(f["juez"]),
+        por_especialista=[
+            (r["especialista"], int(r["informes"]), float(r["segundos"] or 0))
+            for r in conn.execute(text(_SQL_TIEMPOS_ESPECIALISTA), params).mappings()
+        ],
+    )

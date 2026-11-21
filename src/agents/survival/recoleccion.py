@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from src.agents.survival.insumo import Negocio
 from src.agents.survival.sources.busqueda import Buscador, Resultado, clasificar_fuente
@@ -347,44 +348,54 @@ class FuenteWeb:
         return piezas
 
 
-class FuenteRedes:
-    """Facebook e Instagram: las páginas que trajo el buscador, abiertas con navegador y sin sesión."""
+class FuenteHallada:
+    """Páginas que trajeron los buscadores, de cierto tipo, abiertas en Chrome sin sesión.
 
-    recolector = Recolector.REDES.value
-    herramienta = {
-        "type": "function",
-        "function": {
-            "name": "leer_red",
-            "description": "Abre otra página de Facebook o Instagram de la lista que se te dio.",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string"}},
-                "required": ["url"],
-            },
-        },
-    }
+    La base para redes y plataformas: abre las primeras `maximo` que
+    encontraron los buscadores y el especialista puede pedir otra, pero
+    solo de la lista: una URL que proponga el modelo no se abre.
+    """
 
-    def __init__(
-        self, navegador: Navegable, max_redes: int, max_caracteres: int, min_caracteres: int
-    ):
+    recolector: str
+    tipo: str
+    """Cómo se llaman estas páginas para el modelo ("de redes", "de plataformas")."""
+    nombre_herramienta: str
+
+    def __init__(self, navegador: Navegable, maximo: int, max_caracteres: int, min_caracteres: int):
         self.navegador = navegador
-        self.max_redes = max_redes
+        self.maximo = maximo
         self.max_caracteres = max_caracteres
         self.min_caracteres = min_caracteres
+        self.herramienta = {
+            "type": "function",
+            "function": {
+                "name": self.nombre_herramienta,
+                "description": f"Abre otra página {self.tipo} de la lista que se te dio.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                },
+            },
+        }
+
+    def es(self, url: str) -> bool:
+        """Si la URL es de las que abre esta fuente."""
+        raise NotImplementedError
 
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
-        """Las primeras `max_redes` páginas de redes que aparecieron en el buscador."""
-        return [self._leer(url) for url in _urls_de_redes(expediente)[: self.max_redes]]
+        """Las primeras `maximo` páginas de este tipo que aparecieron en los buscadores."""
+        return [self._leer(url) for url in urls_halladas(expediente, self.es)[: self.maximo]]
 
     def ampliar(self, n: Negocio, args: dict[str, Any], expediente: list[Pieza]) -> list[Pieza]:
-        """Abre otra de las que aparecieron. Una URL que no salió del buscador no se abre."""
+        """Abre otra de las que aparecieron. Una URL que no salió de un buscador no se abre."""
         url = str(args.get("url", "")).strip()
-        if clave_url(url) not in {clave_url(u) for u in _urls_de_redes(expediente)}:
+        if clave_url(url) not in {clave_url(u) for u in urls_halladas(expediente, self.es)}:
             return [
                 Pieza(
                     recolector=self.recolector,
                     url=url or None,
-                    contenido="ERROR: esa URL no está en la lista de redes del expediente.",
+                    contenido=f"ERROR: esa URL no está en la lista de páginas {self.tipo} del expediente.",
                     estado=EstadoConsulta.ERROR.value,
                     ampliada=True,
                 )
@@ -392,20 +403,44 @@ class FuenteRedes:
         return [replace(self._leer(url), ampliada=True)]
 
     def contexto(self, expediente: list[Pieza]) -> str:
-        """Las páginas de redes que el buscador trajo y todavía no se abrieron."""
+        """Las páginas de este tipo que trajeron los buscadores y todavía no se abrieron."""
         abiertas = {
             clave_url(p.url) for p in expediente if p.recolector == self.recolector and p.url
         }
-        pendientes = [u for u in _urls_de_redes(expediente) if clave_url(u) not in abiertas]
+        pendientes = [u for u in urls_halladas(expediente, self.es) if clave_url(u) not in abiertas]
         if not pendientes:
-            return "No quedan otras páginas de redes en el expediente."
-        return "Páginas de redes que salieron en el buscador y no se han abierto:\n" + "\n".join(
-            f"- {u}" for u in pendientes
+            return f"No quedan otras páginas {self.tipo} en el expediente."
+        return f"Páginas {self.tipo} que salieron en los buscadores y no se han abierto:\n" + (
+            "\n".join(f"- {u}" for u in pendientes)
         )
 
     def _leer(self, url: str) -> Pieza:
         texto = self.navegador.leer(url, self.max_caracteres, self.min_caracteres)
         return Pieza(recolector=self.recolector, url=url, contenido=texto, estado=_estado_de(texto))
+
+
+class FuenteRedes(FuenteHallada):
+    """Facebook e Instagram: las páginas que trajeron los buscadores."""
+
+    recolector = Recolector.REDES.value
+    tipo = "de redes"
+    nombre_herramienta = "leer_red"
+
+    def es(self, url: str) -> bool:
+        """Facebook o Instagram."""
+        return es_red(url)
+
+
+class FuentePlataformas(FuenteHallada):
+    """Fichas de reseñas y de entrega (TripAdvisor, Yelp, Rappi...) que trajeron los buscadores."""
+
+    recolector = Recolector.PLATAFORMAS.value
+    tipo = "de plataformas"
+    nombre_herramienta = "leer_plataforma"
+
+    def es(self, url: str) -> bool:
+        """Una ficha de alguna de `PLATAFORMAS`."""
+        return es_plataforma(url)
 
 
 class FuenteSitio:
@@ -498,9 +533,28 @@ def es_red(url: str) -> bool:
     return clasificar_fuente(url) in ("facebook", "instagram")
 
 
-def _urls_de_redes(expediente: list[Pieza]) -> list[str]:
-    """URLs de Facebook/Instagram que trajeron los buscadores."""
-    return urls_halladas(expediente, es_red)
+PLATAFORMAS: tuple[str, ...] = (
+    "tripadvisor.",
+    "yelp.",
+    "foursquare.com",
+    "seccionamarilla.",
+    "restaurantguru.",
+    "opentable.",
+    "rappi.",
+    "ubereats.com",
+    "didi-food.com",
+    "food.didiglobal",
+)
+"""Dominios de plataformas con estado o reseñas propias del negocio (no copias del DENUE).
+
+Fragmentos del dominio: `tripadvisor.` cubre `.com.mx` y `.com`.
+"""
+
+
+def es_plataforma(url: str) -> bool:
+    """Si la URL es de una plataforma de reseñas o de entrega de `PLATAFORMAS`."""
+    dominio = urlparse(url.lower()).netloc
+    return any(p in dominio for p in PLATAFORMAS)
 
 
 _RESENAS = "reseñas más recientes de la ficha"

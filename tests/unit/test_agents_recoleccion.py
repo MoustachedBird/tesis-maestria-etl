@@ -11,6 +11,7 @@ import pytest
 
 from src.agents.survival.recoleccion import (
     FuenteMaps,
+    FuentePlataformas,
     FuenteRedes,
     FuenteSitio,
     FuenteWeb,
@@ -166,6 +167,22 @@ class TestRedes:
         exp = _web(FB, IG) + [Pieza("redes", "x", "ok", url=FB)]
         texto = FuenteRedes(NavegadorFalso(), 1, 6000, 200).contexto(exp)
         assert IG in texto and FB not in texto
+
+
+@pytest.mark.unit
+class TestPlataformas:
+    def test_abre_solo_fichas_de_plataformas(self):
+        nav = NavegadorFalso()
+        trip = "https://www.tripadvisor.com.mx/Restaurant_Review-g1-d2-Tacos_Paco.html"
+        rappi = "https://www.rappi.com.mx/restaurantes/123-tacos-paco"
+        exp = _web(FB, "https://nota.mx/1", trip, recolector="google") + _web(rappi)
+        piezas = FuentePlataformas(nav, 3, 6000, 200).recolectar(negocio(), exp)
+        assert nav.leidas == [trip, rappi]
+        assert all(p.recolector == "plataformas" for p in piezas)
+
+    def test_su_herramienta_tiene_otro_nombre(self):
+        f = FuentePlataformas(NavegadorFalso(), 1, 6000, 200)
+        assert f.herramienta["function"]["name"] == "leer_plataforma"
 
 
 @pytest.mark.unit
