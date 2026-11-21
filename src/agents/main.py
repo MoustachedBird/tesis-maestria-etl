@@ -106,6 +106,7 @@ def verificar(
     """El equipo verifica en línea cada negocio pendiente y el juez audita su veredicto."""
     from src.agents.survival.recoleccion import FuenteMaps, FuenteRedes, FuenteSitio, FuenteWeb
     from src.agents.survival.sources.busqueda import BuscadorBrave, BuscadorSearxng
+    from src.agents.survival.sources.cortesia import Pausador
     from src.agents.survival.sources.navegador import Navegador, leer_con_respaldo
     from src.agents.survival.verificador import Equipo, resumen_muestra, verificar_muestra
     from src.meta.tracker import MetadataTracker
@@ -129,9 +130,12 @@ def verificar(
         console.print(f"[red]   ✖ el buscador {buscador.nombre} no responde: {e}[/red]")
         raise typer.Exit(code=1) from e
 
+    pausador = Pausador(ajustes.AGENTE_PAUSA_SEGUNDOS)
     navegador = Navegador(
         timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
         espera=ajustes.AGENTE_NAVEGADOR_ESPERA_SEGUNDOS,
+        perfil=ajustes.AGENTE_PERFIL_CHROME or None,
+        pausador=pausador,
     )
     try:
         navegador.comprobar()

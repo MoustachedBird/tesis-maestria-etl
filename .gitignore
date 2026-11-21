@@ -31,6 +31,8 @@ data/bronze/*
 data/silver/*
 data/gold/*
 data/eval/*
+# Perfil de Chrome, capturas y listas descargadas del agente
+data/agente/
 
 # Exception: Keep empty folder structure
 !data/models/.gitkeep

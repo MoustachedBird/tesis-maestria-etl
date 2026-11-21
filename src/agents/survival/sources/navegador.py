@@ -23,6 +23,9 @@ Tres decisiones:
   página, que no se conoce.
 
 Los errores se devuelven como TEXTO, por la misma razón que en `paginas.py`.
+Un bloqueo anti-bot (CAPTCHA, "tráfico inusual") también es `ERROR`
+(`cortesia.detectar_bloqueo`), y entre dos páginas del mismo dominio se
+espera (`cortesia.Pausador`).
 """
 
 from __future__ import annotations
@@ -31,9 +34,11 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
+from src.agents.survival.sources.cortesia import Bloqueado, Pausador, detectar_bloqueo
 from src.agents.survival.sources.paginas import SIN_CONTENIDO, leer_pagina
 
 _DOMINIOS_CON_JS: tuple[str, ...] = (
@@ -104,16 +109,30 @@ def anotar_fechas_relativas(texto: str, hoy: date) -> str:
     return _RELATIVA.sub(anotar, texto)
 
 
-def _chrome(timeout: int) -> Any:
+def _chrome(timeout: int, perfil: str | None = None) -> Any:
     """Un Chrome headless en español de México, sin sesión.
 
     No reusa `src.etl.utils.browser`: los agentes no importan del ETL
     (`tests/unit/test_layer_boundaries.py`).
+
+    Args:
+        timeout: segundos máximos para cargar una página.
+        perfil: carpeta de un perfil persistente (solo cookies de
+            consentimiento: nunca se inicia sesión); None = desechable.
     """
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
 
     opciones = Options()
+    if perfil:
+        carpeta = Path(perfil).resolve()
+        carpeta.mkdir(parents=True, exist_ok=True)
+        # Un Chrome que murio sin cerrar deja el candado y el siguiente no
+        # arranca con "user data directory is already in use". Solo hay un
+        # Chrome por corrida, asi que el candado siempre es de uno muerto.
+        for candado in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            (carpeta / candado).unlink(missing_ok=True)
+        opciones.add_argument(f"--user-data-dir={carpeta}")
     opciones.add_argument("--headless=new")
     # Sin estas tres Chrome no arranca dentro de un contenedor.
     opciones.add_argument("--no-sandbox")
@@ -142,7 +161,9 @@ class Navegador:
         timeout: int = 20,
         espera: float = 5.0,
         *,
-        fabrica: Callable[[int], Any] = _chrome,
+        perfil: str | None = None,
+        pausador: Pausador | None = None,
+        fabrica: Callable[[int], Any] | None = None,
         hoy: Callable[[], date] = date.today,
     ):
         """
@@ -150,14 +171,19 @@ class Navegador:
             timeout: segundos máximos para cargar una página.
             espera: segundos máximos que se espera a que el JavaScript pinte
                 el contenido después de cargar.
+            perfil: carpeta del perfil persistente de Chrome; None = desechable.
+            pausador: la pausa por dominio de la corrida; None = sin pausa.
             fabrica: cómo se crea el driver; se inyecta en los tests.
             hoy: el día de la lectura; se inyecta en los tests.
         """
         self.timeout = timeout
         self.espera = espera
-        self._fabrica = fabrica
+        self._fabrica = fabrica or (lambda t: _chrome(t, perfil))
+        self._pausador = pausador
         self._hoy = hoy
         self._driver: Any = None
+        self.ultima_url: str | None = None
+        """A dónde llegó la última lectura tras las redirecciones (Maps redirige a la ficha)."""
 
     def comprobar(self) -> None:
         """Arranca Chrome; lanza si no se puede (imagen sin navegador, sin memoria compartida)."""
@@ -184,15 +210,18 @@ class Navegador:
             str: el texto (con las fechas relativas anotadas), o `ERROR: ...`.
         """
         try:
-            driver = self._abrir()
-            driver.get(url)
+            driver = self._ir(url)
             texto = self._texto_cuando_pinte(driver, min_caracteres)
             destino = driver.current_url
             titulo = (driver.title or "").strip()
         except Exception as e:  # noqa: BLE001  (un Chrome roto es un ERROR para el modelo, no una caida)
             self.cerrar()
             return f"ERROR: el navegador no pudo abrir {url} ({e.__class__.__name__})"
+        self.ultima_url = destino
 
+        motivo = detectar_bloqueo(texto, destino)
+        if motivo:
+            return f"ERROR: {url} respondió con un bloqueo anti-bot ({motivo}). NO la leíste."
         if "/login" in destino or "accounts.google.com" in destino:
             return f"ERROR: {url} pide iniciar sesión. NO la leíste."
         if len(texto) < min_caracteres:
@@ -223,7 +252,40 @@ class Navegador:
         url = _MAPS_BUSQUEDA.format(consulta=quote(consulta.strip()))
         return url, self.leer(url, max_caracteres, min_caracteres)
 
+    def html(self, url: str, min_caracteres: int = 200) -> str:
+        """El HTML de una página tras ejecutar su JavaScript: para leer resultados de un buscador.
+
+        Raises:
+            Bloqueado: si la página es un CAPTCHA o similar.
+            RuntimeError: si el navegador no pudo abrirla.
+        """
+        try:
+            driver = self._ir(url)
+            texto = self._texto_cuando_pinte(driver, min_caracteres)
+            destino = driver.current_url
+            fuente = driver.page_source or ""
+        except Exception as e:
+            self.cerrar()
+            raise RuntimeError(f"el navegador no pudo abrir {url} ({e.__class__.__name__})") from e
+        self.ultima_url = destino
+        motivo = detectar_bloqueo(texto, destino)
+        if motivo:
+            raise Bloqueado(urlparse(url).netloc, motivo)
+        return fuente
+
+    def driver(self) -> Any:
+        """El driver de Selenium, para las fuentes que tienen que hacer clic (reseñas de Maps)."""
+        return self._abrir()
+
     # ----- internos -----
+
+    def _ir(self, url: str) -> Any:
+        """Abre `url` respetando la pausa por dominio."""
+        if self._pausador is not None:
+            self._pausador.esperar(url)
+        driver = self._abrir()
+        driver.get(url)
+        return driver
 
     def _abrir(self) -> Any:
         if self._driver is None:

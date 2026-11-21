@@ -42,6 +42,10 @@ class DriverFalso:
     def execute_script(self, _):
         return self.texto
 
+    @property
+    def page_source(self):
+        return f"<html><body>{self.texto}</body></html>"
+
     def find_elements(self, *_):
         return []
 
