@@ -115,7 +115,7 @@ class Armado:
             Recolector.OSM.value: lambda: FuenteOsm(
                 url=a.OVERPASS_URL,
                 radio_m=a.AGENTE_RADIO_METROS,
-                timeout=max(timeout, 30),
+                timeout=max(timeout, 45),
                 pausador=self.pausador,
             ),
             Recolector.PLATAFORMAS.value: lambda: FuentePlataformas(
@@ -128,7 +128,7 @@ class Armado:
             Recolector.WAYBACK.value: lambda: FuenteWayback(
                 lambda url: leer_pagina(url, caracteres, max(timeout, 30), minimo),
                 max_urls=a.AGENTE_MAX_ARCHIVO,
-                timeout=max(timeout, 30),
+                timeout=max(timeout, 45),
                 pausador=self.pausador,
             ),
             Recolector.COMMON_CRAWL.value: lambda: FuenteCommonCrawl(
