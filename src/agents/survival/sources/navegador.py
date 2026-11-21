@@ -273,9 +273,49 @@ class Navegador:
             raise Bloqueado(urlparse(url).netloc, motivo)
         return fuente
 
-    def driver(self) -> Any:
-        """El driver de Selenium, para las fuentes que tienen que hacer clic (reseñas de Maps)."""
-        return self._abrir()
+    def resenas_recientes(self, max_caracteres: int = 6000, min_caracteres: int = 200) -> str:
+        """En la ficha de Maps abierta, las reseñas ordenadas de la más reciente a la más vieja.
+
+        La ficha muestra las reseñas "más relevantes", que pueden tener años;
+        lo que fecha la actividad es la más reciente. Se hace lo que haría una
+        persona: pestaña Reseñas, Ordenar, Más recientes. Se ubican los
+        botones por su etiqueta en español o inglés y no por clases CSS.
+
+        Returns:
+            str: el texto del panel con las fechas relativas anotadas, o `ERROR: ...`.
+        """
+        driver = self._abrir()
+        if not _clic(driver, "button[role='tab']", ("reseñas", "opiniones", "reviews")):
+            return "ERROR: la ficha de Maps no tiene pestaña de reseñas."
+        time.sleep(min(self.espera, 2.0))
+        if _clic(driver, "button", ("ordenar", "sort")):
+            time.sleep(1.0)
+            _clic(driver, "[role='menuitemradio'], [role='menuitem']", ("recientes", "newest"))
+            time.sleep(min(self.espera, 2.0))
+        for _ in range(2):  # cargar unas reseñas más
+            try:
+                driver.execute_script(
+                    'const p = document.querySelector(\'div[role="main"] div[tabindex="-1"]\');'
+                    "if (p) p.scrollTop = p.scrollHeight;"
+                )
+            except Exception:  # noqa: BLE001, S112  (sin panel desplazable: se lee lo que haya)
+                break
+            time.sleep(1.0)
+        try:
+            crudo = driver.execute_script(
+                "const m = document.querySelector('div[role=\"main\"]');"
+                "return m ? m.innerText : (document.body ? document.body.innerText : '');"
+            )
+        except Exception as e:  # noqa: BLE001  (un Chrome roto es un ERROR para el modelo)
+            self.cerrar()
+            return f"ERROR: el navegador falló al leer las reseñas ({e.__class__.__name__})"
+        texto = re.sub(r"\s+", " ", crudo or "").strip()
+        if len(texto) < min_caracteres:
+            return f"ERROR: el panel de reseñas {SIN_CONTENIDO} ({len(texto)} caracteres)."
+        texto = anotar_fechas_relativas(texto, self._hoy())
+        if len(texto) > max_caracteres:
+            return texto[:max_caracteres] + f"\n[... recortado a {max_caracteres} caracteres]"
+        return texto
 
     # ----- internos -----
 
@@ -321,6 +361,23 @@ class Navegador:
                     boton.click()
             except Exception:  # noqa: BLE001, S112  (el aviso no esta o no se deja: se lee lo que haya)
                 continue
+
+
+def _clic(driver: Any, selector: str, etiquetas: tuple[str, ...]) -> bool:
+    """Hace clic en el primer elemento de `selector` cuya etiqueta o texto contiene una de `etiquetas`."""
+    try:
+        elementos = driver.find_elements("css selector", selector)
+    except Exception:  # noqa: BLE001  (sin elementos: no hay en que hacer clic)
+        return False
+    for el in elementos:
+        try:
+            rotulo = f"{el.get_attribute('aria-label') or ''} {el.text or ''}".lower()
+            if any(e in rotulo for e in etiquetas):
+                el.click()
+                return True
+        except Exception:  # noqa: BLE001, S112  (elemento que desaparecio o no se deja: el siguiente)
+            continue
+    return False
 
 
 def leer_con_respaldo(

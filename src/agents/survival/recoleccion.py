@@ -94,7 +94,11 @@ class Pieza:
 class Navegable(Protocol):
     """Lo que las fuentes necesitan del navegador (`sources.navegador.Navegador`)."""
 
+    ultima_url: str | None
+
     def leer(self, url: str, max_caracteres: int = ..., min_caracteres: int = ...) -> str: ...
+
+    def resenas_recientes(self, max_caracteres: int = ..., min_caracteres: int = ...) -> str: ...
 
     def buscar_en_maps(
         self, consulta: str, max_caracteres: int = ..., min_caracteres: int = ...
@@ -198,34 +202,58 @@ class FuenteMaps:
         self.min_caracteres = min_caracteres
 
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
-        """Por nombre + lugar y, si el DENUE publicó domicilio, por nombre + domicilio."""
+        """Por nombre + lugar y, si el DENUE publicó domicilio, por nombre + domicilio.
+
+        Cada búsqueda que cae en una ficha (no en una lista) trae además sus
+        reseñas más recientes: la ficha muestra las "más relevantes", y lo que
+        fecha la actividad es la última.
+        """
         consultas = [f"{nombre_de(n)} {lugar_de(n)}"]
         if n.domicilios:
             consultas.append(f"{nombre_de(n)} {n.domicilios[0]} {n.municipio or ''}".strip())
-        return [self._buscar(c) for c in consultas]
+        piezas: list[Pieza] = []
+        for c in consultas:
+            piezas += self._buscar(c, expediente + piezas)
+        return piezas
 
     def ampliar(self, n: Negocio, args: dict[str, Any], expediente: list[Pieza]) -> list[Pieza]:
         """Una búsqueda más con la consulta que propuso el especialista."""
         consulta = str(args.get("consulta", "")).strip()
         if not consulta:
             return []
-        return [replace(self._buscar(consulta), ampliada=True)]
+        return [replace(p, ampliada=True) for p in self._buscar(consulta, expediente)]
 
     def contexto(self, expediente: list[Pieza]) -> str:
         """Maps no necesita nada del resto del expediente."""
         return ""
 
-    def _buscar(self, consulta: str) -> Pieza:
+    def _buscar(self, consulta: str, previas: list[Pieza]) -> list[Pieza]:
         url, texto = self.navegador.buscar_en_maps(
             consulta, self.max_caracteres, self.min_caracteres
         )
-        return Pieza(
-            recolector=self.recolector,
-            consulta=consulta,
-            url=url,
-            contenido=texto,
-            estado=_estado_de(texto),
-        )
+        piezas = [
+            Pieza(
+                recolector=self.recolector,
+                consulta=consulta,
+                url=url,
+                contenido=texto,
+                estado=_estado_de(texto),
+            )
+        ]
+        ficha = getattr(self.navegador, "ultima_url", None) or ""
+        ya_leidas = {_clave_ficha(p.url) for p in previas if p.consulta == _RESENAS}
+        if piezas[0].citable and "/maps/place/" in ficha and _clave_ficha(ficha) not in ya_leidas:
+            resenas = self.navegador.resenas_recientes(self.max_caracteres, self.min_caracteres)
+            piezas.append(
+                Pieza(
+                    recolector=self.recolector,
+                    consulta=_RESENAS,
+                    url=ficha,
+                    contenido=resenas,
+                    estado=_estado_de(resenas),
+                )
+            )
+        return piezas
 
 
 class FuenteWeb:
@@ -473,6 +501,15 @@ def es_red(url: str) -> bool:
 def _urls_de_redes(expediente: list[Pieza]) -> list[str]:
     """URLs de Facebook/Instagram que trajeron los buscadores."""
     return urls_halladas(expediente, es_red)
+
+
+_RESENAS = "reseñas más recientes de la ficha"
+"""La `consulta` de la pieza con las reseñas ordenadas por fecha de una ficha de Maps."""
+
+
+def _clave_ficha(url: str | None) -> str:
+    """Una ficha de Maps sin la parte de la URL que cambia entre visitas (`/@lat,lon`, `/data=`)."""
+    return clave_url((url or "").split("/@")[0].split("/data=")[0])
 
 
 def _estado_de(texto: str) -> str:

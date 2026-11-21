@@ -193,6 +193,10 @@ _FUENTES_POR_DOMINIO: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("wayback", ("web.archive.org",)),
+    ("common_crawl", ("commoncrawl.org",)),
+    ("openstreetmap", ("openstreetmap.org",)),
+    ("registro_dominio", ("rdap.", "whois.")),
+    ("gobierno", ("sat.gob.mx", "economia.gob.mx", "dof.gob.mx", ".gob.mx")),
 )
 """Cómo se clasifica una URL en `evidencias.fuente`, por fragmentos del dominio.
 

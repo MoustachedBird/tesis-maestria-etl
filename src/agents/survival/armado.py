@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from src.agents.survival.fuentes_abiertas import FuenteOsm
 from src.agents.survival.recoleccion import (
     Fuente,
     FuenteMaps,
@@ -97,6 +98,12 @@ class Armado:
             ),
             Recolector.REDES.value: lambda: FuenteRedes(
                 self.navegador, a.AGENTE_MAX_REDES, caracteres, minimo
+            ),
+            Recolector.OSM.value: lambda: FuenteOsm(
+                url=a.OVERPASS_URL,
+                radio_m=a.AGENTE_RADIO_METROS,
+                timeout=max(timeout, 30),
+                pausador=self.pausador,
             ),
             Recolector.SITIO.value: lambda: FuenteSitio(
                 lambda url: leer_con_respaldo(url, self.navegador, caracteres, timeout, minimo),
