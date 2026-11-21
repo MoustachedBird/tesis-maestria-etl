@@ -42,7 +42,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from src.agents.survival import insumo
 from src.agents.survival.citas import Cita
-from src.agents.survival.equipo import Decisor, Especialista, Informe
+from src.agents.survival.equipo import Decisor, Especialista, Informe, Planeacion, Planificador
 from src.agents.survival.juez import Juez, auditar_veredicto
 from src.agents.survival.recoleccion import Fuente, Pieza, agrupar
 from src.meta.tracker import MetadataTracker
@@ -83,6 +83,8 @@ class Resultado:
     evidencias: list[Cita] = field(default_factory=list)
     expediente: list[Pieza] = field(default_factory=list)
     informes: list[Informe] = field(default_factory=list)
+    planeacion: Planeacion | None = None
+    """Con qué nombres se buscó y por qué (el planificador)."""
     duracion_s: float = 0.0
 
     @property
@@ -103,6 +105,7 @@ class Equipo:
         max_ampliaciones: int,
         max_intentos: int,
         presupuesto: int | None = None,
+        max_nombres: int = 3,
     ):
         """
         Args:
@@ -113,6 +116,7 @@ class Equipo:
             max_intentos: vueltas por rol para producir una salida válida.
             presupuesto: caracteres de piezas que caben en el contexto de un
                 especialista (`recoleccion.presupuesto_de`); None = sin tope.
+            max_nombres: cuántos nombres de búsqueda puede elegir el planificador.
         """
         self.fuentes = fuentes
         self.grupos = agrupar(fuentes)
@@ -124,10 +128,21 @@ class Equipo:
             presupuesto=presupuesto,
         )
         self.decisor = Decisor(cliente, max_intentos=max_intentos)
+        self.planificador = Planificador(
+            cliente, max_nombres=max_nombres, max_intentos=max_intentos
+        )
 
     def verificar(self, n: insumo.Negocio) -> Resultado:
         """Recolecta, informa por fuente y decide."""
         inicio = time.monotonic()
+        logger.info("   ── 0 🏷  planificador: con qué nombres buscar")
+        planeacion = self.planificador.elegir(n)
+        n.nombres_busqueda = planeacion.nombres
+        marca = " (automático)" if planeacion.automatica else ""
+        logger.info(
+            f"      🏷  nombres: {' | '.join(planeacion.nombres) or '—'}{marca} · "
+            f"{planeacion.razonamiento[:200]}"
+        )
         expediente: list[Pieza] = []
         informes: list[Informe] = []
         for i, grupo in enumerate(self.grupos, start=1):
@@ -164,6 +179,7 @@ class Equipo:
             evidencias=decision.evidencias,
             expediente=expediente,
             informes=informes,
+            planeacion=planeacion,
             duracion_s=time.monotonic() - inicio,
         )
 
@@ -190,6 +206,7 @@ def guardar(conn: Connection, r: Resultado) -> str:
             agente=r.agente,
             n_busquedas=r.n_consultas,
             duracion_s=round(r.duracion_s, 1),
+            nombres_buscados=r.planeacion.como_dict() if r.planeacion else None,
         )
     )
     ids = [str(uuid.uuid4()) for _ in r.expediente]

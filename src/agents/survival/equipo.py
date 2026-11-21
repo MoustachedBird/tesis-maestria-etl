@@ -24,7 +24,9 @@ por qué, en vez de inventarse un veredicto.
 
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -36,12 +38,14 @@ from src.agents.survival.llamada import pedir
 from src.agents.survival.prompts import (
     FOCOS,
     HERRAMIENTA_CONCLUIR,
+    HERRAMIENTA_ELEGIR_NOMBRES,
     HERRAMIENTA_INFORMAR,
     SISTEMA_DECISOR,
+    SISTEMA_PLANIFICADOR,
     formatear_insumo,
     sistema_especialista,
 )
-from src.agents.survival.recoleccion import Grupo, Pieza, formatear_expediente
+from src.agents.survival.recoleccion import Grupo, Pieza, formatear_expediente, nombre_de
 from src.shared.enums import (
     Confianza,
     EstadoVerificado,
@@ -54,6 +58,129 @@ logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 MIN_TEXTO = 20
 """Caracteres mínimos de un resumen o razonamiento: menos no es un porqué."""
+
+
+# ----- planificador de nombres -----
+
+
+@dataclass
+class Planeacion:
+    """Con qué nombres se busca al negocio, y por qué."""
+
+    nombres: list[str]
+    razonamiento: str
+    automatica: bool = False
+    duracion_s: float = 0.0
+
+    def como_dict(self) -> dict:
+        """Para `veredictos.nombres_buscados`."""
+        return {
+            "nombres": self.nombres,
+            "razonamiento": self.razonamiento,
+            "automatica": self.automatica,
+        }
+
+
+class Planificador:
+    """El agente que decide con qué nombres buscar, antes de la recolección.
+
+    El nombre del DENUE cambia entre cortes (artículos, orden, errores de
+    captura, un cambio de nombre real), y buscar solo el de gold pierde al
+    negocio cuando en línea aparece de otra forma. Qué criterio usar
+    --repetición, recencia, combinación-- lo decide el modelo; el código solo
+    exige que no invente: toda palabra que proponga tiene que estar en algún
+    nombre o razón social del DENUE.
+    """
+
+    def __init__(self, cliente: Any, *, max_nombres: int, max_intentos: int):
+        """
+        Args:
+            cliente: `OllamaCliente` o cualquier objeto con `.chat(mensajes, herramientas)`.
+            max_nombres: cuántos nombres puede elegir (`AGENTE_MAX_NOMBRES`).
+            max_intentos: vueltas para producir una elección válida.
+        """
+        self.cliente = cliente
+        self.max_nombres = max_nombres
+        self.max_intentos = max_intentos
+
+    def elegir(self, n: Negocio) -> Planeacion:
+        """Los nombres de búsqueda; si el modelo no da una elección válida, el de gold."""
+        inicio = time.monotonic()
+        respaldo = nombre_de(n)
+        if not respaldo:
+            return Planeacion([], "El DENUE no publicó ningún nombre.", automatica=True)
+        mensajes = [
+            {"role": "system", "content": SISTEMA_PLANIFICADOR.format(k=self.max_nombres)},
+            {"role": "user", "content": formatear_insumo(n)},
+        ]
+        vocabulario = _palabras(" ".join([*n.nombres, n.nombre or "", *n.razones_sociales]))
+
+        def validar(_nombre: str, args: dict) -> tuple[Planeacion, list[str]]:
+            return _validar_nombres(args, vocabulario, self.max_nombres)
+
+        salida = pedir(
+            self.cliente,
+            mensajes,
+            [HERRAMIENTA_ELEGIR_NOMBRES],
+            {"elegir_nombres"},
+            validar,
+            max_vueltas=self.max_intentos,
+            rol="planificador de nombres",
+        )
+        if salida is None:
+            return Planeacion(
+                [respaldo] if respaldo else [],
+                f"El planificador no eligió nombres válidos en {self.max_intentos} intentos; "
+                "se busca con el nombre de gold.",
+                automatica=True,
+                duracion_s=time.monotonic() - inicio,
+            )
+        plan: Planeacion = salida.valor
+        plan.duracion_s = time.monotonic() - inicio
+        return plan
+
+
+def _validar_nombres(
+    args: dict, vocabulario: set[str], maximo: int
+) -> tuple[Planeacion, list[str]]:
+    """Que sean de 1 a `maximo`, distintos, y sin palabras que el DENUE no publicó."""
+    errores: list[str] = []
+    crudos = args.get("nombres")
+    if not isinstance(crudos, list):
+        crudos = []
+    nombres: list[str] = []
+    for x in crudos:
+        nombre = " ".join(str(x).split())
+        if len(nombre) < 3:
+            continue
+        if _palabras_llave(nombre) in {_palabras_llave(y) for y in nombres}:
+            continue  # el mismo nombre otra vez (mayusculas, acentos): se cuenta una
+        nuevas = sorted(_palabras(nombre) - vocabulario)
+        if nuevas:
+            errores.append(
+                f"«{nombre}» usa palabras que el DENUE no publicó: {nuevas}. Usa solo palabras "
+                "de los nombres o la razón social (puedes quitar, reordenar y combinar)"
+            )
+        nombres.append(nombre)
+    if not nombres:
+        errores.append("da al menos un nombre")
+    if len(nombres) > maximo:
+        errores.append(f"son {len(nombres)} nombres; el máximo es {maximo}")
+    razonamiento = str(args.get("razonamiento", "")).strip()
+    if len(razonamiento) < MIN_TEXTO:
+        errores.append("razonamiento vacío o demasiado corto: di por qué esos nombres")
+    return Planeacion(nombres, razonamiento), errores
+
+
+def _palabras(texto: str) -> set[str]:
+    """Las palabras de un texto, en mayúsculas, sin acentos ni puntuación."""
+    plano = unicodedata.normalize("NFKD", texto.upper()).encode("ascii", "ignore").decode()
+    return set(re.findall(r"[A-Z0-9]+", plano))
+
+
+def _palabras_llave(texto: str) -> frozenset[str]:
+    """Un nombre como conjunto de palabras: para no contar dos veces el mismo."""
+    return frozenset(_palabras(texto))
 
 
 # ----- especialista -----

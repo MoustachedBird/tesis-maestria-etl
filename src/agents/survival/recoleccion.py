@@ -259,6 +259,7 @@ class FuenteMaps:
         consultas = [f"{nombre_de(n)} {lugar_de(n)}"]
         if n.domicilios:
             consultas.append(f"{nombre_de(n)} {n.domicilios[0]} {n.municipio or ''}".strip())
+        consultas += [f"{otro} {lugar_de(n)}" for otro in nombres_de_busqueda(n)[1:]]
         piezas: list[Pieza] = []
         for c in consultas:
             piezas += self._buscar(c, expediente + piezas)
@@ -344,6 +345,7 @@ class FuenteWeb:
             consultas.append(n.telefonos[0])
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
+        consultas += [f'"{otro}" {lugar_de(n)}' for otro in nombres_de_busqueda(n)[1:]]
         piezas: list[Pieza] = []
         for consulta in consultas:
             piezas += self._buscar(consulta, expediente + piezas)
@@ -651,8 +653,15 @@ def _recortar(textos: list[str], presupuesto: int) -> list[str]:
 
 
 def nombre_de(n: Negocio) -> str:
-    """El nombre con que se busca: el de gold, o el primero que publicó el DENUE."""
+    """El nombre principal de búsqueda: el primero del planificador, o el de gold, o el primero del DENUE."""
+    if n.nombres_busqueda:
+        return n.nombres_busqueda[0]
     return n.nombre or (n.nombres[0] if n.nombres else "")
+
+
+def nombres_de_busqueda(n: Negocio) -> list[str]:
+    """Todos los nombres con que se busca: los del planificador, o solo el principal."""
+    return list(n.nombres_busqueda) or [nombre_de(n)]
 
 
 def lugar_de(n: Negocio) -> str:

@@ -132,7 +132,11 @@ class Settings(BaseSettings):
     # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
     # las reglas de decision: dos veredictos con distinta version no son
     # comparables aunque sean del mismo modelo.
-    AGENTE_VERSION: str = "v5"
+    AGENTE_VERSION: str = "v6"
+    # Cuantos nombres de busqueda puede elegir el planificador (v6): el primero
+    # va a las consultas especificas (domicilio, telefono), los demas se buscan
+    # ademas en Maps y en los buscadores. El criterio lo decide el modelo.
+    AGENTE_MAX_NOMBRES: int = 3
     # Las fuentes que se consultan, por nombre de `Recolector`, separadas por
     # coma. El orden importa solo dentro de un especialista; entre grupos
     # manda el orden fijo de `Especialidad` (los buscadores van antes que

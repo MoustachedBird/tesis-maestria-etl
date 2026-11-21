@@ -47,6 +47,18 @@ class Negocio:
     correos: list[str] = field(default_factory=list)
     sitios: list[str] = field(default_factory=list)
     domicilios: list[str] = field(default_factory=list)
+    nombres_por_corte: list[tuple[str, list[str]]] = field(default_factory=list)
+    """Cada nombre distinto con los cortes (AAAA-MM) en que apareció, del más reciente al más viejo.
+
+    Es lo que el planificador necesita para razonar por repetición y por
+    recencia: no es lo mismo un nombre de siete cortes que uno de uno.
+    """
+    nombres_busqueda: list[str] = field(default_factory=list)
+    """Los nombres con que se busca, elegidos por el planificador (`equipo.Planificador`).
+
+    Vacío hasta que el planificador decide; las fuentes usan entonces el de
+    gold (`recoleccion.nombres_de_busqueda`).
+    """
 
 
 def muestra_por_nombre(conn: Connection, nombre: str) -> tuple[str, list[date]]:
@@ -102,7 +114,15 @@ SELECT mn.muestra_id, mn.clee, mn.orden, mn.estrato,
          WHERE en.cve_ent = LEFT(g.cve_geo_final, 2)) AS entidad,
        (SELECT mu.municipio FROM silver.denue_municipios mu
          WHERE mu.cve_ent = LEFT(g.cve_geo_final, 2) AND mu.cve_mun = SUBSTR(g.cve_geo_final, 3, 3)) AS municipio,
-       v.nombres, v.razones_sociales, v.telefonos, v.correos, v.sitios, v.domicilios
+       v.nombres, v.razones_sociales, v.telefonos, v.correos, v.sitios, v.domicilios,
+       (SELECT jsonb_agg(jsonb_build_object('nombre', x.nom_estab, 'cortes', x.cortes)
+                         ORDER BY x.ultimo DESC)
+          FROM (SELECT e.nom_estab,
+                       array_agg(to_char(e.period, 'YYYY-MM') ORDER BY e.period) AS cortes,
+                       max(e.period) AS ultimo
+                  FROM silver.establecimientos e
+                 WHERE e.clee = mn.clee AND e.nom_estab <> ''
+                 GROUP BY e.nom_estab) x) AS nombres_por_corte
 FROM verificacion.muestra_negocios mn
 JOIN verificacion.muestras m USING (muestra_id)
 JOIN gold.negocios_clee_oficial g ON g.clee = mn.clee
@@ -157,4 +177,8 @@ def cargar(conn: Connection, muestra_id: str, clee: str) -> Negocio:
         correos=list(fila["correos"] or []),
         sitios=list(fila["sitios"] or []),
         domicilios=list(fila["domicilios"] or []),
+        nombres_por_corte=[
+            (str(x["nombre"]), [str(c) for c in x["cortes"]])
+            for x in (fila["nombres_por_corte"] or [])
+        ],
     )

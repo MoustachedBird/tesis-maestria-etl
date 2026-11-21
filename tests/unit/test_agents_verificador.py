@@ -20,7 +20,7 @@ from src.agents.survival.citas import (
     parsear_fecha,
     validar_citas,
 )
-from src.agents.survival.equipo import Decisor, Especialista, Informe
+from src.agents.survival.equipo import Decisor, Especialista, Informe, Planificador
 from src.agents.survival.insumo import Negocio
 from src.agents.survival.juez import Juez, JuezSinDictamen, VeredictoAuditado
 from src.agents.survival.llamada import pedir
@@ -597,6 +597,7 @@ def test_el_equipo_recolecta_informa_por_fuente_y_decide():
         FuenteFija("sitio", []),  # nada que leer: informe automatico, sin modelo
     ]
     cliente = ClienteFalso(
+        respuesta(elegir(["TACOS PACO", "DON PACO"])),
         respuesta(informar()),
         respuesta(
             informar(
@@ -618,10 +619,71 @@ def test_el_equipo_recolecta_informa_por_fuente_y_decide():
         negocio()
     )
     assert r.agente == "falso:1b/v4"
+    assert r.planeacion.nombres == ["TACOS PACO", "DON PACO"]
     assert [i.especialista for i in r.informes] == ["maps", "web", "redes", "sitio"]
     assert r.informes[-1].automatico
     assert (r.estado, r.confianza) == ("cerrado", "alta")
     assert len(r.expediente) == 6 and r.n_consultas >= 4
+
+
+# ----- planificador de nombres -----
+
+
+def elegir(nombres, razonamiento="El más repetido y el más reciente, sin el giro.") -> dict:
+    return llamada("elegir_nombres", nombres=nombres, razonamiento=razonamiento)
+
+
+@pytest.mark.unit
+class TestElPlanificador:
+    def _negocio(self):
+        return negocio(
+            nombre="EL POLLO FELIZ",
+            nombres=["EL POLLO FELIZ", "POLLO FELIZ", "FELIZ POLLO ROSTICERIA"],
+            nombres_por_corte=[
+                ("POLLO FELIZ", ["2024-11", "2025-05"]),
+                ("EL POLLO FELIZ", ["2021-05", "2022-05", "2023-11"]),
+                ("FELIZ POLLO ROSTICERIA", ["2022-11"]),
+            ],
+            razones_sociales=["ROSTICERIAS FELICES SA DE CV"],
+        )
+
+    def test_el_modelo_decide_y_ve_cada_nombre_con_sus_cortes(self):
+        cliente = ClienteFalso(respuesta(elegir(["Pollo Feliz", "Rosticería Pollo Feliz"])))
+        p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(self._negocio())
+        assert p.nombres == ["Pollo Feliz", "Rosticería Pollo Feliz"] and not p.automatica
+        visto = cliente.conversaciones[0][1]["content"]
+        assert "«POLLO FELIZ» (2024-11, 2025-05)" in visto
+
+    def test_no_puede_inventar_palabras(self):
+        malo = elegir(["Pollos Felices del Centro"])
+        bueno = elegir(["Pollo Feliz"])
+        cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
+        p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(self._negocio())
+        assert p.nombres == ["Pollo Feliz"]
+        assert any("palabras que el DENUE no publicó" in t for t in cliente.tools())
+
+    def test_puede_usar_palabras_de_la_razon_social(self):
+        cliente = ClienteFalso(respuesta(elegir(["Rosticerías Felices"])))
+        p = Planificador(cliente, max_nombres=3, max_intentos=1).elegir(self._negocio())
+        assert p.nombres == ["Rosticerías Felices"]
+
+    def test_respeta_el_maximo_y_no_cuenta_dos_veces_el_mismo(self):
+        cliente = ClienteFalso(
+            # "POLLO FELIZ" y "Feliz Pollo" son el mismo que "Pollo Feliz": quedan 3 distintos.
+            respuesta(
+                elegir(
+                    ["Pollo Feliz", "POLLO FELIZ", "Feliz Pollo", "El Pollo Feliz", "Rosticeria"]
+                )
+            ),
+            respuesta(elegir(["Pollo Feliz", "El Pollo Feliz"])),
+        )
+        p = Planificador(cliente, max_nombres=2, max_intentos=3).elegir(self._negocio())
+        assert p.nombres == ["Pollo Feliz", "El Pollo Feliz"]
+        assert any("el máximo es 2" in t for t in cliente.tools())
+
+    def test_si_no_elige_se_busca_con_el_de_gold(self):
+        p = Planificador(ClienteFalso(), max_nombres=3, max_intentos=2).elegir(self._negocio())
+        assert p.automatica and p.nombres == ["EL POLLO FELIZ"]
 
 
 # ----- juez -----

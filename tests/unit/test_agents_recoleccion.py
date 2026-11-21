@@ -115,6 +115,16 @@ class TestWeb:
         piezas = FuenteWeb(BuscadorFalso(falla=True), 8).recolectar(negocio(), [])
         assert piezas and all(p.estado == "error" for p in piezas)
 
+    def test_busca_tambien_los_otros_nombres_del_planificador(self):
+        buscador = BuscadorFalso()
+        n = negocio(nombres_busqueda=["Tacos Paco", "Taquería Don Paco"])
+        FuenteWeb(buscador, 8).recolectar(n, [])
+        assert buscador.consultas[0] == '"Tacos Paco" Guadalajara, Jalisco'
+        assert buscador.consultas[-1] == '"Taquería Don Paco" Guadalajara, Jalisco'
+        nav = NavegadorFalso()
+        FuenteMaps(nav, 6000, 200).recolectar(n, [])
+        assert nav.maps[-1] == "Taquería Don Paco Guadalajara, Jalisco"
+
     def test_otro_buscador_no_repite_lo_que_trajo_el_primero(self):
         r = Resultado("Tacos Paco", "https://www.tacospaco.mx/", "abierto")
         q = '"TACOS PACO" Guadalajara, Jalisco'

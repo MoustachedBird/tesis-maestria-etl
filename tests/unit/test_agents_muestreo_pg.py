@@ -307,6 +307,12 @@ class TestElInsumo:
             and n.sitios == ["tacospaco.mx"]
         )
         assert n.domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+        # Cada nombre con los cortes en que aparecio, para que el planificador razone.
+        assert {nombre for nombre, _ in n.nombres_por_corte} == set(n.nombres)
+        assert all(
+            cortes and all(len(c) == 7 and c[4] == "-" for c in cortes)
+            for _, cortes in n.nombres_por_corte
+        )
         assert (n.municipio, n.entidad, n.actividad) == ("Guadalajara", "Jalisco", "Taquerias")
         assert n.ultimo_corte_ventana == ventana[-1] == VENTANA[-1]
         assert n.estrato == "activo|continuo"

@@ -298,6 +298,13 @@ class Veredicto(Base):
         ),
     )
     duracion_s: Mapped[float | None] = mapped_column(Double, comment="Segundos que tardo")
+    nombres_buscados: Mapped[dict | None] = mapped_column(
+        JSONB,
+        comment=(
+            "{nombres, razonamiento, automatica}: con que nombres se busco al negocio y por que, "
+            "segun el planificador (v6+). NULL en veredictos anteriores"
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<Veredicto({self.clee}, {self.estado}, {self.confianza})>"

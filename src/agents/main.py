@@ -177,6 +177,7 @@ def verificar(
         max_ampliaciones=ajustes.AGENTE_MAX_AMPLIACIONES,
         max_intentos=ajustes.AGENTE_MAX_INTENTOS,
         presupuesto=presupuesto_de(ajustes.OLLAMA_CONTEXTO_TOKENS),
+        max_nombres=ajustes.AGENTE_MAX_NOMBRES,
     )
     engine = get_engine()
     with engine.connect() as conn:

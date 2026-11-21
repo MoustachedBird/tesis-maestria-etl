@@ -93,11 +93,23 @@ def formatear_insumo(n: Negocio) -> str:
         f"{n.actividad} (SCIAN {n.codigo_act})" if n.actividad else (n.codigo_act or "desconocida")
     )
     periodos = ", ".join(p.strftime("%Y-%m") for p in n.periodos)
+    if n.nombres_por_corte:
+        nombres = "Nombres con que apareció (y en qué cortes): " + " | ".join(
+            f"«{nombre}» ({', '.join(cortes)})" for nombre, cortes in n.nombres_por_corte
+        )
+    else:
+        nombres = lista("Nombres con que apareció", n.nombres)
+    buscados = (
+        [lista("Nombres con que se buscó en línea", n.nombres_busqueda)]
+        if n.nombres_busqueda
+        else []
+    )
     return "\n".join(
         [
             "NEGOCIO A VERIFICAR",
             f"Nombre principal: {n.nombre or '(sin nombre)'}",
-            lista("Nombres con que apareció", n.nombres),
+            nombres,
+            *buscados,
             lista("Razón social", n.razones_sociales),
             f"Actividad: {actividad}",
             f"Tamaño (último corte): {n.tamano_final or 'desconocido'}",
@@ -114,6 +126,36 @@ def formatear_insumo(n: Negocio) -> str:
             f"Último corte publicado del DENUE: {n.ultimo_corte_ventana:%Y-%m}.",
         ]
     )
+
+
+# ----- planificador -----
+
+SISTEMA_PLANIFICADOR = """Eres quien decide CON QUÉ NOMBRES se busca en línea a un negocio de México, antes de que el equipo lo busque en Google Maps, en buscadores web, en redes sociales y en otras fuentes. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) lo registró en varios cortes, y el nombre que anotó el encuestador cambia de un corte a otro: con y sin artículo, en otro orden, con abreviaturas, con errores de captura, con el giro pegado al nombre, o porque el negocio cambió de nombre.
+
+Tu tarea es razonar cómo lo buscaría una persona que quiere encontrarlo: cómo se llama de verdad hoy y cómo es probable que aparezca en Google Maps o en Facebook. Tú decides el criterio: puedes pesar cuántas veces aparece cada nombre, cuál es el más reciente, combinar palabras de varios, quitar lo que estorba (razón social, "SA DE CV", el giro genérico), reordenar. Si hubo un cambio de nombre real, conviene buscar los dos.
+
+La única restricción: usa solo palabras que aparezcan en los nombres o en la razón social que publicó el DENUE. Puedes quitar, reordenar y combinar palabras, pero no agregar ninguna nueva ni corregir la ortografía de una palabra (si crees que hay un error de captura, incluye la forma que aparece).
+
+AL TERMINAR (herramienta elegir_nombres, obligatoria)
+- nombres: de 1 a {k}, el MEJOR primero. El primero se usa en las consultas más específicas (con el domicilio, con el teléfono); los demás se buscan además en Maps y en los buscadores.
+- razonamiento: por qué esos, en una o dos frases."""
+"""Prompt de sistema del planificador de nombres; `{k}` es AGENTE_MAX_NOMBRES."""
+
+HERRAMIENTA_ELEGIR_NOMBRES = {
+    "type": "function",
+    "function": {
+        "name": "elegir_nombres",
+        "description": "Los nombres con que se buscará al negocio, el mejor primero. Obligatoria.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombres": {"type": "array", "items": {"type": "string"}},
+                "razonamiento": {"type": "string"},
+            },
+            "required": ["nombres", "razonamiento"],
+        },
+    },
+}
 
 
 # ----- especialista -----

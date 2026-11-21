@@ -1207,6 +1207,9 @@ tarda un negocio, para dimensionar la muestra siguiente).
 ### El equipo: un especialista por grupo de fuentes, un decisor, un juez
 
 ```
+planificador (LLM)                       con qué nombres buscar: ve cada nombre con sus
+                                         cortes y decide el criterio (repetición, recencia,
+                                         combinación); solo con palabras que publicó el DENUE
 por cada grupo, en el orden de `Especialidad` (mapas -> buscadores -> redes ->
 plataformas -> huella digital -> registros -> fachada):
     recolección base, en código          mismas consultas para todos, fuente por fuente
@@ -1614,7 +1617,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 13 revisiones, b0000 (baseline) -> b0012
+├── alembic/versions/              # 14 revisiones, b0000 (baseline) -> b0013
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -2269,6 +2272,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0010verificacion_agente` | Crea el schema `verificacion` (muestras, muestra_negocios, veredictos, evidencias) para el agente que busca los negocios en línea. **No tira antes de crear**: su contenido no es derivable |
 | `b0011expediente_y_juez` | Agrega `verificacion.consultas` (el expediente), `informes` (un especialista por fuente) y `auditorias` (el juez), y `evidencias.pieza_id`. Solo aditiva, idempotente; tampoco tira nada |
 | `b0012fuentes_y_especialidades` | v5: `consultas.recolector` es la fuente concreta (`Recolector`, ~20 valores) e `informes.especialista` el grupo que la lee (`Especialidad`); recrea ambos `CHECK` y los ensancha a VARCHAR(20). Agrega `consultas.imagen_ruta`. Los valores de v4 siguen siendo válidos |
+| `b0013nombres_buscados` | v6: `veredictos.nombres_buscados` (JSONB): con qué nombres buscó el planificador y por qué. Solo aditiva |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2399,7 +2403,8 @@ OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
-AGENTE_VERSION=v5
+AGENTE_VERSION=v6
+AGENTE_MAX_NOMBRES=3
 AGENTE_FUENTES=maps,osm,web,bing,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
 AGENTE_PAUSA_SEGUNDOS=3
 AGENTE_MAX_BLOQUEOS=3

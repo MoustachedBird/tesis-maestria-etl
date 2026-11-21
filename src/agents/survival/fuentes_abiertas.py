@@ -19,7 +19,7 @@ from src.agents.survival.recoleccion import (
     Pieza,
     clave_url,
     es_red,
-    nombre_de,
+    nombres_de_busqueda,
     prioridad_red,
     urls_halladas,
 )
@@ -49,7 +49,7 @@ class FuenteOsm:
         if n.lat is None or n.lon is None:
             return [_pieza(self.recolector, consulta, "(el DENUE no publicó coordenadas)", False)]
         mapa = f"https://www.openstreetmap.org/#map=19/{n.lat:.5f}/{n.lon:.5f}"
-        nombres = list(dict.fromkeys([nombre_de(n), *n.nombres])) or [""]
+        nombres = list(dict.fromkeys([*nombres_de_busqueda(n), *n.nombres])) or [""]
         try:
             objetos = osm.buscar_cerca(
                 n.lat,
