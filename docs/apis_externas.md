@@ -75,6 +75,37 @@ Orden de magnitud: **USD 5–35 por 1,000 solicitudes** según SKU.
 | 30,000 (censo de un municipio chico) | USD 150–1,050 |
 | 10.45M (censo completo) | **USD 52k–180k** — descartado en §10.2 |
 
+### Vía gratuita (decidida el 2026-11-21)
+
+Para el piloto y para una muestra de unos miles de negocios **no hace falta
+pagar**: se suman tres fuentes de crédito.
+
+| Qué | Cuánto | Condición |
+|---|---|---|
+| **Prueba de Google Cloud** | USD 300 por 90 días | Cuenta que nunca pagó Google Cloud, Maps Platform ni Firebase, y que no usó la prueba antes. Pide tarjeta; al terminar no cobra si no se pasa a cuenta de pago |
+| **Cupo gratis mensual por SKU** | p. ej. 1,000–5,000 Text Search Pro y ~1,000 Place Details Enterprise al mes | Permanente. Durante la prueba se consume primero el cupo y luego los USD 300 |
+| **Google Cloud Research Credits** | créditos académicos (históricamente hasta unos miles de USD) | Solicitud con la universidad; orientado a profesores y doctorado, preguntar si aplica a maestría. Tarda semanas |
+
+Por negocio son ~2 Text Search (nombre y domicilio) + 1 Place Details: entre
+USD 0.05 y 0.08 sin cupo. Una muestra de 400 entra en el cupo mensual; una de
+~3,000 (USD 90–230) cabe en los USD 300 de la prueba, sobre todo si se reparte
+en 2–3 meses para reaprovechar el cupo de cada mes.
+
+**Plan:**
+
+1. Cuenta de Google Cloud **nueva, solo para el proyecto**, con la prueba.
+2. Habilitar únicamente *Places API (New)*.
+3. Llave restringida a esa API y a la IP de indominus.
+4. Presupuesto con alertas **y cuota diaria** (lo de abajo).
+5. Integrarla como fuente `maps_api` junto a la de Chrome y correr el piloto
+   de 40 con y sin ella: si no baja claramente los indeterminados, no se usa
+   en la muestra grande.
+
+Los precios se verificaron en las páginas públicas el 2026-11-21, con dos
+dudas abiertas: las tablas de Google dan USD 25 y USD 32 por 1,000 para Text
+Search Pro, y no confirman en qué SKU cae `businessStatus`. Confirmar en la
+consola antes de la corrida grande.
+
 ### Control de gasto — no opcional
 
 Un bucle con un bug puede gastar miles de dólares en una noche.
@@ -178,6 +209,12 @@ que la hace la primera opción para una tesis. Llave inmediata al registrarse.
 
 Capa gratuita con límite de tasa (del orden de 1 consulta/segundo y unos
 miles al mes) y planes de pago en el orden de **USD 3–9 por 1,000**.
+
+**Vía gratuita:** solo el crédito de USD 5 al mes (~1,000 búsquedas, pide
+tarjeta; una fuente dice que se conserva solo con atribución pública a Brave).
+Con ~8 búsquedas por negocio cubre ~125 negocios al mes. Para una muestra de
+miles (~USD 125 por 3,000) no se justifica mientras SearXNG no se bloquee: en
+el piloto v6 no se bloqueó, y Brave aporta estabilidad, no cobertura nueva.
 
 ### Serper.dev — la más barata
 

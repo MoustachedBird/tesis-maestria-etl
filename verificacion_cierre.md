@@ -220,6 +220,112 @@ COMMIT;
 `version_reglas` y `ventana_cortes` se copian de la propia tabla: son
 iguales en todas sus filas por construcción (invariante de `gold`).
 
+### 4.4 La muestra para concluir (diseño, 2026-11-21)
+
+Los pilotos (`piloto-2026-11`, `v5-piloto`) sirven para afinar el agente, no
+para concluir: con 100 por estrato el margen es de ±10 puntos y, peor, el
+agente se ajustó mirando esos negocios. La afirmación de la tesis necesita
+una muestra aparte, diseñada para ella.
+
+**La pregunta, como parámetro.** "Si un negocio deja de aparecer en el DENUE
+(gold `cerrado`), cerró" es la **precisión de la regla**:
+
+    θ = P(cerró de verdad | gold dice cerrado)
+
+sobre la población de §4.1 (cohorte oficial, buscable). Su complemento del
+otro lado, la **tasa de falsos negativos** `P(cerró | gold dice activo)`,
+dice cuánto cierre el DENUE todavía no ve. Lo que se verifica es el **cierre
+del establecimiento en ese lugar**, no una quiebra legal: un negocio que se
+mudó o cambió de dueño no es una quiebra, y el agente lo tiene que reportar
+como `activo` si lo encuentra operando. Esa definición va en el capítulo de
+método tal cual.
+
+**Regla de decisión, fijada ANTES de ver los datos.** La regla es defendible
+si el **límite inferior del IC95% de θ** (reponderado y corregido por el
+error del agente, abajo) es **≥ 0.80**. El umbral lo fija el asesor; lo que
+importa es escribirlo antes de correr. Si no se alcanza, se mueve el umbral
+de meses o se agregan condiciones (§7.4) y se verifica otra muestra.
+
+#### Tamaño
+
+El margen depende de los negocios **determinados** (activo o cerrado), no de
+los muestreados: `n = n_det / (1 − r)`, con `r` la tasa de indeterminados del
+estrato, que se mide en el piloto. Al 95% (Wilson):
+
+| n determinados | margen si θ ≈ 0.5 | margen si θ ≈ 0.8 |
+|---|---|---|
+| 400 | ±4.9 | ±3.9 |
+| 700 | ±3.7 | ±3.0 |
+| 1,000 | ±3.1 | ±2.5 |
+
+| Estrato | Muestreados | Con r = 0.4, determinados | Para qué |
+|---|---|---|---|
+| `cerrado\|reocupado` | **1,200** | ~720 | θ global: es el 99.5% de los cerrados de la población, así que domina la cifra reponderada |
+| `cerrado\|no_reocupado` | **300** | ~180 | θ propio (±7): sobremuestreado, pesa 0.5% en la población |
+| `activo\|intermitente` | **250** | ~150 | Donde "ausente ⇒ cerrado" ya falló una vez |
+| `activo\|continuo` | **250** | ~150 | Falsos negativos |
+| **Total** | **2,000** | | ~4 días en indominus (~3 min por negocio) |
+
+Si el piloto da `r` > 0.5 en los cerrados, el estrato se amplía, o se
+integra Places (`docs/apis_externas.md` §2) para bajar `r` antes de ampliar.
+Las cuotas se fijan en función del `r` del piloto, no al revés.
+
+#### Representatividad geográfica
+
+No se estima por estado (32 × 4 celdas no caben en ningún presupuesto), pero
+la muestra tiene que **cubrir** el país en proporción. Dentro de cada estrato
+la tirada es **sistemática sobre la población ordenada por estado, municipio
+y un aleatorio**, con arranque aleatorio: cada estado queda representado en
+proporción a su tamaño (estratificación implícita), la varianza baja respecto
+a la aleatoria simple y la estimación sigue siendo insesgada. La entidad, la
+urbanidad y el tamaño del negocio quedan en cada fila para reportar, de
+forma descriptiva, si la precisión o la verificabilidad cambian con el
+territorio.
+
+#### Lo que no se puede ignorar
+
+1. **Los indeterminados no son azar.** Un negocio que cerró deja menos
+   huella que uno abierto, así que "indeterminado" probablemente se
+   correlaciona con el cierre. Se reportan tres cifras, no una:
+   - θ entre los determinados (supone que faltan al azar dentro del estrato);
+   - **cotas de Manski**: todos los indeterminados como `activo` (peor caso
+     para la regla) y como `cerrado` (mejor caso);
+   - θ ajustado por la probabilidad de ser verificable, modelada con lo
+     que hay en gold (tamaño, actividad, urbano/rural, meses ausente).
+   Si las cotas son demasiado anchas, la conclusión honesta es "no
+   verificable a este nivel de huella", y eso también es un resultado.
+2. **El agente se equivoca.** Una submuestra de **200 negocios, revisada a
+   mano** (50 por veredicto del agente: activo, cerrado, indeterminado y
+   uno más de los que el juez no sostuvo), da la sensibilidad y la
+   especificidad del agente. θ se corrige con ellas (Rogan–Gladen) y el
+   intervalo sale de un bootstrap que remuestrea ambas muestras a la vez. El
+   acuerdo con el juez es confiabilidad, no validez: no sustituye a esta
+   revisión.
+3. **Fuera de muestra.** La muestra final **excluye** los negocios de los
+   pilotos, y el agente se **congela** antes de correrla: misma
+   `AGENTE_VERSION` de principio a fin, sin tocar prompts a la mitad. Lo que
+   se aprenda corriéndola va a la versión siguiente, no a esta.
+
+#### El cálculo
+
+- Por estrato `h`: `θ_h = vp_h / (vp_h + fp_h)`, IC de Wilson.
+- Global, reponderado por el peso `W_h` de cada estrato cerrado en la
+  población: `θ = Σ W_h θ_h`, con `Var(θ) = Σ W_h² θ_h (1 − θ_h) / n_h`.
+- Corregido por el agente: `θ* = (θ + Sp − 1) / (Se + Sp − 1)`, IC por
+  bootstrap (estratos × submuestra de validación).
+- Sensibilidad: θ por `meses_sin_aparecer_gold` y por `huecos_gold`. Si sube
+  con los meses, el umbral de 12 se defiende o se mueve con datos.
+
+#### Lo que falta en el código
+
+| | |
+|---|---|
+| `muestrear --cuota-estrato estrato=n` | Cuotas distintas por estrato (hoy es una sola para los cuatro) |
+| `muestrear --excluir-muestra <nombre>` | Dejar fuera los negocios de los pilotos |
+| Tirada sistemática ordenada por geografía | La estratificación implícita de arriba |
+| Revisión humana | Una tabla (`verificacion.revisiones`) para los 200 a mano, y una salida que liste sus URLs |
+| `metricas` | Cotas de Manski, IC de Wilson por estrato, θ reponderado con su IC y la corrección por Se/Sp
+
 Es lo que ejecuta `docker compose run --rm agente muestrear --nombre ...`
 (`src/agents/survival/muestreo.py`), con la cuota y la semilla en `.env` y
 el registro en `meta`. Vive con el agente y no en `src/etl/` porque
