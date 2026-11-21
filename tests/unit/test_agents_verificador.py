@@ -30,8 +30,9 @@ from src.agents.survival.prompts import (
     formatear_insumo,
     sistema_especialista,
 )
-from src.agents.survival.recoleccion import Pieza
+from src.agents.survival.recoleccion import FuenteMaps, Grupo, Pieza, agrupar
 from src.agents.survival.verificador import Equipo
+from src.shared.enums import ESPECIALIDAD_DE
 
 VENTANA_FIN = date(2026, 5, 1)
 MAPS = "https://www.google.com/maps/search/TACOS%20PACO?hl=es"
@@ -331,6 +332,11 @@ class FuenteFalsa:
         return ""
 
 
+def g(*fuentes) -> Grupo:
+    """El grupo del especialista que lee estas fuentes."""
+    return Grupo(ESPECIALIDAD_DE[fuentes[0].recolector], list(fuentes))
+
+
 def informar(**kw) -> dict:
     base = dict(
         identificado="si",
@@ -350,7 +356,7 @@ def especialista(cliente, ampliaciones=0, intentos=3) -> Especialista:
 class TestElEspecialista:
     def test_informa_con_citas_de_su_fuente(self):
         cliente = ClienteFalso(respuesta(informar()))
-        i = especialista(cliente, 2).informar(negocio(), FuenteFalsa(), expediente())
+        i = especialista(cliente, 2).informar(negocio(), g(FuenteFalsa()), expediente())
         assert (i.identificado, i.senal, i.automatico) == ("si", "cerrado", False)
         assert i.citas[0].pieza == 1
         # Solo vio las piezas de SU fuente, con su número global.
@@ -360,7 +366,7 @@ class TestElEspecialista:
     def test_no_puede_citar_otra_fuente(self):
         malo = informar(senal="activo", citas=[cita(3, "Promo 2x1 todos los martes", "activo")])
         cliente = ClienteFalso(respuesta(malo), respuesta(informar()))
-        i = especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        i = especialista(cliente).informar(negocio(), g(FuenteFalsa()), expediente())
         assert i.senal == "cerrado"
         assert any("no es de las que puedes citar" in t for t in cliente.tools())
 
@@ -368,13 +374,13 @@ class TestElEspecialista:
         malo = informar(identificado="no")
         bueno = informar(identificado="no", senal="neutral", citas=[])
         cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
-        i = especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        i = especialista(cliente).informar(negocio(), g(FuenteFalsa()), expediente())
         assert (i.identificado, i.senal) == ("no", "neutral")
         assert any("la señal es neutral" in t for t in cliente.tools())
 
     def test_una_senal_sin_cita_que_la_sostenga(self):
         cliente = ClienteFalso(respuesta(informar(citas=[])), respuesta(informar()))
-        especialista(cliente).informar(negocio(), FuenteFalsa(), expediente())
+        especialista(cliente).informar(negocio(), g(FuenteFalsa()), expediente())
         assert any("al menos una cita con esa señal" in t for t in cliente.tools())
 
     def test_amplia_su_fuente_y_puede_citar_lo_nuevo(self):
@@ -390,7 +396,7 @@ class TestElEspecialista:
             ),
         )
         fuente = FuenteFalsa()
-        i = especialista(cliente, 2).informar(negocio(), fuente, exp)
+        i = especialista(cliente, 2).informar(negocio(), g(fuente), exp)
         assert fuente.ampliaciones == [{"consulta": "TAQUERIA DON PACO Guadalajara"}]
         assert len(exp) == nueva and exp[-1].ampliada
         assert i.senal == "activo" and i.fecha_mas_reciente == date(2026, 5, 1)
@@ -402,23 +408,63 @@ class TestElEspecialista:
             respuesta(informar()),
         )
         fuente = FuenteFalsa()
-        especialista(cliente, 1).informar(negocio(), fuente, expediente())
+        especialista(cliente, 1).informar(negocio(), g(fuente), expediente())
         assert len(fuente.ampliaciones) == 1
         assert any("PRESUPUESTO AGOTADO" in t for t in cliente.tools())
 
     def test_sin_nada_citable_ni_herramienta_no_llama_al_modelo(self):
         cliente = ClienteFalso()
         i = especialista(cliente, 2).informar(
-            negocio(), FuenteFalsa("sitio", herramienta=False), expediente()
+            negocio(), g(FuenteFalsa("sitio", herramienta=False)), expediente()
         )
         assert i.automatico and (i.identificado, i.senal) == ("no", "neutral")
         assert cliente.conversaciones == []
 
     def test_si_nunca_informa_queda_automatico_y_lo_dice(self):
         i = especialista(ClienteFalso(), intentos=2).informar(
-            negocio(), FuenteFalsa(), expediente()
+            negocio(), g(FuenteFalsa()), expediente()
         )
         assert i.automatico and i.identificado == "dudoso" and "no produjo" in i.resumen
+
+
+@pytest.mark.unit
+class TestUnGrupoDeFuentes:
+    def test_lee_y_cita_las_piezas_de_todas_sus_fuentes(self):
+        exp = expediente() + [Pieza("osm", "TACOS PACO · a 12 m · disused:amenity=fast_food", "ok")]
+        cliente = ClienteFalso(
+            respuesta(
+                informar(
+                    citas=[
+                        cita(1, "Cerrado permanentemente", "cerrado"),
+                        cita(7, "disused:amenity=fast_food", "cerrado"),
+                    ]
+                )
+            )
+        )
+        i = especialista(cliente).informar(
+            negocio(), g(FuenteFalsa(), FuenteFalsa("osm", herramienta=False)), exp
+        )
+        assert i.especialista == "maps" and [c.pieza for c in i.citas] == [1, 7]
+        visto = cliente.conversaciones[0][1]["content"]
+        assert "[1] maps" in visto and "[7] osm" in visto and "[3] web" not in visto
+
+    def test_cada_herramienta_va_a_su_fuente(self):
+        primera, segunda = FuenteFalsa("web"), FuenteFalsa("bing")
+        segunda.herramienta = {"type": "function", "function": {"name": "buscar_en_bing"}}
+        cliente = ClienteFalso(
+            respuesta(llamada("buscar_en_bing", consulta="tacos paco")),
+            respuesta(informar(identificado="no", senal="neutral", citas=[])),
+        )
+        especialista(cliente, 2).informar(negocio(), g(primera, segunda), expediente())
+        assert primera.ampliaciones == [] and segunda.ampliaciones == [{"consulta": "tacos paco"}]
+
+    def test_agrupar_respeta_el_orden_de_los_especialistas(self):
+        fuentes = [FuenteFalsa(r) for r in ("sat", "redes", "bing", "osm", "web", "maps")]
+        grupos = agrupar(fuentes)
+        assert [x.especialidad for x in grupos] == ["maps", "web", "redes", "registros"]
+        # Dentro de un grupo, el orden en que llegaron.
+        assert [f.recolector for f in grupos[0].fuentes] == ["osm", "maps"]
+        assert [f.recolector for f in grupos[1].fuentes] == ["bing", "web"]
 
 
 # ----- decisor -----
@@ -680,5 +726,5 @@ class TestNadieVeLaHipotesis:
         assert "indeterminado" in SISTEMA_DECISOR and "indeterminado" in SISTEMA_JUEZ
         assert "COPIADO TEXTUALMENTE" in SISTEMA_DECISOR
         assert "directorio_denue" in sistema_especialista("web", 2)
-        assert "buscar_en_maps" in sistema_especialista("maps", 2)
-        assert "buscar_en_maps" not in sistema_especialista("maps", 0)
+        assert "buscar_en_maps" in sistema_especialista("maps", 2, [FuenteMaps.herramienta])
+        assert "buscar_en_maps" not in sistema_especialista("maps", 0, [FuenteMaps.herramienta])

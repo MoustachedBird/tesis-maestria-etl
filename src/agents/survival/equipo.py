@@ -1,12 +1,13 @@
-"""El equipo que verifica un negocio: un especialista por fuente y un decisor.
+"""El equipo que verifica un negocio: un especialista por grupo de fuentes y un decisor.
 
 Es la arquitectura de "equipo de agentes con roles" que propone la
 literatura de sistemas multiagente, adaptada a un problema de MEDICIÓN:
 
 - Cada **especialista** tiene un contexto chico y una sola tarea --leer lo
-  que trajo su fuente y decir si es este negocio y qué indica--, en vez de
-  un agente generalista con el expediente entero encima. Puede pedir unas
-  pocas consultas extra dentro de su fuente.
+  que trajeron sus fuentes (un `Grupo`: los mapas, los buscadores, la huella
+  digital...) y decir si es este negocio y qué indica--, en vez de un agente
+  generalista con el expediente entero encima. Puede pedir unas pocas
+  consultas extra dentro de sus fuentes.
 - El **decisor** no busca: integra los informes. Solo puede apoyarse en
   piezas que algún especialista citó.
 - El **juez** (`juez.py`) está fuera del equipo a propósito: no ve los
@@ -40,7 +41,7 @@ from src.agents.survival.prompts import (
     formatear_insumo,
     sistema_especialista,
 )
-from src.agents.survival.recoleccion import Fuente, Pieza, formatear_expediente
+from src.agents.survival.recoleccion import Grupo, Pieza, formatear_expediente
 from src.shared.enums import (
     Confianza,
     EstadoVerificado,
@@ -60,7 +61,7 @@ MIN_TEXTO = 20
 
 @dataclass
 class Informe:
-    """Lo que el especialista de una fuente concluyó de ella."""
+    """Lo que el especialista de un grupo de fuentes concluyó de ellas."""
 
     especialista: str
     identificado: str
@@ -93,36 +94,38 @@ class Informe:
 
 
 class Especialista:
-    """El agente que lee UNA fuente; uno solo sirve para todas, cambia el prompt."""
+    """El agente que lee UN grupo de fuentes; uno solo sirve para todos, cambia el prompt."""
 
     def __init__(self, cliente: Any, *, max_ampliaciones: int, max_intentos: int):
         """
         Args:
             cliente: `OllamaCliente` o cualquier objeto con `.chat(mensajes, herramientas)`.
-            max_ampliaciones: consultas extra que puede pedir dentro de su fuente.
+            max_ampliaciones: consultas extra que puede pedir dentro de sus fuentes (en total).
             max_intentos: vueltas para producir un informe válido.
         """
         self.cliente = cliente
         self.max_ampliaciones = max_ampliaciones
         self.max_intentos = max_intentos
 
-    def informar(self, n: Negocio, fuente: Fuente, expediente: list[Pieza]) -> Informe:
-        """Lee lo que trajo `fuente` y produce su informe.
+    def informar(self, n: Negocio, grupo: Grupo, expediente: list[Pieza]) -> Informe:
+        """Lee lo que trajeron las fuentes de `grupo` y produce su informe.
 
         `expediente` se modifica en sitio: las consultas extra que pida el
         especialista se agregan al final, con su número, y quedan guardadas
         aunque no las cite.
         """
         inicio = time.monotonic()
-        recolector = fuente.recolector
+        especialidad = grupo.especialidad
+        recolectores = grupo.recolectores
 
         def propias() -> list[int]:
-            return [i for i, p in enumerate(expediente, 1) if p.recolector == recolector]
+            return [i for i, p in enumerate(expediente, 1) if p.recolector in recolectores]
 
-        puede_ampliar = fuente.herramienta is not None and self.max_ampliaciones > 0
+        herramientas_ampliar = grupo.herramientas if self.max_ampliaciones > 0 else []
+        puede_ampliar = bool(herramientas_ampliar)
         if not any(expediente[i - 1].citable for i in propias()) and not puede_ampliar:
             return Informe(
-                especialista=recolector,
+                especialista=especialidad,
                 identificado=Identificacion.NO.value,
                 senal=SenalEvidencia.NEUTRAL.value,
                 resumen=_sin_nada(expediente, propias()),
@@ -134,34 +137,39 @@ class Especialista:
         contenido = [
             formatear_insumo(n),
             "",
-            f"LO QUE TRAJO {FOCOS[recolector][0].upper()}",
+            f"LO QUE TRAJERON {FOCOS[especialidad][0].upper()}",
             "",
             formatear_expediente([expediente[i - 1] for i in numeros], numeros),
         ]
-        extra = fuente.contexto(expediente)
+        extra = grupo.contexto(expediente)
         if extra:
             contenido += ["", extra]
         mensajes = [
             {
                 "role": "system",
                 "content": sistema_especialista(
-                    recolector, self.max_ampliaciones if puede_ampliar else 0
+                    especialidad,
+                    self.max_ampliaciones if puede_ampliar else 0,
+                    herramientas_ampliar,
                 ),
             },
             {"role": "user", "content": "\n".join(contenido)},
         ]
-        herramientas = [HERRAMIENTA_INFORMAR] + ([fuente.herramienta] if puede_ampliar else [])
+        herramientas = [HERRAMIENTA_INFORMAR] + herramientas_ampliar
         usadas = 0
 
-        def ejecutar(_nombre: str, args: dict) -> str:
+        def ejecutar(nombre: str, args: dict) -> str:
             nonlocal usadas
+            fuente = grupo.fuente_de(nombre)
+            if fuente is None:
+                return f"ERROR: {nombre} no es una de tus herramientas."
             if usadas >= self.max_ampliaciones:
                 return "PRESUPUESTO AGOTADO: no hay más consultas. Informa con lo que tienes."
             usadas += 1
             nuevas = fuente.ampliar(n, args, expediente)
             desde = len(expediente) + 1
             expediente.extend(nuevas)
-            logger.info(f"         + {recolector}: {args} -> {len(nuevas)} piezas")
+            logger.info(f"         + {fuente.recolector}: {args} -> {len(nuevas)} piezas")
             if not nuevas:
                 return "(sin resultados nuevos)"
             return formatear_expediente(nuevas, list(range(desde, desde + len(nuevas))))
@@ -185,7 +193,7 @@ class Especialista:
                 errores.append("si el negocio no está identificado, la señal es neutral")
             if senal != SenalEvidencia.NEUTRAL.value and not any(c.senal == senal for c in citas):
                 errores.append(f"una señal {senal!r} necesita al menos una cita con esa señal")
-            informe = Informe(recolector, identificado, senal, resumen, citas)
+            informe = Informe(especialidad, identificado, senal, resumen, citas)
             return informe, errores
 
         salida = pedir(
@@ -199,7 +207,7 @@ class Especialista:
         )
         if salida is None:
             return Informe(
-                especialista=recolector,
+                especialista=especialidad,
                 identificado=Identificacion.DUDOSO.value,
                 senal=SenalEvidencia.NEUTRAL.value,
                 resumen=(

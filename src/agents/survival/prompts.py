@@ -2,7 +2,7 @@
 
 Tres roles, cada uno con un contexto chico y una sola tarea:
 
-- **Especialista** (uno por fuente): lee lo que trajo SU fuente y responde
+- **Especialista** (uno por grupo de fuentes): lee lo que trajeron SUS fuentes y responde
   si es este negocio y qué indica, con citas.
 - **Decisor**: integra los informes de los especialistas y concluye.
 - **Juez**: relee el expediente crudo, primero a ciegas y luego viendo el
@@ -21,9 +21,9 @@ from src.agents.survival.insumo import Negocio
 from src.shared.enums import (
     Confianza,
     Dictamen,
+    Especialidad,
     EstadoVerificado,
     Identificacion,
-    Recolector,
     SenalEvidencia,
 )
 
@@ -119,49 +119,90 @@ def formatear_insumo(n: Negocio) -> str:
 # ----- especialista -----
 
 FOCOS: dict[str, tuple[str, str]] = {
-    Recolector.MAPS.value: (
-        "Google Maps",
-        "Te tocan las fichas de Google Maps. Lo que más vale: el estado explícito "
-        '("Cerrado permanentemente", "Cerrado temporalmente"), el horario vigente y la '
-        "antigüedad de la reseña más reciente. Si la búsqueda devolvió una lista y no una "
-        "ficha, revisa si alguna coincide en nombre Y domicilio. Comprueba que la dirección "
-        "de la ficha sea la del DENUE.",
+    Especialidad.MAPS.value: (
+        "los mapas",
+        "Te tocan Google Maps y OpenStreetMap. Lo que más vale: el estado explícito de Maps "
+        '("Cerrado permanentemente", "Cerrado temporalmente"), el horario vigente y la fecha de '
+        "la reseña más reciente. Si la búsqueda devolvió una lista y no una ficha, revisa si "
+        "alguna coincide en nombre Y domicilio. Comprueba que la dirección sea la del DENUE. "
+        "En OpenStreetMap cada objeto trae su distancia al punto del DENUE y qué tanto se parece "
+        "su nombre: úsalo para identificarlo. Una etiqueta disused:, was: o abandoned: dice que "
+        "un mapeador registró el local como desocupado. La fecha de última edición de OSM es "
+        "cuándo alguien editó el mapa, NO actividad del negocio: no la cites como señal activo.",
     ),
-    Recolector.WEB.value: (
-        "el buscador web",
-        "Te tocan los resultados de un buscador (título, URL, extracto). Busca: avisos de "
-        "cierre, traspaso o cambio de domicilio; noticias (clausuras, incendios); presencia en "
-        "plataformas de entrega (Rappi, Uber Eats, DiDi Food) o en directorios con reseñas "
-        "fechadas. Los extractos casi nunca traen fecha: sin fecha escrita, no la inventes.",
+    Especialidad.WEB.value: (
+        "los buscadores web",
+        "Te tocan los resultados de varios buscadores (título, URL, extracto); un resultado que "
+        "ya trajo un buscador no se repite en el siguiente. Busca: avisos de cierre, traspaso o "
+        "cambio de domicilio; noticias (clausuras, incendios); presencia en plataformas de "
+        "entrega (Rappi, Uber Eats, DiDi Food) o en directorios con reseñas fechadas. Los "
+        "extractos casi nunca traen fecha: sin fecha escrita, no la inventes.",
     ),
-    Recolector.REDES.value: (
+    Especialidad.REDES.value: (
         "las redes sociales",
         "Te tocan las páginas de Facebook e Instagram, abiertas sin iniciar sesión. Lo que "
         "vale: la fecha de la última publicación, avisos de cierre o de mudanza, el horario. "
         "Sin sesión a veces solo se ve el encabezado de la página: dilo así, no lo completes.",
     ),
-    Recolector.SITIO.value: (
-        "el sitio web propio",
-        "Te toca el sitio web que el DENUE publicó del negocio. Si ahora es de otra cosa o "
-        "está en venta, es señal de cierre; si solo falló la conexión, es neutral; si muestra "
-        "actividad vigente con fecha, es señal de actividad.",
+    Especialidad.PLATAFORMAS.value: (
+        "las plataformas de reseñas y de entrega",
+        "Te tocan fichas de TripAdvisor, Yelp, Foursquare, Sección Amarilla y plataformas de "
+        'entrega (Rappi, Uber Eats, DiDi Food). Lo que vale: "cerrado definitivamente" o '
+        '"cerrado permanentemente", si sigue recibiendo pedidos, y la fecha de la reseña más '
+        "reciente. Comprueba que el domicilio sea el del DENUE.",
+    ),
+    Especialidad.SITIO.value: (
+        "la huella digital",
+        "Te tocan el sitio web que el DENUE publicó, sus capturas en el Internet Archive y en "
+        "Common Crawl, y el registro de su dominio (o del dominio del correo). Si el sitio ahora "
+        "es de otra cosa o está en venta, es señal de cierre; si solo falló la conexión, es "
+        "neutral. Un dominio vencido, liberado o que ya no está registrado apunta a cierre, con "
+        "la fecha del registro. La captura archivada más reciente fecha el último rastro del "
+        "sitio: si es anterior a la última vez que el DENUE vio al negocio, no prueba actividad "
+        "posterior. Que un sitio no tenga capturas es neutral.",
+    ),
+    Especialidad.REGISTROS.value: (
+        "los registros oficiales",
+        "Te tocan registros del gobierno buscados por la razón social: la lista de contribuyentes "
+        "no localizados del SAT (el SAT no encontró al contribuyente en su domicilio fiscal), y "
+        "publicaciones de sociedades mercantiles y del Diario Oficial (disolución, liquidación). "
+        "Solo cuentan si la razón social coincide completa; una coincidencia parcial es otro "
+        "contribuyente. Estar en la lista de no localizados apunta a cierre, con la fecha de "
+        "publicación.",
+    ),
+    Especialidad.FACHADA.value: (
+        "las imágenes de la calle",
+        "Te tocan descripciones de fotos de la calle en las coordenadas del DENUE, escritas por "
+        "un modelo de visión, con la fecha de la foto. Lo que vale: si el letrero es de este "
+        "negocio, de otro, o si el local está vacío o en renta. La descripción es de un modelo, "
+        "no de la fuente: úsala con prudencia.",
     ),
 }
-"""Por fuente: cómo se llama para el modelo y en qué fijarse."""
-
-_AMPLIAR: dict[str, str] = {
-    Recolector.MAPS.value: "Puedes hacer hasta {k} búsquedas más con buscar_en_maps (otro nombre con que apareció, el domicilio) si las piezas no bastan para identificarlo.",
-    Recolector.WEB.value: "Puedes hacer hasta {k} búsquedas más con buscar_web.",
-    Recolector.REDES.value: "Puedes abrir hasta {k} páginas más con leer_red, solo de la lista que se te da.",
-}
-"""Cómo se le explica a cada especialista su herramienta de ampliación."""
+"""Por especialista: cómo se llama su grupo de fuentes para el modelo y en qué fijarse."""
 
 
-def sistema_especialista(recolector: str, max_ampliaciones: int) -> str:
-    """El prompt de sistema del especialista de una fuente."""
-    nombre, foco = FOCOS[recolector]
-    ampliar = _AMPLIAR.get(recolector, "").format(k=max_ampliaciones) if max_ampliaciones else ""
-    return f"""Eres el especialista en {nombre} de un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios. Tú solo ves lo que {nombre} dijo de este negocio; otro miembro del equipo junta los informes de todas las fuentes y decide. Tu trabajo es leer bien TU fuente.
+def sistema_especialista(
+    especialidad: str, max_ampliaciones: int, herramientas: list[dict] | None = None
+) -> str:
+    """El prompt de sistema del especialista de un grupo de fuentes.
+
+    Args:
+        especialidad: el grupo (`Especialidad`).
+        max_ampliaciones: consultas extra que puede pedir; 0 = ninguna.
+        herramientas: las de ampliación de sus fuentes; se le explican por nombre.
+    """
+    nombre, foco = FOCOS[especialidad]
+    ampliar = ""
+    if max_ampliaciones and herramientas:
+        lista = "\n".join(
+            f"- {h['function']['name']}: {h['function'].get('description', '')}"
+            for h in herramientas
+        )
+        ampliar = (
+            f"Si las piezas no bastan para identificarlo, puedes pedir hasta {max_ampliaciones} "
+            f"consultas más en total, con:\n{lista}"
+        )
+    return f"""Eres el especialista en {nombre} de un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios. Tú solo ves lo que {nombre} dijeron de este negocio; otro miembro del equipo junta los informes de todas las fuentes y decide. Tu trabajo es leer bien TUS fuentes.
 
 {foco}
 
@@ -169,7 +210,7 @@ def sistema_especialista(recolector: str, max_ampliaciones: int) -> str:
 
 TU INFORME (herramienta informar, obligatoria para terminar)
 - identificado: si (las piezas son de ESTE negocio: nombre y lugar coinciden), no (no aparece, o solo hay homónimos), dudoso.
-- senal: activo, cerrado o neutral: lo que tu fuente, por sí sola, indica del negocio. Si identificado no es "si", la señal es neutral.
+- senal: activo, cerrado o neutral: lo que tus fuentes, por sí solas, indican del negocio. Si identificado no es "si", la señal es neutral.
 - resumen: una a tres frases con lo que encontraste, nombrando fechas si las hay.
 - citas: las piezas que sostienen tu informe. Si la señal es activo o cerrado, al menos una cita con esa señal.
 
@@ -201,7 +242,7 @@ HERRAMIENTA_INFORMAR = {
 
 SISTEMA_DECISOR = f"""Eres quien decide en un equipo que verifica si un negocio de México SIGUE ACTIVO o CERRÓ. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) no reporta cierres: solo deja de listar negocios, y no sabemos por qué. Tu veredicto es independiente del DENUE.
 
-Recibes lo que el DENUE publicó del negocio y los INFORMES de los especialistas: uno por fuente (Google Maps, buscador web, redes sociales, sitio propio). Cada informe dice si la fuente identificó al negocio, qué indica y con qué piezas. Tú no puedes buscar: decides con los informes.
+Recibes lo que el DENUE publicó del negocio y los INFORMES de los especialistas: uno por grupo de fuentes (mapas, buscadores web, redes sociales, plataformas de reseñas y entrega, huella digital del sitio, registros oficiales, imágenes de la calle). Cada informe dice si la fuente identificó al negocio, qué indica y con qué piezas. Tú no puedes buscar: decides con los informes.
 
 Al pesar los informes: un estado explícito en Maps pesa más que una publicación; una pieza fechada pesa más que una sin fecha; una fuente que no identificó al negocio no aporta nada; si dos fuentes se contradicen, gana la más reciente con fecha y lo dices en el razonamiento.
 

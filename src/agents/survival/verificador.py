@@ -2,15 +2,16 @@
 
 Por cada negocio, en este orden:
 
-    para cada fuente (Maps, buscador, redes, sitio propio):
-        recolección base en código  ->  piezas del expediente
-        especialista de la fuente   ->  informe (puede ampliar su fuente)
+    para cada grupo de fuentes (mapas, buscadores, redes, plataformas,
+    huella digital, registros, fachada):
+        recolección base en código  ->  piezas del expediente, fuente por fuente
+        especialista del grupo      ->  informe (puede ampliar sus fuentes)
     decisor                         ->  veredicto con evidencias
     se guarda todo                  ->  veredictos, consultas, informes, evidencias
     juez                            ->  auditoría (a ciegas + dictamen)
 
-El orden de las fuentes importa: el especialista de redes abre las páginas
-de Facebook que encontró el buscador, así que va después.
+El orden de los grupos importa: redes, plataformas y el archivo web abren
+las URLs que encontraron los buscadores, así que van después.
 
 Lo que el sistema garantiza, porque el modelo por sí solo no lo garantiza:
 
@@ -43,7 +44,7 @@ from src.agents.survival import insumo
 from src.agents.survival.citas import Cita
 from src.agents.survival.equipo import Decisor, Especialista, Informe
 from src.agents.survival.juez import Juez, auditar_veredicto
-from src.agents.survival.recoleccion import Fuente, Pieza
+from src.agents.survival.recoleccion import Fuente, Pieza, agrupar
 from src.meta.tracker import MetadataTracker
 from src.shared.db.models.verificacion import Consulta, Evidencia, Veredicto
 from src.shared.db.models.verificacion import Informe as InformeFila
@@ -56,8 +57,16 @@ logger = get_stage_logger(__name__, Path("./data/agente.log"))
 JOB_NAME_VERIFICAR = "agente_supervivencia_verificar"
 """Nombre de la corrida de verificación en `meta.job_runs`."""
 
-_ICONOS = {"maps": "🗺 ", "web": "🔎", "redes": "👥", "sitio": "🌐"}
-"""Un ícono por fuente en el log, para leerlo de un vistazo."""
+_ICONOS = {
+    "maps": "🗺 ",
+    "web": "🔎",
+    "redes": "👥",
+    "plataformas": "⭐",
+    "sitio": "🌐",
+    "registros": "🏛 ",
+    "fachada": "📷",
+}
+"""Un ícono por especialista en el log, para leerlo de un vistazo."""
 
 
 @dataclass
@@ -83,7 +92,7 @@ class Resultado:
 
 
 class Equipo:
-    """El verificador: las fuentes, un especialista por fuente y el decisor."""
+    """El verificador: las fuentes, un especialista por grupo y el decisor."""
 
     def __init__(
         self,
@@ -97,12 +106,13 @@ class Equipo:
         """
         Args:
             cliente: `OllamaCliente` o cualquier objeto con `.modelo` y `.chat(...)`.
-            fuentes: en el orden en que se consultan (redes después de web).
+            fuentes: las que se consultan; `agrupar` las ordena por especialista.
             version: `AGENTE_VERSION`; va en `veredictos.agente` junto al modelo.
             max_ampliaciones: consultas extra por especialista.
             max_intentos: vueltas por rol para producir una salida válida.
         """
         self.fuentes = fuentes
+        self.grupos = agrupar(fuentes)
         self.agente = f"{cliente.modelo}/{version}"
         self.especialista = Especialista(
             cliente, max_ampliaciones=max_ampliaciones, max_intentos=max_intentos
@@ -114,16 +124,23 @@ class Equipo:
         inicio = time.monotonic()
         expediente: list[Pieza] = []
         informes: list[Informe] = []
-        for fuente in self.fuentes:
-            expediente.extend(fuente.recolectar(n, expediente))
-            informe = self.especialista.informar(n, fuente, expediente)
+        for grupo in self.grupos:
+            t0 = time.monotonic()
+            expediente.extend(grupo.recolectar(n, expediente))
+            t_recoleccion = time.monotonic() - t0
+            informe = self.especialista.informar(n, grupo, expediente)
             informes.append(informe)
-            utiles = sum(p.citable for p in expediente if p.recolector == fuente.recolector)
+            propias = [p for p in expediente if p.recolector in grupo.recolectores]
+            por_fuente = ", ".join(
+                f"{r} {sum(p.citable for p in propias if p.recolector == r)}/"
+                f"{sum(p.recolector == r for p in propias)}"
+                for r in (f.recolector for f in grupo.fuentes)
+            )
             marca = " (automático)" if informe.automatico else ""
             logger.info(
-                f"      {_ICONOS.get(fuente.recolector, '·')} {fuente.recolector}: "
-                f"{utiles} piezas útiles · {informe.identificado}/{informe.senal} · "
-                f"{len(informe.citas)} citas{marca}"
+                f"      {_ICONOS.get(grupo.especialidad, '·')} {grupo.especialidad} [{por_fuente}] · "
+                f"{informe.identificado}/{informe.senal} · {len(informe.citas)} citas{marca} · "
+                f"recolección {t_recoleccion:.0f}s, modelo {informe.duracion_s:.0f}s"
             )
         decision = self.decisor.decidir(n, informes, expediente)
         return Resultado(

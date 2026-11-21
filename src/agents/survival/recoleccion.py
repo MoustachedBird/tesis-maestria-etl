@@ -16,8 +16,10 @@ Se guarda TODO lo que cada consulta devolvió, incluidas las que fallaron.
 Cada pieza lleva el texto EXACTO que verá el modelo (`contenido`), que es
 contra lo que se comprueba que un extracto citado o una fecha estén ahí.
 
-Agregar una fuente es una clase más con la forma de `Fuente`, y su entrada
-en `Recolector` (enums) y en `prompts.FOCOS`.
+Cada fuente es un `Recolector` (la fuente concreta) y la lee el
+especialista de su `Especialidad` (el grupo): `agrupar` las junta en el
+orden fijo de los especialistas. Agregar una fuente es una clase más con la
+forma de `Fuente`, su valor en `Recolector` y su fila en `ESPECIALIDAD_DE`.
 """
 
 from __future__ import annotations
@@ -29,7 +31,13 @@ from typing import Any, Protocol
 
 from src.agents.survival.insumo import Negocio
 from src.agents.survival.sources.busqueda import Buscador, Resultado, clasificar_fuente
-from src.shared.enums import EstadoConsulta, Recolector
+from src.shared.enums import (
+    BUSCADORES,
+    ESPECIALIDAD_DE,
+    Especialidad,
+    EstadoConsulta,
+    Recolector,
+)
 
 
 @dataclass(frozen=True)
@@ -109,7 +117,58 @@ class Fuente(Protocol):
         ...
 
 
-# ----- las cuatro fuentes -----
+@dataclass
+class Grupo:
+    """Las fuentes que lee un mismo especialista, en el orden en que se consultan."""
+
+    especialidad: str
+    fuentes: list[Fuente]
+
+    @property
+    def recolectores(self) -> set[str]:
+        """Los recolectores del grupo: las piezas que el especialista puede citar."""
+        return {f.recolector for f in self.fuentes}
+
+    @property
+    def herramientas(self) -> list[dict]:
+        """Las herramientas de ampliación de sus fuentes (las que tienen)."""
+        return [f.herramienta for f in self.fuentes if f.herramienta]
+
+    def fuente_de(self, herramienta: str) -> Fuente | None:
+        """La fuente a la que pertenece una herramienta, por su nombre."""
+        for f in self.fuentes:
+            if f.herramienta and f.herramienta["function"]["name"] == herramienta:
+                return f
+        return None
+
+    def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
+        """La recolección base de cada fuente, en orden; cada una ve lo que trajeron las anteriores."""
+        nuevas: list[Pieza] = []
+        for f in self.fuentes:
+            nuevas += f.recolectar(n, expediente + nuevas)
+        return nuevas
+
+    def contexto(self, expediente: list[Pieza]) -> str:
+        """Lo que sus fuentes quieren que el especialista sepa del resto del expediente."""
+        return "\n\n".join(c for c in (f.contexto(expediente) for f in self.fuentes) if c)
+
+
+def agrupar(fuentes: list[Fuente]) -> list[Grupo]:
+    """Las fuentes por especialista, en el orden de `Especialidad`.
+
+    Ese orden es el de la recolección: los buscadores van antes que redes,
+    plataformas y archivo, que abren lo que ellos encontraron. Dentro de un
+    grupo se respeta el orden en que llegaron las fuentes.
+    """
+    grupos = []
+    for especialidad in Especialidad:
+        propias = [f for f in fuentes if ESPECIALIDAD_DE[f.recolector] == especialidad.value]
+        if propias:
+            grupos.append(Grupo(especialidad.value, propias))
+    return grupos
+
+
+# ----- las fuentes -----
 
 
 class FuenteMaps:
@@ -166,34 +225,45 @@ class FuenteMaps:
 
 
 class FuenteWeb:
-    """El buscador web: extractos de resultados, incluidos plataformas, directorios y noticias."""
+    """Un buscador web: extractos de resultados, incluidos plataformas, directorios y noticias.
 
-    recolector = Recolector.WEB.value
-    herramienta = {
-        "type": "function",
-        "function": {
-            "name": "buscar_web",
-            "description": "Otra búsqueda web (título, URL, extracto y fecha si el buscador la da).",
-            "parameters": {
-                "type": "object",
-                "properties": {"consulta": {"type": "string"}},
-                "required": ["consulta"],
-            },
-        },
-    }
+    La misma clase sirve para todos los buscadores (SearXNG, Bing, DuckDuckGo,
+    Google, Brave): cambian el `Buscador` y el recolector. Un resultado que
+    otro buscador ya trajo no se repite, así que los siguientes solo suman
+    URLs nuevas.
+    """
 
-    def __init__(self, buscador: Buscador, max_resultados: int):
+    def __init__(
+        self, buscador: Buscador, max_resultados: int, recolector: str = Recolector.WEB.value
+    ):
         self.buscador = buscador
         self.max_resultados = max_resultados
+        self.recolector = recolector
+        nombre = "buscar_web" if recolector == Recolector.WEB.value else f"buscar_en_{recolector}"
+        self.herramienta = {
+            "type": "function",
+            "function": {
+                "name": nombre,
+                "description": (
+                    f"Otra búsqueda en {buscador.nombre} (título, URL, extracto y fecha si la da)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"consulta": {"type": "string"}},
+                    "required": ["consulta"],
+                },
+            },
+        }
 
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
-        """Nombre + lugar, nombre + domicilio, teléfono y una búsqueda dirigida a redes."""
+        """Nombre + lugar, nombre + domicilio, teléfono, y dos dirigidas: redes y reseñas."""
         consultas = [f'"{nombre_de(n)}" {lugar_de(n)}']
         if n.domicilios:
             consultas.append(f"{nombre_de(n)} {n.domicilios[0]} {n.municipio or ''}".strip())
         if n.telefonos:
             consultas.append(n.telefonos[0])
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
+        consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
         piezas: list[Pieza] = []
         for consulta in consultas:
             piezas += self._buscar(consulta, expediente + piezas)
@@ -219,7 +289,7 @@ class FuenteWeb:
                 Pieza(
                     recolector=self.recolector,
                     consulta=consulta,
-                    contenido=f"ERROR del buscador: {e.__class__.__name__}: {e}",
+                    contenido=f"ERROR del buscador {self.buscador.nombre}: {e.__class__.__name__}: {e}",
                     estado=EstadoConsulta.ERROR.value,
                 )
             ]
@@ -371,14 +441,31 @@ def clave_url(url: str | None) -> str:
     return u.removeprefix("www.").rstrip("/")
 
 
-def _urls_de_redes(expediente: list[Pieza]) -> list[str]:
-    """URLs de Facebook/Instagram que trajo el buscador, sin repetir, en orden."""
+def urls_halladas(expediente: list[Pieza], es: Callable[[str], bool]) -> list[str]:
+    """URLs que trajeron los buscadores y cumplen `es(url)`, sin repetir, en orden.
+
+    Es como redes, plataformas y archivo saben qué abrir: solo lo que algún
+    buscador encontró, nunca una URL que proponga el modelo.
+    """
     urls: list[str] = []
+    vistas: set[str] = set()
     for p in expediente:
-        if p.recolector == Recolector.WEB.value and p.url and p.fuente in ("facebook", "instagram"):
-            if clave_url(p.url) not in {clave_url(u) for u in urls}:
+        if p.recolector in BUSCADORES and p.url and es(p.url):
+            clave = clave_url(p.url)
+            if clave not in vistas:
+                vistas.add(clave)
                 urls.append(p.url)
     return urls
+
+
+def es_red(url: str) -> bool:
+    """Si la URL es de Facebook o Instagram."""
+    return clasificar_fuente(url) in ("facebook", "instagram")
+
+
+def _urls_de_redes(expediente: list[Pieza]) -> list[str]:
+    """URLs de Facebook/Instagram que trajeron los buscadores."""
+    return urls_halladas(expediente, es_red)
 
 
 def _estado_de(texto: str) -> str:

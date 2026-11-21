@@ -93,12 +93,13 @@ class TestWeb:
             "TACOS PACO AV VALLARTA 1234 AMERICANA 44160 Guadalajara",
             "3312345678",
             "TACOS PACO Guadalajara facebook",
+            "TACOS PACO Guadalajara opiniones",
         ]
 
     def test_sin_telefono_ni_domicilio(self):
         buscador = BuscadorFalso()
         FuenteWeb(buscador, 8).recolectar(negocio(telefonos=[], domicilios=[]), [])
-        assert len(buscador.consultas) == 2
+        assert len(buscador.consultas) == 3
 
     def test_un_resultado_repetido_se_guarda_una_vez_y_sin_resultados_es_pieza(self):
         r = Resultado("Tacos Paco", "https://www.tacospaco.mx/", "abierto")
@@ -106,11 +107,21 @@ class TestWeb:
         piezas = FuenteWeb(buscador, 8).recolectar(negocio(), [])
         urls = [p.url for p in piezas if p.url]
         assert urls == ["https://www.tacospaco.mx/"]
-        assert sum(p.estado == "sin_resultados" for p in piezas) == 2
+        assert sum(p.estado == "sin_resultados" for p in piezas) == 3
 
     def test_un_buscador_caido_es_pieza_error(self):
         piezas = FuenteWeb(BuscadorFalso(falla=True), 8).recolectar(negocio(), [])
         assert piezas and all(p.estado == "error" for p in piezas)
+
+    def test_otro_buscador_no_repite_lo_que_trajo_el_primero(self):
+        r = Resultado("Tacos Paco", "https://www.tacospaco.mx/", "abierto")
+        q = '"TACOS PACO" Guadalajara, Jalisco'
+        primero = FuenteWeb(BuscadorFalso({q: [r]}), 8).recolectar(negocio(), [])
+        bing = FuenteWeb(BuscadorFalso({q: [r]}), 8, recolector="bing")
+        segundo = bing.recolectar(negocio(), primero)
+        assert all(p.url is None for p in segundo)
+        assert all(p.recolector == "bing" for p in segundo)
+        assert bing.herramienta["function"]["name"] == "buscar_en_bing"
 
     def test_la_ampliacion_no_repite_lo_que_ya_estaba(self):
         viejo = Pieza("web", "x", "ok", url="https://tacospaco.mx")
@@ -122,8 +133,8 @@ class TestWeb:
         assert [p.url for p in piezas] == ["https://nota.mx/1"] and piezas[0].ampliada
 
 
-def _web(*urls: str) -> list[Pieza]:
-    return [Pieza("web", "extracto", "ok", consulta="q", url=u) for u in urls]
+def _web(*urls: str, recolector: str = "web") -> list[Pieza]:
+    return [Pieza(recolector, "extracto", "ok", consulta="q", url=u) for u in urls]
 
 
 @pytest.mark.unit
@@ -133,6 +144,11 @@ class TestRedes:
         exp = _web("https://nota.mx/1", FB, IG, FB + "/")
         piezas = FuenteRedes(nav, 2, 6000, 200).recolectar(negocio(), exp)
         assert nav.leidas == [FB, IG] and all(p.recolector == "redes" for p in piezas)
+
+    def test_abre_lo_que_trajo_cualquier_buscador(self):
+        nav = NavegadorFalso()
+        FuenteRedes(nav, 2, 6000, 200).recolectar(negocio(), _web(IG, recolector="duckduckgo"))
+        assert nav.leidas == [IG]
 
     def test_respeta_el_tope(self):
         nav = NavegadorFalso()
