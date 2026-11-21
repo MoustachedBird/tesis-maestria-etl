@@ -11,9 +11,18 @@ una sola vez.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
+
+_MAX_ARGS_LOG = 160
+"""Caracteres de los argumentos de una herramienta que se escriben en el log."""
 
 Validador = Callable[[str, dict], tuple[Any, list[str]]]
 """`(herramienta, argumentos) -> (valor, errores)`; con errores, el valor no vale."""
@@ -40,6 +49,7 @@ def pedir(
     *,
     ejecutar: Ejecutor | None = None,
     max_vueltas: int,
+    rol: str = "modelo",
 ) -> Salida | None:
     """Conversa hasta que el modelo llame una herramienta terminal con argumentos válidos.
 
@@ -54,15 +64,28 @@ def pedir(
         validar: revisa los argumentos de una terminal.
         ejecutar: atiende las herramientas no terminales; None si no hay.
         max_vueltas: tope de llamadas al modelo.
+        rol: quién habla ("especialista web", "decisor", "juez paso 1"), para el log.
 
     Returns:
         Salida | None: la terminal válida, o None si se agotaron las vueltas.
     """
     nombres = ", ".join(sorted(terminales))
     for vuelta in range(1, max_vueltas + 1):
+        logger.info(f"         🤖 {rol} · vuelta {vuelta}/{max_vueltas}: pensando...")
+        inicio = time.monotonic()
         respuesta = cliente.chat(mensajes, herramientas)
         mensajes.append({k: v for k, v in respuesta.items() if not k.startswith("_")})
         llamadas = respuesta.get("tool_calls") or []
+        tokens = respuesta.get("_tokens") or {}
+        logger.info(
+            f"         🤖 {rol} · vuelta {vuelta}: {time.monotonic() - inicio:.0f}s · "
+            f"{tokens.get('prompt') or '?'} tokens leídos, {tokens.get('respuesta') or '?'} escritos · "
+            + (
+                "llamó " + ", ".join(_resumen(*desempacar(x)) for x in llamadas)
+                if llamadas
+                else "respondió en prosa, sin herramienta"
+            )
+        )
         if not llamadas:
             mensajes.append(
                 {"role": "user", "content": f"Responde únicamente llamando a: {nombres}."}
@@ -73,6 +96,7 @@ def pedir(
             if nombre in terminales:
                 valor, errores = validar(nombre, args)
                 if errores:
+                    logger.info(f"         ✗ {rol}: {nombre} rechazado: {'; '.join(errores)[:300]}")
                     mensajes.append(tool(nombre, "RECHAZADO:\n- " + "\n- ".join(errores)))
                     continue
                 return Salida(nombre, valor, vuelta)
@@ -85,6 +109,20 @@ def pedir(
                 {"role": "user", "content": f"Última oportunidad: llama a {nombres} AHORA."}
             )
     return None
+
+
+def _resumen(nombre: str, args: dict) -> str:
+    """Una llamada a herramienta en una línea: lo que decide, no las citas completas."""
+    partes = []
+    for clave, valor in args.items():
+        if isinstance(valor, list):
+            partes.append(f"{clave}=[{len(valor)}]")
+        elif clave in ("resumen", "razonamiento", "motivo"):
+            continue
+        else:
+            partes.append(f"{clave}={valor}")
+    texto = f"{nombre}({', '.join(partes)})"
+    return texto if len(texto) <= _MAX_ARGS_LOG else texto[:_MAX_ARGS_LOG] + "…)"
 
 
 def tool(nombre: str, contenido: str) -> dict:

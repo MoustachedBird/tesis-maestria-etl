@@ -143,6 +143,7 @@ class Juez:
             {"estimar"},
             _validar_estimacion,
             max_vueltas=self.max_intentos,
+            rol="juez paso 1 (a ciegas)",
         )
         if ciego is None:
             raise JuezSinDictamen(f"el juez no estimó en {self.max_intentos} intentos")
@@ -160,6 +161,7 @@ class Juez:
             {"dictaminar"},
             lambda _n, args: _validar_dictamen(args, citadas),
             max_vueltas=self.max_intentos,
+            rol="juez paso 2 (dictamen)",
         )
         if dictamen is None:
             raise JuezSinDictamen(f"el juez no dictaminó en {self.max_intentos} intentos")

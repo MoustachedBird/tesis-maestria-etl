@@ -40,6 +40,9 @@ from urllib.parse import quote, urlparse
 
 from src.agents.survival.sources.cortesia import Bloqueado, Pausador, detectar_bloqueo
 from src.agents.survival.sources.paginas import SIN_CONTENIDO, leer_pagina
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 _DOMINIOS_CON_JS: tuple[str, ...] = (
     "google.com/maps",
@@ -221,6 +224,7 @@ class Navegador:
 
         motivo = detectar_bloqueo(texto, destino)
         if motivo:
+            logger.info(f"         ⛔ bloqueo en {url[:120]}: {motivo}")
             return f"ERROR: {url} respondió con un bloqueo anti-bot ({motivo}). NO la leíste."
         if "/login" in destino or "accounts.google.com" in destino:
             return f"ERROR: {url} pide iniciar sesión. NO la leíste."
@@ -229,6 +233,7 @@ class Navegador:
                 f"ERROR: {url} {SIN_CONTENIDO} ni con navegador ({len(texto)} caracteres). "
                 "NO la leíste: de esta URL solo sabes lo que mostró el buscador."
             )
+        logger.info(f"         🌐 leída: {len(texto):,} caracteres · {titulo[:80]!r}")
         texto = anotar_fechas_relativas(texto, self._hoy())
         cuerpo = f"TITULO: {titulo}\n{texto}" if titulo else texto
         if len(cuerpo) > max_caracteres:
@@ -285,6 +290,7 @@ class Navegador:
             str: el texto del panel con las fechas relativas anotadas, o `ERROR: ...`.
         """
         driver = self._abrir()
+        logger.info("         🌐 Maps: pestaña Reseñas → Ordenar → Más recientes")
         if not _clic(driver, "button[role='tab']", ("reseñas", "opiniones", "reviews")):
             return "ERROR: la ficha de Maps no tiene pestaña de reseñas."
         time.sleep(min(self.espera, 2.0))
@@ -323,6 +329,7 @@ class Navegador:
         """Abre `url` respetando la pausa por dominio."""
         if self._pausador is not None:
             self._pausador.esperar(url)
+        logger.info(f"         🌐 Chrome abre {url[:150]}")
         driver = self._abrir()
         driver.get(url)
         return driver

@@ -229,7 +229,12 @@ def sondear(
     from sqlalchemy import text
 
     from src.agents.survival import insumo
-    from src.agents.survival.recoleccion import FuenteWeb, agrupar, formatear_expediente
+    from src.agents.survival.recoleccion import (
+        FuenteWeb,
+        agrupar,
+        formatear_expediente,
+        recolectar_con_bitacora,
+    )
 
     navegador, fuentes = _fuentes()
     try:
@@ -287,7 +292,7 @@ def sondear(
         for grupo in agrupar(fuentes):
             for f in grupo.fuentes:
                 t0 = time.monotonic()
-                nuevas = f.recolectar(negocio, expediente)
+                nuevas = recolectar_con_bitacora(f, negocio, expediente)
                 segundos = time.monotonic() - t0
                 expediente.extend(nuevas)
                 errores = [p for p in nuevas if p.estado == "error"]

@@ -24,6 +24,7 @@ forma de `Fuente`, su valor en `Recolector` y su fila en `ESPECIALIDAD_DE`.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
@@ -154,12 +155,31 @@ class Grupo:
         """La recolección base de cada fuente, en orden; cada una ve lo que trajeron las anteriores."""
         nuevas: list[Pieza] = []
         for f in self.fuentes:
-            nuevas += f.recolectar(n, expediente + nuevas)
+            nuevas += recolectar_con_bitacora(f, n, expediente + nuevas)
         return nuevas
 
     def contexto(self, expediente: list[Pieza]) -> str:
         """Lo que sus fuentes quieren que el especialista sepa del resto del expediente."""
         return "\n\n".join(c for c in (f.contexto(expediente) for f in self.fuentes) if c)
+
+
+def recolectar_con_bitacora(fuente: Fuente, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
+    """La recolección base de una fuente, con una línea de log al empezar y otra al terminar.
+
+    Una fuente con Chrome y pausas puede tardar minutos; sin esto el log se
+    ve detenido.
+    """
+    logger.info(f"      ▶ {fuente.recolector}: consultando...")
+    inicio = time.monotonic()
+    piezas = fuente.recolectar(n, expediente)
+    conteo = {e.value: sum(p.estado == e.value for p in piezas) for e in EstadoConsulta}
+    error = next((p.contenido for p in piezas if p.estado == EstadoConsulta.ERROR.value), "")
+    logger.info(
+        f"      ✔ {fuente.recolector}: {len(piezas)} piezas "
+        f"(ok {conteo['ok']}, sin resultados {conteo['sin_resultados']}, error {conteo['error']}) "
+        f"en {time.monotonic() - inicio:.0f}s" + (f" · {error[:140]}" if error else "")
+    )
+    return piezas
 
 
 def agrupar(fuentes: list[Fuente]) -> list[Grupo]:
@@ -315,12 +335,17 @@ class FuenteWeb:
 
     def _buscar(self, consulta: str, previas: list[Pieza]) -> list[Pieza]:
         """Los resultados como piezas, sin los que ya están en `previas`."""
+        inicio = time.monotonic()
         try:
             resultados = self.buscador.buscar(consulta, n=self.max_resultados)
             sin_respuesta = getattr(self.buscador, "sin_respuesta", None)
             if sin_respuesta:
                 logger.info(f"         {self.buscador.nombre}: no contestaron {sin_respuesta}")
         except Exception as e:  # noqa: BLE001  (un buscador caido es una pieza ERROR, no una caida)
+            logger.info(
+                f"         🔎 {self.recolector} «{consulta}»: ERROR {e.__class__.__name__}: "
+                f"{str(e)[:120]}"
+            )
             return [
                 Pieza(
                     recolector=self.recolector,
@@ -345,6 +370,10 @@ class FuenteWeb:
                 continue
             vistas.add(clave_url(r.url))
             piezas.append(_pieza_de_resultado(self.recolector, consulta, r))
+        logger.info(
+            f"         🔎 {self.recolector} «{consulta}»: {len(resultados)} resultados, "
+            f"{len(piezas)} nuevos · {time.monotonic() - inicio:.0f}s"
+        )
         return piezas
 
 

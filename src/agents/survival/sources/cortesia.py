@@ -23,7 +23,12 @@ import random
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 from urllib.parse import urlparse
+
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 _SENALES_DE_BLOQUEO: tuple[tuple[str, str], ...] = (
     ("captcha", r"\bcaptcha\b|recaptcha|hcaptcha"),
@@ -115,6 +120,8 @@ class Pausador:
             objetivo = self.pausa * (1 + self.azar * self._aleatorio())
             falta = previa + objetivo - ahora
             if falta > 0:
+                if falta >= 1:
+                    logger.info(f"         ⏸  pausa {falta:.1f}s antes de volver a {dominio}")
                 self._dormir(falta)
                 ahora = self._reloj()
         self._ultima[dominio] = ahora

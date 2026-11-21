@@ -154,6 +154,11 @@ class Especialista:
         extra = grupo.contexto(expediente)
         if extra:
             contenido += ["", extra]
+        logger.info(
+            f"         📖 especialista {especialidad}: lee {len(numeros)} piezas "
+            f"({sum(expediente[i - 1].citable for i in numeros)} citables, "
+            f"{sum(len(c) for c in contenido):,} caracteres)"
+        )
         mensajes = [
             {
                 "role": "system",
@@ -214,6 +219,7 @@ class Especialista:
             validar,
             ejecutar=ejecutar if puede_ampliar else None,
             max_vueltas=self.max_ampliaciones + self.max_intentos + 1,
+            rol=f"especialista {especialidad}",
         )
         if salida is None:
             return Informe(
@@ -280,6 +286,9 @@ class Decisor:
                 automatica=True,
             )
 
+        logger.info(
+            f"      ⚖  decisor: integra {len(informes)} informes ({len(citables)} piezas citadas)"
+        )
         mensajes = [
             {"role": "system", "content": SISTEMA_DECISOR},
             {
@@ -306,6 +315,7 @@ class Decisor:
             {"concluir"},
             validar,
             max_vueltas=self.max_intentos,
+            rol="decisor",
         )
         if salida is None:
             return Decision(

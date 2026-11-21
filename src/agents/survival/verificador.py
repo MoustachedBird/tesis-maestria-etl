@@ -130,7 +130,11 @@ class Equipo:
         inicio = time.monotonic()
         expediente: list[Pieza] = []
         informes: list[Informe] = []
-        for grupo in self.grupos:
+        for i, grupo in enumerate(self.grupos, start=1):
+            logger.info(
+                f"   ── {i}/{len(self.grupos)} {_ICONOS.get(grupo.especialidad, '·')} "
+                f"{grupo.especialidad}: {', '.join(f.recolector for f in grupo.fuentes)}"
+            )
             t0 = time.monotonic()
             expediente.extend(grupo.recolectar(n, expediente))
             t_recoleccion = time.monotonic() - t0
@@ -341,6 +345,7 @@ def verificar_muestra(
             )
             if juez is None:
                 continue
+            logger.info(f"   ── ⚖  juez {juez.juez}: audita el veredicto")
             try:
                 a = auditar_veredicto(engine, juez, veredicto_id, negocio)
             except OllamaNoDisponible:

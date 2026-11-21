@@ -150,6 +150,7 @@ class FuenteWayback:
         llave = clave_url(url)
         consulta = f"capturas de {llave}"
         indice = f"https://web.archive.org/web/*/{llave}"
+        logger.info(f"         🗄  Internet Archive: capturas de {llave}")
         try:
             primera, recientes = archivo.capturas_wayback(
                 llave, timeout=self.timeout, pausador=self.pausador
@@ -248,6 +249,7 @@ class FuenteCommonCrawl:
 
     def _presencia(self, url: str) -> Pieza:
         llave = clave_url(url)
+        logger.info(f"         🗄  Common Crawl: {llave} en {len(self._crawls or [])} crawls")
         lineas = [
             f"Common Crawl, capturas de {llave} (y páginas bajo ella) en los crawls más recientes:"
         ]
@@ -320,6 +322,7 @@ class FuenteDominio:
 
     def _consultar(self, d: str, origen: str) -> Pieza:
         url = f"whois://whois.mx/{d}" if d.endswith(".mx") else f"https://rdap.org/domain/{d}"
+        logger.info(f"         🏷  registro de {d} ({origen})")
         consulta = f"registro de {d}"
         try:
             registro = dominio.consultar_registro(d, timeout=self.timeout, hoy=self._hoy())

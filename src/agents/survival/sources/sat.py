@@ -30,6 +30,10 @@ from pathlib import Path
 
 import requests
 
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
+
 _UA = "tesis-etl-agente/1.0 (verificacion academica de negocios)"
 """User-Agent para la descarga; sin datos personales."""
 
@@ -78,12 +82,14 @@ class ListaSat:
             or time.time() - self.archivo.stat().st_mtime > self.dias_validez * 86400
         )
         if vieja:
+            logger.info(f"         🏛  descargando la lista del SAT: {self.url}")
             self.archivo.parent.mkdir(parents=True, exist_ok=True)
             r = requests.get(self.url, headers={"User-Agent": _UA}, timeout=self.timeout)
             r.raise_for_status()
             self.archivo.write_bytes(r.content)
         self.descargada = date.fromtimestamp(self.archivo.stat().st_mtime)
         indice, self.filas = indexar(self.archivo.read_bytes())
+        logger.info(f"         🏛  lista del SAT: {self.filas:,} registros ({self.descargada})")
         return indice
 
 
