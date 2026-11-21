@@ -507,7 +507,7 @@ class TestElDecisor:
         d = Decisor(cliente, max_intentos=3).decidir(negocio(), INFORMES, expediente())
         assert (d.estado, d.confianza, d.automatica) == ("cerrado", "alta", False)
         visto = cliente.conversaciones[0][1]["content"]
-        assert "INFORME DE GOOGLE MAPS" in visto and "TITULO: Tacos Paco" not in visto
+        assert "INFORME DE LOS MAPAS (maps)" in visto and "TITULO: Tacos Paco" not in visto
 
     def test_no_puede_citar_lo_que_ningun_especialista_cito(self):
         malo = concluir(
