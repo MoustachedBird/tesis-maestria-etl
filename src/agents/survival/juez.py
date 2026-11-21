@@ -92,17 +92,23 @@ class ResultadoAuditoria:
 class Juez:
     """El auditor: otra llamada al modelo, sin herramientas de búsqueda."""
 
-    def __init__(self, cliente: Any, *, version: str, max_intentos: int):
+    def __init__(
+        self, cliente: Any, *, version: str, max_intentos: int, presupuesto: int | None = None
+    ):
         """
         Args:
             cliente: `OllamaCliente` o cualquier objeto con `.modelo` y `.chat(...)`.
                 Puede ser otro modelo que el del equipo.
             version: `AGENTE_VERSION`; va en `auditorias.juez` junto al modelo.
             max_intentos: vueltas por paso para producir una salida válida.
+            presupuesto: caracteres de expediente que caben en su contexto
+                (`recoleccion.presupuesto_de`); None = sin tope. Con veinte
+                fuentes el expediente completo puede no caber.
         """
         self.cliente = cliente
         self.juez = f"{cliente.modelo}/{version}"
         self.max_intentos = max_intentos
+        self.presupuesto = presupuesto
 
     def auditar(
         self, n: Negocio, expediente: list[Pieza], v: VeredictoAuditado
@@ -123,7 +129,7 @@ class Juez:
                         "",
                         "EXPEDIENTE",
                         "",
-                        formatear_expediente(expediente),
+                        formatear_expediente(expediente, presupuesto=self.presupuesto),
                         "",
                         "PASO 1: sin conocer el veredicto del equipo, llama a `estimar`.",
                     ]

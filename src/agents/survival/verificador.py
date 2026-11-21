@@ -102,6 +102,7 @@ class Equipo:
         version: str,
         max_ampliaciones: int,
         max_intentos: int,
+        presupuesto: int | None = None,
     ):
         """
         Args:
@@ -110,12 +111,17 @@ class Equipo:
             version: `AGENTE_VERSION`; va en `veredictos.agente` junto al modelo.
             max_ampliaciones: consultas extra por especialista.
             max_intentos: vueltas por rol para producir una salida válida.
+            presupuesto: caracteres de piezas que caben en el contexto de un
+                especialista (`recoleccion.presupuesto_de`); None = sin tope.
         """
         self.fuentes = fuentes
         self.grupos = agrupar(fuentes)
         self.agente = f"{cliente.modelo}/{version}"
         self.especialista = Especialista(
-            cliente, max_ampliaciones=max_ampliaciones, max_intentos=max_intentos
+            cliente,
+            max_ampliaciones=max_ampliaciones,
+            max_intentos=max_intentos,
+            presupuesto=presupuesto,
         )
         self.decisor = Decisor(cliente, max_intentos=max_intentos)
 

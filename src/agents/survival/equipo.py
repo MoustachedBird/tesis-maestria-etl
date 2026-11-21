@@ -96,16 +96,26 @@ class Informe:
 class Especialista:
     """El agente que lee UN grupo de fuentes; uno solo sirve para todos, cambia el prompt."""
 
-    def __init__(self, cliente: Any, *, max_ampliaciones: int, max_intentos: int):
+    def __init__(
+        self,
+        cliente: Any,
+        *,
+        max_ampliaciones: int,
+        max_intentos: int,
+        presupuesto: int | None = None,
+    ):
         """
         Args:
             cliente: `OllamaCliente` o cualquier objeto con `.chat(mensajes, herramientas)`.
             max_ampliaciones: consultas extra que puede pedir dentro de sus fuentes (en total).
             max_intentos: vueltas para producir un informe válido.
+            presupuesto: caracteres de piezas que caben en su contexto
+                (`recoleccion.presupuesto_de`); None = sin tope.
         """
         self.cliente = cliente
         self.max_ampliaciones = max_ampliaciones
         self.max_intentos = max_intentos
+        self.presupuesto = presupuesto
 
     def informar(self, n: Negocio, grupo: Grupo, expediente: list[Pieza]) -> Informe:
         """Lee lo que trajeron las fuentes de `grupo` y produce su informe.
@@ -139,7 +149,7 @@ class Especialista:
             "",
             f"LO QUE TRAJERON {FOCOS[especialidad][0].upper()}",
             "",
-            formatear_expediente([expediente[i - 1] for i in numeros], numeros),
+            formatear_expediente([expediente[i - 1] for i in numeros], numeros, self.presupuesto),
         ]
         extra = grupo.contexto(expediente)
         if extra:

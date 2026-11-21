@@ -18,6 +18,7 @@ from src.agents.survival.recoleccion import (
     Pieza,
     clave_url,
     formatear_expediente,
+    presupuesto_de,
 )
 from src.agents.survival.sources.busqueda import Resultado
 from tests.unit.test_agents_verificador import negocio
@@ -213,3 +214,22 @@ def test_el_expediente_numera_con_el_numero_global():
 @pytest.mark.unit
 def test_clave_url():
     assert clave_url("https://www.Facebook.com/x/") == clave_url("http://facebook.com/x")
+
+
+@pytest.mark.unit
+class TestElExpedienteCabeEnElContexto:
+    def test_sin_presupuesto_o_si_cabe_no_se_toca(self):
+        piezas = _web("https://a.mx", "https://b.mx")
+        completo = formatear_expediente(piezas)
+        assert formatear_expediente(piezas, presupuesto=10_000) == completo
+
+    def test_recorta_parejo_las_mas_largas(self):
+        corta = Pieza("web", "corta", "ok", url="https://a.mx")
+        largas = [Pieza("redes", "x" * 5000, "ok", url=f"https://b.mx/{i}") for i in range(3)]
+        texto = formatear_expediente([corta, *largas], presupuesto=4000)
+        assert len(texto) <= 4000 + 4 * len("[... recortado para caber en el contexto del modelo]")
+        assert texto.count("recortado para caber") == 3  # la corta quedó intacta
+        assert "corta" in texto and "[4] redes" in texto
+
+    def test_presupuesto_de(self):
+        assert presupuesto_de(32768) == int(32768 * 3.0 * 0.6)

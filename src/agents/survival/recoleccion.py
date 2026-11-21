@@ -3,7 +3,7 @@
 Cada fuente tiene dos partes:
 
 - **Recolección base, en código.** Las mismas consultas para todos los
-  negocios y en el mismo orden (Maps, buscador, redes, sitio propio). Es lo
+  negocios y en el mismo orden (`AGENTE_FUENTES`, agrupadas por `agrupar`). Es lo
   que vuelve comparables los veredictos: si cada agente eligiera qué mirar,
   un negocio se verificaría con Maps y otro no.
 - **Ampliación, a pedido del especialista.** El agente especialista de la
@@ -475,19 +475,73 @@ class FuenteSitio:
         return ""
 
 
-def formatear_expediente(piezas: list[Pieza], numeros: list[int] | None = None) -> str:
+CARACTERES_POR_TOKEN = 3.0
+"""Caracteres de texto en español por token, a la baja (Qwen anda en ~3.5).
+
+Sirve para estimar sin tokenizar si un expediente cabe en el contexto. Es
+una propiedad del tokenizador, no algo que se calibre por corrida.
+"""
+
+FRACCION_DEL_CONTEXTO = 0.6
+"""Parte del contexto que puede ocupar el expediente; el resto es para el
+prompt, el insumo, las vueltas de herramientas y la respuesta."""
+
+_MIN_CARACTERES_POR_PIEZA = 300
+"""Por debajo de esto una pieza recortada ya no dice nada: es el piso del recorte."""
+
+_RECORTE = "\n[... recortado para caber en el contexto del modelo]"
+"""La marca de una pieza recortada; el modelo sabe que no vio el resto."""
+
+
+def presupuesto_de(num_ctx: int) -> int:
+    """Caracteres de expediente que caben en un contexto de `num_ctx` tokens."""
+    return int(num_ctx * CARACTERES_POR_TOKEN * FRACCION_DEL_CONTEXTO)
+
+
+def formatear_expediente(
+    piezas: list[Pieza], numeros: list[int] | None = None, presupuesto: int | None = None
+) -> str:
     """Piezas para el modelo, con su número del expediente, separadas.
+
+    Si no caben en `presupuesto` caracteres se recortan las más largas, todas
+    al mismo tope, en vez de dejar que el servidor corte el mensaje en
+    silencio (Ollama descarta el principio de lo que no cabe en `num_ctx`).
+    El recorte es parejo y no depende de qué se citó: el juez estima a
+    ciegas, y recortar distinto lo citado le diría qué citó el equipo.
 
     Args:
         piezas: lo que se muestra.
         numeros: el `[n]` de cada pieza en el expediente completo; por
             default 1..len. Un especialista ve solo sus piezas, pero con el
             número global, para que todo el equipo cite con la misma llave.
+        presupuesto: caracteres máximos (`presupuesto_de`); None = sin tope.
     """
     if not piezas:
         return "(ninguna pieza)"
     numeros = numeros or list(range(1, len(piezas) + 1))
-    return "\n\n---\n\n".join(p.como_texto(i) for i, p in zip(numeros, piezas, strict=True))
+    textos = [p.como_texto(i) for i, p in zip(numeros, piezas, strict=True)]
+    separador = "\n\n---\n\n"
+    if presupuesto is not None:
+        textos = _recortar(textos, presupuesto - len(separador) * len(textos))
+    return separador.join(textos)
+
+
+def _recortar(textos: list[str], presupuesto: int) -> list[str]:
+    """Los textos con un mismo tope de largo, el mayor que deja la suma dentro del presupuesto."""
+    if sum(len(t) for t in textos) <= presupuesto:
+        return textos
+    bajo, alto = _MIN_CARACTERES_POR_PIEZA, max(len(t) for t in textos)
+    while bajo < alto:
+        tope = (bajo + alto + 1) // 2
+        if sum(min(len(t), tope) for t in textos) <= presupuesto:
+            bajo = tope
+        else:
+            alto = tope - 1
+    recortadas = sum(len(t) > bajo for t in textos)
+    logger.info(
+        f"         expediente recortado: {recortadas} de {len(textos)} piezas a {bajo} caracteres"
+    )
+    return [t if len(t) <= bajo else t[:bajo] + _RECORTE for t in textos]
 
 
 # ----- utilidades -----

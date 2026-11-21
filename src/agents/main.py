@@ -131,10 +131,16 @@ def _fuentes() -> tuple[Any, list[Any]]:
 def _juez(modelo: str | None) -> Any:
     """El juez, con `--modelo-juez`, `JUEZ_MODEL` o el modelo del equipo, en ese orden."""
     from src.agents.survival.juez import Juez
+    from src.agents.survival.recoleccion import presupuesto_de
 
     ajustes = get_settings()
     cliente = _cliente(modelo or ajustes.JUEZ_MODEL or ajustes.OLLAMA_MODEL)
-    return Juez(cliente, version=ajustes.AGENTE_VERSION, max_intentos=ajustes.AGENTE_MAX_INTENTOS)
+    return Juez(
+        cliente,
+        version=ajustes.AGENTE_VERSION,
+        max_intentos=ajustes.AGENTE_MAX_INTENTOS,
+        presupuesto=presupuesto_de(ajustes.OLLAMA_CONTEXTO_TOKENS),
+    )
 
 
 @app.command()
@@ -155,6 +161,7 @@ def verificar(
     ),
 ) -> None:
     """El equipo verifica en línea cada negocio pendiente y el juez audita su veredicto."""
+    from src.agents.survival.recoleccion import presupuesto_de
     from src.agents.survival.verificador import Equipo, resumen_muestra, verificar_muestra
     from src.meta.tracker import MetadataTracker
     from src.shared.db.session import get_engine
@@ -169,6 +176,7 @@ def verificar(
         version=ajustes.AGENTE_VERSION,
         max_ampliaciones=ajustes.AGENTE_MAX_AMPLIACIONES,
         max_intentos=ajustes.AGENTE_MAX_INTENTOS,
+        presupuesto=presupuesto_de(ajustes.OLLAMA_CONTEXTO_TOKENS),
     )
     engine = get_engine()
     with engine.connect() as conn:
