@@ -28,6 +28,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from src.agents.survival.insumo import CAMPOS_VARIABLES
 from src.meta.tracker import MetadataTracker
 from src.shared.enums import JobStatus, TaskStatus, TriggerType
 from src.shared.logging import get_stage_logger
@@ -54,23 +55,37 @@ intermitente la del cuarto. Se declaran una vez y los usan el muestreo (para
 asignar) y las métricas (para reponderar), así que no pueden divergir.
 """
 
-SQL_ALIAS = """
-UPDATE verificacion.muestra_negocios mn
-SET alias = x.alias
-FROM (
-    SELECT n.clee, array_agg(n.nom_estab ORDER BY n.ultimo DESC, n.nom_estab) AS alias
-    FROM (
-        SELECT e.clee, e.nom_estab, max(e.period) AS ultimo
-        FROM silver.establecimientos e
-        WHERE e.clee IN (SELECT clee FROM verificacion.muestra_negocios WHERE muestra_id = :id)
-          AND e.nom_estab <> ''
-        GROUP BY 1, 2
-    ) n
-    GROUP BY 1
-) x
-WHERE mn.muestra_id = :id AND mn.clee = x.clee
-"""
-"""Llena `muestra_negocios.alias` de una muestra: los `nom_estab` distintos, el más reciente primero.
+COLUMNAS_ALIAS: dict[str, str] = {
+    "alias": "nombre",
+    "alias_domicilios": "domicilio",
+    "alias_telefonos": "telefono",
+    "alias_razones_sociales": "razon_social",
+    "alias_sitios": "sitio",
+    "alias_correos": "correo",
+}
+"""Columna de `muestra_negocios` -> campo de `insumo.CAMPOS_VARIABLES` cuyas variantes guarda."""
+
+
+def _sql_alias() -> str:
+    """El UPDATE que llena los alias de una muestra: cada variante del DENUE, la más reciente primero."""
+    asignaciones = []
+    for columna, campo in COLUMNAS_ALIAS.items():
+        expr = CAMPOS_VARIABLES[campo]
+        asignaciones.append(f"""{columna} = (
+            SELECT array_agg(x.v ORDER BY x.ultimo DESC, x.v)
+            FROM (SELECT {expr} AS v, max(e.period) AS ultimo
+                  FROM silver.establecimientos e
+                  WHERE e.clee = mn.clee AND {expr} <> ''
+                  GROUP BY 1) x)""")
+    return (
+        "UPDATE verificacion.muestra_negocios mn SET "
+        + ",\n    ".join(asignaciones)
+        + "\nWHERE mn.muestra_id = :id"
+    )
+
+
+SQL_ALIAS = _sql_alias()
+"""Llena los alias de una muestra (nombres, domicilios, teléfonos, razones, sitios, correos).
 
 Va por `clee` (indexado en los hechos), así que cuesta lo que cuestan unos
 cientos de negocios, no los 82.9M.

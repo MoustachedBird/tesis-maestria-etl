@@ -47,11 +47,14 @@ class Negocio:
     correos: list[str] = field(default_factory=list)
     sitios: list[str] = field(default_factory=list)
     domicilios: list[str] = field(default_factory=list)
-    nombres_por_corte: list[tuple[str, list[str]]] = field(default_factory=list)
-    """Cada nombre distinto con los cortes (AAAA-MM) en que apareció, del más reciente al más viejo.
+    variantes: dict[str, list[tuple[str, list[str]]]] = field(default_factory=dict)
+    """Por campo de `CAMPOS_VARIABLES`: cada valor distinto con los cortes (AAAA-MM) en que apareció,
+    del más reciente al más viejo.
 
     Es lo que el planificador necesita para razonar por repetición y por
-    recencia: no es lo mismo un nombre de siete cortes que uno de uno.
+    recencia: no es lo mismo un domicilio de siete cortes que uno de uno.
+    Las listas sueltas (`nombres`, `domicilios`...) son los mismos valores,
+    en ese mismo orden.
     """
     nombres_busqueda: list[str] = field(default_factory=list)
     """Los nombres con que se busca, elegidos por el planificador (`equipo.Planificador`).
@@ -59,6 +62,10 @@ class Negocio:
     Vacío hasta que el planificador decide; las fuentes usan entonces el de
     gold (`recoleccion.nombres_de_busqueda`).
     """
+    domicilio_busqueda: str | None = None
+    """El domicilio con que se busca (planificador); None = el más reciente del DENUE."""
+    telefono_busqueda: str | None = None
+    """El teléfono con que se busca (planificador); None = el más reciente del DENUE."""
 
 
 def muestra_por_nombre(conn: Connection, nombre: str) -> tuple[str, list[date]]:
@@ -101,7 +108,42 @@ def pendientes(conn: Connection, muestra_id: str, agente: str) -> list[tuple[int
     ]
 
 
-_SQL_INSUMO = """
+_DOMICILIO = (
+    "concat_ws(' ', NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
+    "NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
+)
+"""El domicilio de una observación como una línea: vialidad, número, asentamiento, CP."""
+
+CAMPOS_VARIABLES: dict[str, str] = {
+    "nombre": "e.nom_estab",
+    "domicilio": _DOMICILIO,
+    "telefono": "e.telefono",
+    "razon_social": "e.raz_social",
+    "sitio": "e.www",
+    "correo": "e.correoelec",
+}
+"""Los campos del DENUE que cambian de un corte a otro, con la expresión que los lee.
+
+Son datos de encuesta: el encuestador anota el nombre, el domicilio o el
+teléfono como se lo dicen ese día, así que un mismo negocio aparece con
+variantes. De cada uno se cargan TODAS las variantes con los cortes en que
+aparecieron, de la más reciente a la más vieja.
+"""
+
+
+def sql_variantes(expresion: str, clee: str = "mn.clee") -> str:
+    """Subconsulta: las variantes de un campo con sus cortes, JSON, la más reciente primero."""
+    return f"""(SELECT jsonb_agg(jsonb_build_object('valor', x.v, 'cortes', x.cortes)
+                         ORDER BY x.ultimo DESC, x.v)
+          FROM (SELECT {expresion} AS v,
+                       array_agg(to_char(e.period, 'YYYY-MM') ORDER BY e.period) AS cortes,
+                       max(e.period) AS ultimo
+                  FROM silver.establecimientos e
+                 WHERE e.clee = {clee} AND {expresion} <> ''
+                 GROUP BY 1) x)"""
+
+
+_SQL_INSUMO = f"""
 SELECT mn.muestra_id, mn.clee, mn.orden, mn.estrato,
        g.nombre, g.codigo_act, g.tamano_final, g.cve_geo_final,
        g.lat_final, g.lon_final, g.primer_periodo, g.ultimo_periodo, g.periodos,
@@ -114,30 +156,10 @@ SELECT mn.muestra_id, mn.clee, mn.orden, mn.estrato,
          WHERE en.cve_ent = LEFT(g.cve_geo_final, 2)) AS entidad,
        (SELECT mu.municipio FROM silver.denue_municipios mu
          WHERE mu.cve_ent = LEFT(g.cve_geo_final, 2) AND mu.cve_mun = SUBSTR(g.cve_geo_final, 3, 3)) AS municipio,
-       v.nombres, v.razones_sociales, v.telefonos, v.correos, v.sitios, v.domicilios,
-       (SELECT jsonb_agg(jsonb_build_object('nombre', x.nom_estab, 'cortes', x.cortes)
-                         ORDER BY x.ultimo DESC)
-          FROM (SELECT e.nom_estab,
-                       array_agg(to_char(e.period, 'YYYY-MM') ORDER BY e.period) AS cortes,
-                       max(e.period) AS ultimo
-                  FROM silver.establecimientos e
-                 WHERE e.clee = mn.clee AND e.nom_estab <> ''
-                 GROUP BY e.nom_estab) x) AS nombres_por_corte
+       {", ".join(f"{sql_variantes(expr)} AS v_{campo}" for campo, expr in CAMPOS_VARIABLES.items())}
 FROM verificacion.muestra_negocios mn
 JOIN verificacion.muestras m USING (muestra_id)
 JOIN gold.negocios_clee_oficial g ON g.clee = mn.clee
-LEFT JOIN LATERAL (
-    SELECT array_agg(DISTINCT e.nom_estab)  FILTER (WHERE e.nom_estab  <> '') AS nombres,
-           array_agg(DISTINCT e.raz_social) FILTER (WHERE e.raz_social <> '') AS razones_sociales,
-           array_agg(DISTINCT e.telefono)   FILTER (WHERE e.telefono   <> '') AS telefonos,
-           array_agg(DISTINCT e.correoelec) FILTER (WHERE e.correoelec <> '') AS correos,
-           array_agg(DISTINCT e.www)        FILTER (WHERE e.www        <> '') AS sitios,
-           array_agg(DISTINCT NULLIF(concat_ws(' ', NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''),
-                                                    NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, '')), ''))
-                                            FILTER (WHERE e.nom_vial <> '' OR e.nomb_asent <> '') AS domicilios
-    FROM silver.establecimientos e
-    WHERE e.clee = mn.clee
-) v ON TRUE
 WHERE mn.muestra_id = :id AND mn.clee = :clee
 """
 """El insumo de UN negocio. Deliberadamente sin `cerrado_gold` ni los meses."""
@@ -153,6 +175,16 @@ def cargar(conn: Connection, muestra_id: str, clee: str) -> Negocio:
     fila = conn.execute(text(_SQL_INSUMO), {"id": muestra_id, "clee": clee}).mappings().first()
     if fila is None:
         raise LookupError(f"{clee} no esta en la muestra {muestra_id} o ya no esta en gold")
+    variantes = {
+        campo: [
+            (str(x["valor"]), [str(c) for c in x["cortes"]]) for x in (fila[f"v_{campo}"] or [])
+        ]
+        for campo in CAMPOS_VARIABLES
+    }
+
+    def valores(campo: str) -> list[str]:
+        return [v for v, _ in variantes[campo]]
+
     return Negocio(
         muestra_id=fila["muestra_id"],
         clee=fila["clee"],
@@ -171,14 +203,11 @@ def cargar(conn: Connection, muestra_id: str, clee: str) -> Negocio:
         ultimo_periodo=fila["ultimo_periodo"],
         periodos=list(fila["periodos"] or []),
         ultimo_corte_ventana=fila["ultimo_corte_ventana"],
-        nombres=list(fila["nombres"] or []),
-        razones_sociales=list(fila["razones_sociales"] or []),
-        telefonos=list(fila["telefonos"] or []),
-        correos=list(fila["correos"] or []),
-        sitios=list(fila["sitios"] or []),
-        domicilios=list(fila["domicilios"] or []),
-        nombres_por_corte=[
-            (str(x["nombre"]), [str(c) for c in x["cortes"]])
-            for x in (fila["nombres_por_corte"] or [])
-        ],
+        nombres=valores("nombre"),
+        razones_sociales=valores("razon_social"),
+        telefonos=valores("telefono"),
+        correos=valores("correo"),
+        sitios=valores("sitio"),
+        domicilios=valores("domicilio"),
+        variantes=variantes,
     )

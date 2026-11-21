@@ -233,8 +233,30 @@ class MuestraNegocio(Base):
             "primero. El historial por veredicto esta en veredictos.nombres_buscados"
         ),
     )
+    alias_domicilios: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), comment="Los domicilios distintos del DENUE, el mas reciente primero"
+    )
+    domicilio_elegido: Mapped[str | None] = mapped_column(
+        Text, comment="El domicilio con que lo busco el planificador la ultima vez"
+    )
+    alias_telefonos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), comment="Los telefonos distintos del DENUE, el mas reciente primero"
+    )
+    telefono_elegido: Mapped[str | None] = mapped_column(
+        Text, comment="El telefono con que lo busco el planificador la ultima vez"
+    )
+    alias_razones_sociales: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), comment="Las razones sociales distintas del DENUE, la mas reciente primero"
+    )
+    alias_sitios: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), comment="Los sitios web distintos del DENUE, el mas reciente primero"
+    )
+    alias_correos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text), comment="Los correos distintos del DENUE, el mas reciente primero"
+    )
     nombres_elegidos_por: Mapped[str | None] = mapped_column(
-        String(80), comment="El agente (modelo/version) que eligio nombres_elegidos"
+        String(80),
+        comment="El agente (modelo/version) que eligio nombres, domicilio y telefono elegidos",
     )
 
     def __repr__(self) -> str:
@@ -318,8 +340,8 @@ class Veredicto(Base):
     nombres_buscados: Mapped[dict | None] = mapped_column(
         JSONB,
         comment=(
-            "{nombres, razonamiento, automatica}: con que nombres se busco al negocio y por que, "
-            "segun el planificador (v6+). NULL en veredictos anteriores"
+            "{nombres, domicilio, telefono, consistentes, razonamiento, automatica}: con que "
+            "datos se busco al negocio y por que, segun el planificador (v6+). NULL antes"
         ),
     )
 

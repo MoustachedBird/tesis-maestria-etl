@@ -77,9 +77,18 @@ _CITAS_SCHEMA = {
 
 
 def formatear_insumo(n: Negocio) -> str:
-    """El negocio para el modelo, en texto: todo lo del DENUE, nada de la hipótesis."""
+    """El negocio para el modelo, en texto: todo lo del DENUE, nada de la hipótesis.
 
-    def lista(etiqueta: str, valores: list[str]) -> str:
+    Los campos que cambian entre cortes van con sus variantes y los cortes en
+    que apareció cada una, la más reciente primero.
+    """
+
+    def campo(etiqueta: str, clave: str, valores: list[str]) -> str:
+        variantes = n.variantes.get(clave)
+        if variantes:
+            return f"{etiqueta} (y en qué cortes, el más reciente primero): " + " | ".join(
+                f"«{valor}» ({', '.join(cortes)})" for valor, cortes in variantes
+            )
         if not valores:
             return f"{etiqueta}: (el DENUE no publicó ninguno)"
         return f"{etiqueta}: " + " | ".join(valores)
@@ -93,32 +102,28 @@ def formatear_insumo(n: Negocio) -> str:
         f"{n.actividad} (SCIAN {n.codigo_act})" if n.actividad else (n.codigo_act or "desconocida")
     )
     periodos = ", ".join(p.strftime("%Y-%m") for p in n.periodos)
-    if n.nombres_por_corte:
-        nombres = "Nombres con que apareció (y en qué cortes): " + " | ".join(
-            f"«{nombre}» ({', '.join(cortes)})" for nombre, cortes in n.nombres_por_corte
-        )
-    else:
-        nombres = lista("Nombres con que apareció", n.nombres)
-    buscados = (
-        [lista("Nombres con que se buscó en línea", n.nombres_busqueda)]
-        if n.nombres_busqueda
-        else []
-    )
+    buscado = []
+    if n.nombres_busqueda:
+        buscado.append("Nombres: " + " | ".join(n.nombres_busqueda))
+    if n.domicilio_busqueda:
+        buscado.append(f"Domicilio: {n.domicilio_busqueda}")
+    if n.telefono_busqueda:
+        buscado.append(f"Teléfono: {n.telefono_busqueda}")
     return "\n".join(
         [
             "NEGOCIO A VERIFICAR",
             f"Nombre principal: {n.nombre or '(sin nombre)'}",
-            nombres,
-            *buscados,
-            lista("Razón social", n.razones_sociales),
+            campo("Nombres con que apareció", "nombre", n.nombres),
+            campo("Razón social", "razon_social", n.razones_sociales),
             f"Actividad: {actividad}",
             f"Tamaño (último corte): {n.tamano_final or 'desconocido'}",
             f"Municipio: {n.municipio or '?'}, {n.entidad or '?'}",
-            lista("Domicilios publicados", n.domicilios),
+            campo("Domicilios publicados", "domicilio", n.domicilios),
             f"Coordenadas: {coordenadas}",
-            lista("Teléfonos", n.telefonos),
-            lista("Sitios web", n.sitios),
-            lista("Correos", n.correos),
+            campo("Teléfonos", "telefono", n.telefonos),
+            campo("Sitios web", "sitio", n.sitios),
+            campo("Correos", "correo", n.correos),
+            *(["", "SE BUSCÓ EN LÍNEA CON", *buscado] if buscado else []),
             "",
             "PRESENCIA EN EL DENUE",
             f"Apareció en los cortes: {periodos}",
@@ -130,29 +135,33 @@ def formatear_insumo(n: Negocio) -> str:
 
 # ----- planificador -----
 
-SISTEMA_PLANIFICADOR = """Eres quien decide CON QUÉ NOMBRES se busca en línea a un negocio de México, antes de que el equipo lo busque en Google Maps, en buscadores web, en redes sociales y en otras fuentes. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) lo registró en varios cortes, y el nombre que anotó el encuestador cambia de un corte a otro: con y sin artículo, en otro orden, con abreviaturas, con errores de captura, con el giro pegado al nombre, o porque el negocio cambió de nombre.
+SISTEMA_PLANIFICADOR = """Eres quien decide CON QUÉ DATOS se busca en línea a un negocio de México, antes de que el equipo lo busque en Google Maps, en buscadores web, en redes sociales y en otras fuentes. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) lo registró en varios cortes, y como son datos de encuesta, lo que anotó el encuestador cambia de un corte a otro: el nombre (con y sin artículo, en otro orden, abreviado, con errores de captura, con el giro pegado, o porque el negocio cambió de nombre), el domicilio (otra forma de escribir la calle, número o colonia; o porque se mudó) y el teléfono.
 
-Tu tarea es razonar cómo lo buscaría una persona que quiere encontrarlo: cómo se llama de verdad hoy y cómo es probable que aparezca en Google Maps o en Facebook. Tú decides el criterio: puedes pesar cuántas veces aparece cada nombre, cuál es el más reciente, combinar palabras de varios, quitar lo que estorba (razón social, "SA DE CV", el giro genérico), reordenar. Si hubo un cambio de nombre real, conviene buscar los dos.
+Recibes cada variante con los cortes en que apareció, la más reciente primero. Solo tienes que decidir los campos que se te piden (los demás fueron consistentes en todos los cortes). Razona cómo lo buscaría una persona que quiere encontrarlo HOY: tú decides el criterio (cuántas veces aparece cada variante, combinar partes de varias, quitar lo que estorba como "SA DE CV" o el giro genérico, reordenar), pero DA MÁS PESO A LO MÁS RECIENTE: si el negocio se mudó o cambió de teléfono, el dato viejo ya no sirve para encontrarlo. Si hubo un cambio de nombre real, conviene buscar los dos nombres.
 
-La única restricción: usa solo palabras que aparezcan en los nombres o en la razón social que publicó el DENUE. Puedes quitar, reordenar y combinar palabras, pero no agregar ninguna nueva ni corregir la ortografía de una palabra (si crees que hay un error de captura, incluye la forma que aparece).
+La única restricción: usa solo palabras que aparezcan en las variantes que publicó el DENUE. Puedes quitar, reordenar y combinar palabras, pero no agregar ninguna nueva ni corregir la ortografía. El teléfono tiene que ser uno de los publicados.
 
-AL TERMINAR (herramienta elegir_nombres, obligatoria)
-- nombres: de 1 a {k}, el MEJOR primero. El primero se usa en las consultas más específicas (con el domicilio, con el teléfono); los demás se buscan además en Maps y en los buscadores.
-- razonamiento: por qué esos, en una o dos frases."""
-"""Prompt de sistema del planificador de nombres; `{k}` es AGENTE_MAX_NOMBRES."""
+AL TERMINAR (herramienta elegir_datos, obligatoria)
+- nombres: de 1 a {k}, el MEJOR primero. El primero se usa en las consultas más específicas; los demás se buscan además en Maps y en los buscadores. Solo si se te pide.
+- domicilio: el que se usará para buscarlo. Solo si se te pide.
+- telefono: el que se usará para buscarlo. Solo si se te pide.
+- razonamiento: por qué, en una a tres frases."""
+"""Prompt de sistema del planificador; `{k}` es AGENTE_MAX_NOMBRES."""
 
-HERRAMIENTA_ELEGIR_NOMBRES = {
+HERRAMIENTA_ELEGIR_DATOS = {
     "type": "function",
     "function": {
-        "name": "elegir_nombres",
-        "description": "Los nombres con que se buscará al negocio, el mejor primero. Obligatoria.",
+        "name": "elegir_datos",
+        "description": "Con qué nombres, domicilio y teléfono se buscará al negocio. Obligatoria.",
         "parameters": {
             "type": "object",
             "properties": {
                 "nombres": {"type": "array", "items": {"type": "string"}},
+                "domicilio": {"type": ["string", "null"]},
+                "telefono": {"type": ["string", "null"]},
                 "razonamiento": {"type": "string"},
             },
-            "required": ["nombres", "razonamiento"],
+            "required": ["razonamiento"],
         },
     },
 }

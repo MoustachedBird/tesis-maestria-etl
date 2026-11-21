@@ -1208,9 +1208,10 @@ tarda un negocio, para dimensionar la muestra siguiente).
 ### El equipo: un especialista por grupo de fuentes, un decisor, un juez
 
 ```
-planificador (LLM)                       con qué nombres buscar: ve cada nombre con sus
-                                         cortes y decide el criterio (repetición, recencia,
-                                         combinación); solo con palabras que publicó el DENUE
+planificador (LLM)                       con qué nombre, domicilio y teléfono buscar: el campo
+                                         consistente en todos los cortes se usa tal cual; el que
+                                         varía lo decide el modelo viendo cada variante con sus
+                                         cortes, con más peso a lo reciente; sin inventar palabras
 por cada grupo, en el orden de `Especialidad` (mapas -> buscadores -> redes ->
 plataformas -> huella digital -> registros -> fachada):
     recolección base, en código          mismas consultas para todos, fuente por fuente
@@ -1618,7 +1619,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 15 revisiones, b0000 (baseline) -> b0014
+├── alembic/versions/              # 16 revisiones, b0000 (baseline) -> b0015
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -2275,6 +2276,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0012fuentes_y_especialidades` | v5: `consultas.recolector` es la fuente concreta (`Recolector`, ~20 valores) e `informes.especialista` el grupo que la lee (`Especialidad`); recrea ambos `CHECK` y los ensancha a VARCHAR(20). Agrega `consultas.imagen_ruta`. Los valores de v4 siguen siendo válidos |
 | `b0013nombres_buscados` | v6: `veredictos.nombres_buscados` (JSONB): con qué nombres buscó el planificador y por qué. Solo aditiva |
 | `b0014alias_en_la_muestra` | `muestra_negocios.alias` (los `nom_estab` distintos, el más reciente primero), `nombres_elegidos` y `nombres_elegidos_por` (lo último que eligió el planificador). Rellena las muestras existentes donde está NULL |
+| `b0015alias_de_cada_campo` | `muestra_negocios.alias_domicilios`, `alias_telefonos`, `alias_razones_sociales`, `alias_sitios`, `alias_correos` (el más reciente primero) y `domicilio_elegido`, `telefono_elegido`. Rellena donde está NULL |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse

@@ -626,38 +626,61 @@ def test_el_equipo_recolecta_informa_por_fuente_y_decide():
     assert len(r.expediente) == 6 and r.n_consultas >= 4
 
 
-# ----- planificador de nombres -----
+# ----- planificador: con qué datos buscar -----
 
 
-def elegir(nombres, razonamiento="El más repetido y el más reciente, sin el giro.") -> dict:
-    return llamada("elegir_nombres", nombres=nombres, razonamiento=razonamiento)
+def elegir(
+    nombres=None, razonamiento="El más repetido y el más reciente, sin el giro.", **kw
+) -> dict:
+    args = {"razonamiento": razonamiento, **kw}
+    if nombres is not None:
+        args["nombres"] = nombres
+    return llamada("elegir_datos", **args)
 
 
 @pytest.mark.unit
 class TestElPlanificador:
-    def _negocio(self):
-        return negocio(
+    def _negocio(self, **extra):
+        campos = dict(
             nombre="EL POLLO FELIZ",
-            nombres=["EL POLLO FELIZ", "POLLO FELIZ", "FELIZ POLLO ROSTICERIA"],
-            nombres_por_corte=[
-                ("POLLO FELIZ", ["2024-11", "2025-05"]),
-                ("EL POLLO FELIZ", ["2021-05", "2022-05", "2023-11"]),
-                ("FELIZ POLLO ROSTICERIA", ["2022-11"]),
-            ],
+            nombres=["POLLO FELIZ", "EL POLLO FELIZ", "FELIZ POLLO ROSTICERIA"],
             razones_sociales=["ROSTICERIAS FELICES SA DE CV"],
+            variantes={
+                "nombre": [
+                    ("POLLO FELIZ", ["2024-11", "2025-05"]),
+                    ("EL POLLO FELIZ", ["2021-05", "2022-05", "2023-11"]),
+                    ("FELIZ POLLO ROSTICERIA", ["2022-11"]),
+                ]
+            },
         )
+        campos.update(extra)
+        return negocio(**campos)
 
-    def test_el_modelo_decide_y_ve_cada_nombre_con_sus_cortes(self):
+    def test_el_modelo_decide_lo_que_varia_y_ve_cada_variante_con_sus_cortes(self):
         cliente = ClienteFalso(respuesta(elegir(["Pollo Feliz", "Rosticería Pollo Feliz"])))
         p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(self._negocio())
         assert p.nombres == ["Pollo Feliz", "Rosticería Pollo Feliz"] and not p.automatica
+        # Domicilio y teléfono fueron consistentes: no los decidió el modelo.
+        assert p.consistentes == ["domicilio", "telefono"]
+        assert p.domicilio == "AV VALLARTA 1234 AMERICANA 44160" and p.telefono == "3312345678"
         visto = cliente.conversaciones[0][1]["content"]
-        assert "«POLLO FELIZ» (2024-11, 2025-05)" in visto
+        assert "«POLLO FELIZ» (2024-11, 2025-05)" in visto and "DECIDE: nombres." in visto
+
+    def test_todo_consistente_no_llama_al_modelo(self):
+        cliente = ClienteFalso()
+        n = negocio(nombre="TACOS PACO", nombres=["TACOS PACO", "Tacos  Paco"])
+        p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(n)
+        assert p.automatica and cliente.conversaciones == []
+        assert p.nombres == ["TACOS PACO"] and set(p.consistentes) == {
+            "nombre",
+            "domicilio",
+            "telefono",
+        }
 
     def test_no_puede_inventar_palabras(self):
-        malo = elegir(["Pollos Felices del Centro"])
-        bueno = elegir(["Pollo Feliz"])
-        cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
+        cliente = ClienteFalso(
+            respuesta(elegir(["Pollos Felices del Centro"])), respuesta(elegir(["Pollo Feliz"]))
+        )
         p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(self._negocio())
         assert p.nombres == ["Pollo Feliz"]
         assert any("palabras que el DENUE no publicó" in t for t in cliente.tools())
@@ -681,7 +704,41 @@ class TestElPlanificador:
         assert p.nombres == ["Pollo Feliz", "El Pollo Feliz"]
         assert any("el máximo es 2" in t for t in cliente.tools())
 
-    def test_si_no_elige_se_busca_con_el_de_gold(self):
+    def test_un_domicilio_que_vario_lo_decide_el_modelo_sin_inventar(self):
+        n = self._negocio(
+            nombre="TACOS PACO",
+            nombres=["TACOS PACO"],
+            domicilios=["AV MEXICO 55 LADRON DE GUEVARA 44600", "AV VALLARTA 1234 AMERICANA 44160"],
+            variantes={},
+        )
+        malo = elegir(domicilio="AV MEXICO 55 COLONIA NUEVA")
+        bueno = elegir(
+            domicilio="AV MEXICO 55 LADRON DE GUEVARA 44600",
+            razonamiento="Se mudó: el más reciente es el de Av México.",
+        )
+        cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
+        p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(n)
+        assert p.domicilio == "AV MEXICO 55 LADRON DE GUEVARA 44600"
+        assert p.nombres == ["TACOS PACO"] and "nombre" in p.consistentes
+        assert any(
+            "el domicilio usa palabras que el DENUE no publicó" in t for t in cliente.tools()
+        )
+
+    def test_el_telefono_tiene_que_ser_uno_publicado(self):
+        n = self._negocio(
+            nombre="TACOS PACO",
+            nombres=["TACOS PACO"],
+            telefonos=["33 1234 5678", "3398765432"],
+            variantes={},
+        )
+        cliente = ClienteFalso(
+            respuesta(elegir(telefono="5555555555")), respuesta(elegir(telefono="(33) 1234-5678"))
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(n)
+        assert p.telefono == "33 1234 5678"  # el publicado, tal como lo publicó el DENUE
+        assert any("tiene que ser uno de los publicados" in t for t in cliente.tools())
+
+    def test_si_no_elige_se_busca_con_lo_mas_reciente(self):
         p = Planificador(ClienteFalso(), max_nombres=3, max_intentos=2).elegir(self._negocio())
         assert p.automatica and p.nombres == ["EL POLLO FELIZ"]
 

@@ -135,12 +135,18 @@ class Equipo:
     def verificar(self, n: insumo.Negocio) -> Resultado:
         """Recolecta, informa por fuente y decide."""
         inicio = time.monotonic()
-        logger.info("   ── 0 🏷  planificador: con qué nombres buscar")
+        logger.info("   ── 0 🏷  planificador: con qué nombre, domicilio y teléfono buscar")
         planeacion = self.planificador.elegir(n)
         n.nombres_busqueda = planeacion.nombres
+        n.domicilio_busqueda = planeacion.domicilio
+        n.telefono_busqueda = planeacion.telefono
         marca = " (automático)" if planeacion.automatica else ""
         logger.info(
-            f"      🏷  nombres: {' | '.join(planeacion.nombres) or '—'}{marca} · "
+            f"      🏷  nombres: {' | '.join(planeacion.nombres) or '—'} · domicilio: "
+            f"{planeacion.domicilio or '—'} · teléfono: {planeacion.telefono or '—'}{marca}"
+        )
+        logger.info(
+            f"      🏷  consistentes: {', '.join(planeacion.consistentes) or 'ninguno'} · "
             f"{planeacion.razonamiento[:200]}"
         )
         expediente: list[Pieza] = []
@@ -213,11 +219,14 @@ def guardar(conn: Connection, r: Resultado) -> str:
         conn.execute(
             text("""
                 UPDATE verificacion.muestra_negocios
-                SET nombres_elegidos = :nombres, nombres_elegidos_por = :agente
+                SET nombres_elegidos = :nombres, domicilio_elegido = :domicilio,
+                    telefono_elegido = :telefono, nombres_elegidos_por = :agente
                 WHERE muestra_id = :id AND clee = :clee
             """),
             {
                 "nombres": r.planeacion.nombres,
+                "domicilio": r.planeacion.domicilio,
+                "telefono": r.planeacion.telefono,
                 "agente": r.agente,
                 "id": r.muestra_id,
                 "clee": r.clee,

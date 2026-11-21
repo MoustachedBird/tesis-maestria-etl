@@ -299,7 +299,7 @@ class TestElInsumo:
         with db.connect() as conn:
             muestra_id, ventana = insumo.muestra_por_nombre(conn, "piloto")
             n = insumo.cargar(conn, muestra_id, "AC0")
-        assert n.nombres == ["TACOS PACO", "TAQUERIA DON PACO"]
+        assert set(n.nombres) == {"TACOS PACO", "TAQUERIA DON PACO"}
         assert n.razones_sociales == ["PACO SA DE CV"]
         assert (
             n.telefonos == ["3312345678"]
@@ -307,11 +307,13 @@ class TestElInsumo:
             and n.sitios == ["tacospaco.mx"]
         )
         assert n.domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
-        # Cada nombre con los cortes en que aparecio, para que el planificador razone.
-        assert {nombre for nombre, _ in n.nombres_por_corte} == set(n.nombres)
+        # Cada variante con los cortes en que aparecio, en el mismo orden que la lista.
+        assert [v for v, _ in n.variantes["nombre"]] == n.nombres
+        assert [v for v, _ in n.variantes["domicilio"]] == n.domicilios
         assert all(
             cortes and all(len(c) == 7 and c[4] == "-" for c in cortes)
-            for _, cortes in n.nombres_por_corte
+            for variantes in n.variantes.values()
+            for _, cortes in variantes
         )
         assert (n.municipio, n.entidad, n.actividad) == ("Guadalajara", "Jalisco", "Taquerias")
         assert n.ultimo_corte_ventana == ventana[-1] == VENTANA[-1]
@@ -327,14 +329,19 @@ class TestElInsumo:
         class ConPlan(VerificadorFalso):
             def verificar(self, negocio):
                 r = super().verificar(negocio)
-                r.planeacion = Planeacion(["Tacos Paco", "Taquería Don Paco"], "el más repetido")
+                r.planeacion = Planeacion(
+                    ["Tacos Paco", "Taquería Don Paco"],
+                    "el más repetido",
+                    domicilio="AV VALLARTA 1234 AMERICANA 44160",
+                )
                 return r
 
         verificar_muestra(db, tracker, ConPlan(), "piloto", solo_clee="AC0")
         with db.connect() as conn:
             fila = conn.execute(
                 text(
-                    "SELECT alias, nombres_elegidos, nombres_elegidos_por "
+                    "SELECT alias, alias_domicilios, alias_telefonos, nombres_elegidos, "
+                    "domicilio_elegido, nombres_elegidos_por "
                     "FROM verificacion.muestra_negocios WHERE clee = 'AC0'"
                 )
             ).one()
@@ -342,7 +349,10 @@ class TestElInsumo:
                 text("SELECT nombres_buscados FROM verificacion.veredictos WHERE clee = 'AC0'")
             ).scalar_one()
         assert set(fila.alias) == {"TACOS PACO", "TAQUERIA DON PACO"}
+        assert fila.alias_domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+        assert fila.alias_telefonos == ["3312345678"]
         assert fila.nombres_elegidos == ["Tacos Paco", "Taquería Don Paco"]
+        assert fila.domicilio_elegido == "AV VALLARTA 1234 AMERICANA 44160"
         assert fila.nombres_elegidos_por == "falso:1b/v4"
         assert veredicto["razonamiento"] == "el más repetido"
 

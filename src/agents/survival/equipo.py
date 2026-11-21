@@ -38,7 +38,7 @@ from src.agents.survival.llamada import pedir
 from src.agents.survival.prompts import (
     FOCOS,
     HERRAMIENTA_CONCLUIR,
-    HERRAMIENTA_ELEGIR_NOMBRES,
+    HERRAMIENTA_ELEGIR_DATOS,
     HERRAMIENTA_INFORMAR,
     SISTEMA_DECISOR,
     SISTEMA_PLANIFICADOR,
@@ -60,15 +60,27 @@ MIN_TEXTO = 20
 """Caracteres mínimos de un resumen o razonamiento: menos no es un porqué."""
 
 
-# ----- planificador de nombres -----
+# ----- planificador: con qué datos buscar -----
+
+CAMPOS_DE_BUSQUEDA = ("nombre", "domicilio", "telefono")
+"""Los campos que entran a las consultas y que el planificador concilia si varían entre cortes.
+
+Razón social, sitio y correo también varían, pero se usan TODOS (el SAT,
+la lectura de los sitios, el registro de los dominios), del más reciente al
+más viejo: no hay que elegir uno.
+"""
 
 
 @dataclass
 class Planeacion:
-    """Con qué nombres se busca al negocio, y por qué."""
+    """Con qué datos se busca al negocio, y por qué."""
 
     nombres: list[str]
     razonamiento: str
+    domicilio: str | None = None
+    telefono: str | None = None
+    consistentes: list[str] = field(default_factory=list)
+    """Los campos que dijeron lo mismo en todos los cortes: esos no los decidió el modelo."""
     automatica: bool = False
     duracion_s: float = 0.0
 
@@ -76,20 +88,27 @@ class Planeacion:
         """Para `veredictos.nombres_buscados`."""
         return {
             "nombres": self.nombres,
+            "domicilio": self.domicilio,
+            "telefono": self.telefono,
+            "consistentes": self.consistentes,
             "razonamiento": self.razonamiento,
             "automatica": self.automatica,
         }
 
 
 class Planificador:
-    """El agente que decide con qué nombres buscar, antes de la recolección.
+    """El agente que decide con qué nombre, domicilio y teléfono buscar, antes de la recolección.
 
-    El nombre del DENUE cambia entre cortes (artículos, orden, errores de
-    captura, un cambio de nombre real), y buscar solo el de gold pierde al
-    negocio cuando en línea aparece de otra forma. Qué criterio usar
-    --repetición, recencia, combinación-- lo decide el modelo; el código solo
-    exige que no invente: toda palabra que proponga tiene que estar en algún
-    nombre o razón social del DENUE.
+    Son datos de encuesta: el encuestador anota el nombre, el domicilio y el
+    teléfono como se los dicen ese día, y cambian de un corte a otro. Por
+    campo:
+
+    - **Consistente** (una sola variante, sin contar mayúsculas, acentos ni
+      espacios): se usa la más reciente y el modelo no interviene.
+    - **Con variantes**: el modelo las ve con sus cortes y decide el
+      criterio (repetición, recencia, combinación), con más peso a lo más
+      reciente. El código solo exige que no invente: toda palabra tiene que
+      estar en alguna variante del DENUE, y el teléfono ser uno publicado.
     """
 
     def __init__(self, cliente: Any, *, max_nombres: int, max_intentos: int):
@@ -104,72 +123,143 @@ class Planificador:
         self.max_intentos = max_intentos
 
     def elegir(self, n: Negocio) -> Planeacion:
-        """Los nombres de búsqueda; si el modelo no da una elección válida, el de gold."""
+        """Los datos de búsqueda; lo que el modelo no resuelva queda en el valor más reciente."""
         inicio = time.monotonic()
-        respaldo = nombre_de(n)
-        if not respaldo:
-            return Planeacion([], "El DENUE no publicó ningún nombre.", automatica=True)
+        recientes = {
+            "nombre": nombre_de(n),
+            "domicilio": n.domicilios[0] if n.domicilios else None,
+            "telefono": n.telefonos[0] if n.telefonos else None,
+        }
+        valores = {
+            "nombre": [*dict.fromkeys([*n.nombres, *([n.nombre] if n.nombre else [])])],
+            "domicilio": n.domicilios,
+            "telefono": n.telefonos,
+            "razon_social": n.razones_sociales,
+        }
+        consistentes = [c for c in CAMPOS_DE_BUSQUEDA if len(_distintos(c, valores[c])) <= 1]
+        a_decidir = [c for c in CAMPOS_DE_BUSQUEDA if c not in consistentes]
+
+        def plan_base(razon: str, automatica: bool) -> Planeacion:
+            return Planeacion(
+                nombres=[recientes["nombre"]] if recientes["nombre"] else [],
+                domicilio=recientes["domicilio"],
+                telefono=recientes["telefono"],
+                consistentes=consistentes,
+                razonamiento=razon,
+                automatica=automatica,
+                duracion_s=time.monotonic() - inicio,
+            )
+
+        if not a_decidir:
+            return plan_base(
+                "Nombre, domicilio y teléfono fueron consistentes en todos los cortes.", True
+            )
+
+        pedido = ", ".join(
+            {"nombre": "nombres", "domicilio": "domicilio", "telefono": "telefono"}[c]
+            for c in a_decidir
+        )
         mensajes = [
             {"role": "system", "content": SISTEMA_PLANIFICADOR.format(k=self.max_nombres)},
-            {"role": "user", "content": formatear_insumo(n)},
+            {
+                "role": "user",
+                "content": f"{formatear_insumo(n)}\n\nDECIDE: {pedido}. "
+                f"Consistentes en todos los cortes (no los decides): {', '.join(consistentes) or 'ninguno'}.",
+            },
         ]
-        vocabulario = _palabras(" ".join([*n.nombres, n.nombre or "", *n.razones_sociales]))
 
         def validar(_nombre: str, args: dict) -> tuple[Planeacion, list[str]]:
-            return _validar_nombres(args, vocabulario, self.max_nombres)
+            plan, errores = _validar_datos(args, a_decidir, valores, self.max_nombres)
+            plan.consistentes = consistentes
+            for c in consistentes:
+                if c == "nombre":
+                    plan.nombres = [recientes["nombre"]] if recientes["nombre"] else []
+                else:
+                    setattr(plan, c, recientes[c])
+            return plan, errores
 
         salida = pedir(
             self.cliente,
             mensajes,
-            [HERRAMIENTA_ELEGIR_NOMBRES],
-            {"elegir_nombres"},
+            [HERRAMIENTA_ELEGIR_DATOS],
+            {"elegir_datos"},
             validar,
             max_vueltas=self.max_intentos,
-            rol="planificador de nombres",
+            rol="planificador",
         )
         if salida is None:
-            return Planeacion(
-                [respaldo] if respaldo else [],
-                f"El planificador no eligió nombres válidos en {self.max_intentos} intentos; "
-                "se busca con el nombre de gold.",
-                automatica=True,
-                duracion_s=time.monotonic() - inicio,
+            return plan_base(
+                f"El planificador no eligió datos válidos en {self.max_intentos} intentos; se "
+                "busca con los más recientes del DENUE.",
+                True,
             )
         plan: Planeacion = salida.valor
         plan.duracion_s = time.monotonic() - inicio
         return plan
 
 
-def _validar_nombres(
-    args: dict, vocabulario: set[str], maximo: int
+def _validar_datos(
+    args: dict, a_decidir: list[str], valores: dict[str, list[str]], maximo: int
 ) -> tuple[Planeacion, list[str]]:
-    """Que sean de 1 a `maximo`, distintos, y sin palabras que el DENUE no publicó."""
+    """Los campos pedidos, sin palabras ni teléfonos que el DENUE no publicó."""
     errores: list[str] = []
-    crudos = args.get("nombres")
-    if not isinstance(crudos, list):
-        crudos = []
     nombres: list[str] = []
-    for x in crudos:
-        nombre = " ".join(str(x).split())
-        if len(nombre) < 3:
-            continue
-        if _palabras_llave(nombre) in {_palabras_llave(y) for y in nombres}:
-            continue  # el mismo nombre otra vez (mayusculas, acentos): se cuenta una
-        nuevas = sorted(_palabras(nombre) - vocabulario)
-        if nuevas:
+    domicilio = telefono = None
+    if "nombre" in a_decidir:
+        # Un nombre puede tomar palabras de la razon social ("Rosticerias Felices").
+        vocabulario = _palabras(" ".join([*valores["nombre"], *valores.get("razon_social", [])]))
+        crudos = args.get("nombres") if isinstance(args.get("nombres"), list) else []
+        for x in crudos:
+            nombre = " ".join(str(x).split())
+            if len(nombre) < 3 or _palabras_llave(nombre) in {_palabras_llave(y) for y in nombres}:
+                continue
+            nuevas = sorted(_palabras(nombre) - vocabulario)
+            if nuevas:
+                errores.append(
+                    f"«{nombre}» usa palabras que el DENUE no publicó: {nuevas}. Usa solo palabras "
+                    "de las variantes (puedes quitar, reordenar y combinar)"
+                )
+            nombres.append(nombre)
+        if not nombres:
+            errores.append("da al menos un nombre")
+        if len(nombres) > maximo:
+            errores.append(f"son {len(nombres)} nombres; el máximo es {maximo}")
+    if "domicilio" in a_decidir:
+        domicilio = " ".join(str(args.get("domicilio") or "").split()) or None
+        if not domicilio:
+            errores.append("falta el domicilio con que se buscará")
+        else:
+            nuevas = sorted(_palabras(domicilio) - _palabras(" ".join(valores["domicilio"])))
+            if nuevas:
+                errores.append(
+                    f"el domicilio usa palabras que el DENUE no publicó: {nuevas}. Usa solo "
+                    "palabras de los domicilios publicados"
+                )
+    if "telefono" in a_decidir:
+        crudo = str(args.get("telefono") or "")
+        publicados = {_digitos(t): t for t in valores["telefono"]}
+        if _digitos(crudo) not in publicados:
             errores.append(
-                f"«{nombre}» usa palabras que el DENUE no publicó: {nuevas}. Usa solo palabras "
-                "de los nombres o la razón social (puedes quitar, reordenar y combinar)"
+                f"el teléfono tiene que ser uno de los publicados: {valores['telefono']}"
             )
-        nombres.append(nombre)
-    if not nombres:
-        errores.append("da al menos un nombre")
-    if len(nombres) > maximo:
-        errores.append(f"son {len(nombres)} nombres; el máximo es {maximo}")
+        else:
+            telefono = publicados[_digitos(crudo)]
     razonamiento = str(args.get("razonamiento", "")).strip()
     if len(razonamiento) < MIN_TEXTO:
-        errores.append("razonamiento vacío o demasiado corto: di por qué esos nombres")
-    return Planeacion(nombres, razonamiento), errores
+        errores.append("razonamiento vacío o demasiado corto: di por qué esos datos")
+    return Planeacion(nombres, razonamiento, domicilio=domicilio, telefono=telefono), errores
+
+
+def _distintos(campo: str, valores: list[str]) -> set:
+    """Las variantes realmente distintas de un campo (mayúsculas, acentos, espacios y puntuación aparte)."""
+    if campo == "telefono":
+        return {_digitos(v) for v in valores if _digitos(v)}
+    return {" ".join(sorted(_palabras(v))) for v in valores if _palabras(v)}
+
+
+def _digitos(telefono: str) -> str:
+    """Los últimos 10 dígitos de un teléfono: lo comparable entre formatos (lada, guiones, +52)."""
+    return re.sub(r"\D", "", telefono)[-10:]
 
 
 def _palabras(texto: str) -> set[str]:

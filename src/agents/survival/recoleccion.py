@@ -257,8 +257,8 @@ class FuenteMaps:
         fecha la actividad es la última.
         """
         consultas = [f"{nombre_de(n)} {lugar_de(n)}"]
-        if n.domicilios:
-            consultas.append(f"{nombre_de(n)} {n.domicilios[0]} {n.municipio or ''}".strip())
+        if domicilio_de(n):
+            consultas.append(f"{nombre_de(n)} {domicilio_de(n)} {n.municipio or ''}".strip())
         consultas += [f"{otro} {lugar_de(n)}" for otro in nombres_de_busqueda(n)[1:]]
         piezas: list[Pieza] = []
         for c in consultas:
@@ -339,10 +339,10 @@ class FuenteWeb:
     def recolectar(self, n: Negocio, expediente: list[Pieza]) -> list[Pieza]:
         """Nombre + lugar, nombre + domicilio, teléfono, y dos dirigidas: redes y reseñas."""
         consultas = [f'"{nombre_de(n)}" {lugar_de(n)}']
-        if n.domicilios:
-            consultas.append(f"{nombre_de(n)} {n.domicilios[0]} {n.municipio or ''}".strip())
-        if n.telefonos:
-            consultas.append(n.telefonos[0])
+        if domicilio_de(n):
+            consultas.append(f"{nombre_de(n)} {domicilio_de(n)} {n.municipio or ''}".strip())
+        if telefono_de(n):
+            consultas.append(telefono_de(n))
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
         consultas += [f'"{otro}" {lugar_de(n)}' for otro in nombres_de_busqueda(n)[1:]]
@@ -657,6 +657,16 @@ def nombre_de(n: Negocio) -> str:
     if n.nombres_busqueda:
         return n.nombres_busqueda[0]
     return n.nombre or (n.nombres[0] if n.nombres else "")
+
+
+def domicilio_de(n: Negocio) -> str | None:
+    """El domicilio con que se busca: el del planificador, o el más reciente del DENUE."""
+    return n.domicilio_busqueda or (n.domicilios[0] if n.domicilios else None)
+
+
+def telefono_de(n: Negocio) -> str | None:
+    """El teléfono con que se busca: el del planificador, o el más reciente del DENUE."""
+    return n.telefono_busqueda or (n.telefonos[0] if n.telefonos else None)
 
 
 def nombres_de_busqueda(n: Negocio) -> list[str]:
