@@ -131,7 +131,7 @@ class Especialista:
         def propias() -> list[int]:
             return [i for i, p in enumerate(expediente, 1) if p.recolector in recolectores]
 
-        herramientas_ampliar = grupo.herramientas if self.max_ampliaciones > 0 else []
+        herramientas_ampliar = grupo.herramientas(expediente) if self.max_ampliaciones > 0 else []
         puede_ampliar = bool(herramientas_ampliar)
         if not any(expediente[i - 1].citable for i in propias()) and not puede_ampliar:
             return Informe(

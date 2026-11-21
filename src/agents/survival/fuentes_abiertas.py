@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from src.agents.survival.insumo import Negocio
-from src.agents.survival.recoleccion import Pieza, clave_url, es_red, nombre_de, urls_halladas
+from src.agents.survival.recoleccion import (
+    Pieza,
+    clave_url,
+    es_red,
+    nombre_de,
+    prioridad_red,
+    urls_halladas,
+)
 from src.agents.survival.sources import archivo, dominio, osm, sat
 from src.agents.survival.sources.cortesia import Pausador
 from src.shared.enums import EstadoConsulta, Recolector
@@ -106,10 +113,16 @@ def _pieza(recolector: str, consulta: str, contenido: str, citable: bool) -> Pie
 
 
 def urls_para_archivo(n: Negocio, expediente: list[Pieza], maximo: int) -> list[str]:
-    """Las URLs cuyo historial se busca: los sitios del DENUE y luego las redes halladas."""
+    """Las URLs cuyo historial se busca: los sitios del DENUE y luego las PÁGINAS de redes halladas.
+
+    Solo páginas, no publicaciones sueltas ni grupos: lo que fecha el último
+    rastro del negocio es su página, y el archivo casi nunca guarda una
+    publicación (sondeo del 2026-11-21).
+    """
     sitios = [s if s.lower().startswith("http") else f"https://{s}" for s in n.sitios]
+    paginas = [u for u in urls_halladas(expediente, es_red) if prioridad_red(u) == 0]
     urls: list[str] = []
-    for u in sitios + urls_halladas(expediente, es_red):
+    for u in sitios + paginas:
         if clave_url(u) not in {clave_url(x) for x in urls}:
             urls.append(u)
     return urls[:maximo]

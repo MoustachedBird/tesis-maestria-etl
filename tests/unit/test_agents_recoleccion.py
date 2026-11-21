@@ -242,3 +242,26 @@ class TestElExpedienteCabeEnElContexto:
 
     def test_presupuesto_de(self):
         assert presupuesto_de(32768) == int(32768 * 3.0 * 0.6)
+
+
+@pytest.mark.unit
+def test_plataformas_sin_nada_que_abrir_no_llama_al_modelo():
+    from src.agents.survival.equipo import Especialista
+    from src.agents.survival.recoleccion import Grupo
+    from tests.unit.test_agents_verificador import ClienteFalso
+
+    cliente = ClienteFalso()
+    grupo = Grupo("plataformas", [FuentePlataformas(NavegadorFalso(), 3, 6000, 200)])
+    exp = _web("https://nota.mx/1")  # ninguna ficha de plataforma
+    i = Especialista(cliente, max_ampliaciones=2, max_intentos=2).informar(negocio(), grupo, exp)
+    assert i.automatico and cliente.conversaciones == []
+
+
+@pytest.mark.unit
+def test_el_archivo_busca_paginas_de_redes_no_publicaciones():
+    from src.agents.survival.fuentes_abiertas import urls_para_archivo
+
+    post = "https://www.facebook.com/100083341502594/posts/526093946845318/"
+    grupo = "https://www.facebook.com/groups/1803558436594459/posts/4691821994434741/"
+    pagina = "https://www.facebook.com/p/Dulceria-El-Kiosco-100083341502594/"
+    assert urls_para_archivo(negocio(sitios=[]), _web(post, grupo, pagina), 3) == [pagina]

@@ -139,10 +139,19 @@ class Grupo:
         """Los recolectores del grupo: las piezas que el especialista puede citar."""
         return {f.recolector for f in self.fuentes}
 
-    @property
-    def herramientas(self) -> list[dict]:
-        """Las herramientas de ampliación de sus fuentes (las que tienen)."""
-        return [f.herramienta for f in self.fuentes if f.herramienta]
+    def herramientas(self, expediente: list[Pieza] | None = None) -> list[dict]:
+        """Las herramientas de ampliación de sus fuentes que tienen algo que ampliar.
+
+        Una fuente de páginas halladas sin ninguna pendiente no ofrece su
+        herramienta: no habría qué abrir, y ofrecerla hacía llamar al modelo
+        para un grupo vacío (plataformas, sondeo del 2026-11-21).
+        """
+        return [
+            f.herramienta
+            for f in self.fuentes
+            if f.herramienta
+            and (expediente is None or getattr(f, "tiene_pendientes", lambda e: True)(expediente))
+        ]
 
     def fuente_de(self, herramienta: str) -> Fuente | None:
         """La fuente a la que pertenece una herramienta, por su nombre."""
@@ -456,9 +465,33 @@ class FuenteHallada:
             "\n".join(f"- {u}" for u in pendientes)
         )
 
+    def tiene_pendientes(self, expediente: list[Pieza]) -> bool:
+        """Si queda alguna página de este tipo sin abrir (si vale la pena ofrecer la herramienta)."""
+        abiertas = {
+            clave_url(p.url) for p in expediente if p.recolector == self.recolector and p.url
+        }
+        return any(clave_url(u) not in abiertas for u in self.halladas(expediente))
+
     def _leer(self, url: str) -> Pieza:
         texto = self.navegador.leer(url, self.max_caracteres, self.min_caracteres)
         return Pieza(recolector=self.recolector, url=url, contenido=texto, estado=_estado_de(texto))
+
+
+def prioridad_red(url: str) -> int:
+    """0 la página del negocio, 1 una publicación suelta, 2 un grupo.
+
+    En Facebook `/p/<nombre>` es una página; en Instagram `/p/<código>` es
+    una publicación.
+    """
+    u = urlparse(url.lower())
+    if "/groups/" in u.path:
+        return 2
+    publicacion = ("/posts/", "/photos/", "/videos/", "/reel", "/stories/", "/permalink")
+    if any(f in u.path for f in publicacion):
+        return 1
+    if "instagram.com" in u.netloc and u.path.startswith("/p/"):
+        return 1
+    return 0
 
 
 class FuenteRedes(FuenteHallada):
@@ -478,18 +511,9 @@ class FuenteRedes(FuenteHallada):
         Una publicación suelta o un grupo de compraventa dicen poco del
         negocio; la página trae el encabezado, el horario y la última
         publicación (sondeo del 2026-11-21: se abrían dos publicaciones y la
-        página quedaba fuera). En Facebook `/p/<nombre>` es una página; en
-        Instagram `/p/<código>` es una publicación.
+        página quedaba fuera).
         """
-        u = urlparse(url.lower())
-        if "/groups/" in u.path:
-            return 2
-        publicacion = ("/posts/", "/photos/", "/videos/", "/reel", "/stories/", "/permalink")
-        if any(f in u.path for f in publicacion):
-            return 1
-        if "instagram.com" in u.netloc and u.path.startswith("/p/"):
-            return 1
-        return 0
+        return prioridad_red(url)
 
 
 class FuentePlataformas(FuenteHallada):
