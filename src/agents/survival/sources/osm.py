@@ -16,11 +16,15 @@ import math
 import time
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 from rapidfuzz import fuzz
 
 from src.agents.survival.sources.cortesia import Pausador
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 _UA = "tesis-etl-agente/1.0 (verificacion academica de negocios)"
 """User-Agent para Overpass, que pide identificarse; sin datos personales."""
@@ -111,7 +115,7 @@ def buscar_cerca(
     url: str,
     timeout: int = 30,
     pausador: Pausador | None = None,
-    intentos: int = 3,
+    intentos: int = 1,
     max_objetos: int = 8,
 ) -> list[Objeto]:
     """Los negocios mapeados alrededor del punto, del que más se parece al que menos.
@@ -150,6 +154,9 @@ def buscar_cerca(
                 break
             except requests.RequestException as e:
                 ultimo, r = e, None
+                logger.info(
+                    f"         🗺  Overpass {servidor}: {e.__class__.__name__}, pruebo el siguiente"
+                )
         if r is not None:
             break
         if intento < intentos:
