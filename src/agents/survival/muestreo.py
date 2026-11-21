@@ -54,6 +54,28 @@ intermitente la del cuarto. Se declaran una vez y los usan el muestreo (para
 asignar) y las métricas (para reponderar), así que no pueden divergir.
 """
 
+SQL_ALIAS = """
+UPDATE verificacion.muestra_negocios mn
+SET alias = x.alias
+FROM (
+    SELECT n.clee, array_agg(n.nom_estab ORDER BY n.ultimo DESC, n.nom_estab) AS alias
+    FROM (
+        SELECT e.clee, e.nom_estab, max(e.period) AS ultimo
+        FROM silver.establecimientos e
+        WHERE e.clee IN (SELECT clee FROM verificacion.muestra_negocios WHERE muestra_id = :id)
+          AND e.nom_estab <> ''
+        GROUP BY 1, 2
+    ) n
+    GROUP BY 1
+) x
+WHERE mn.muestra_id = :id AND mn.clee = x.clee
+"""
+"""Llena `muestra_negocios.alias` de una muestra: los `nom_estab` distintos, el más reciente primero.
+
+Va por `clee` (indexado en los hechos), así que cuesta lo que cuestan unos
+cientos de negocios, no los 82.9M.
+"""
+
 FILTRO_POBLACION = "NOT cluster_sospechoso AND nombre IS NOT NULL AND cve_geo_final IS NOT NULL"
 """A qué población se extrapola: lo que se puede buscar.
 
@@ -220,6 +242,7 @@ def _tirar(engine: Engine, nombre: str, semilla: float, cuota: int) -> dict[str,
             """),
             {"id": muestra_id, "cuota": cuota},
         )
+        conn.execute(text(SQL_ALIAS), {"id": muestra_id})
         conteos = dict(
             conn.execute(
                 text("""

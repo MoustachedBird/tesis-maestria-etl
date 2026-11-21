@@ -1154,7 +1154,8 @@ Log del stage: `data/etl_gold.log`.
 
 ```
 verificacion.muestras           una tirada: tamaño, semilla, estratos, filtro, reglas de gold
-verificacion.muestra_negocios   los negocios que salieron, con cerrado_gold CONGELADO
+verificacion.muestra_negocios   los negocios que salieron, con cerrado_gold CONGELADO, sus alias
+                                y los nombres con que los buscó el planificador
 verificacion.veredictos         activo | cerrado | indeterminado + confianza + razonamiento
 verificacion.consultas          el expediente: todo lo que trajo cada fuente, citado o no
 verificacion.informes           un informe por fuente: ¿es este negocio? ¿qué indica?
@@ -1617,7 +1618,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 14 revisiones, b0000 (baseline) -> b0013
+├── alembic/versions/              # 15 revisiones, b0000 (baseline) -> b0014
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -2273,6 +2274,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0011expediente_y_juez` | Agrega `verificacion.consultas` (el expediente), `informes` (un especialista por fuente) y `auditorias` (el juez), y `evidencias.pieza_id`. Solo aditiva, idempotente; tampoco tira nada |
 | `b0012fuentes_y_especialidades` | v5: `consultas.recolector` es la fuente concreta (`Recolector`, ~20 valores) e `informes.especialista` el grupo que la lee (`Especialidad`); recrea ambos `CHECK` y los ensancha a VARCHAR(20). Agrega `consultas.imagen_ruta`. Los valores de v4 siguen siendo válidos |
 | `b0013nombres_buscados` | v6: `veredictos.nombres_buscados` (JSONB): con qué nombres buscó el planificador y por qué. Solo aditiva |
+| `b0014alias_en_la_muestra` | `muestra_negocios.alias` (los `nom_estab` distintos, el más reciente primero), `nombres_elegidos` y `nombres_elegidos_por` (lo último que eligió el planificador). Rellena las muestras existentes donde está NULL |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse

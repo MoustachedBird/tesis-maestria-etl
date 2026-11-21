@@ -209,6 +209,20 @@ def guardar(conn: Connection, r: Resultado) -> str:
             nombres_buscados=r.planeacion.como_dict() if r.planeacion else None,
         )
     )
+    if r.planeacion is not None and r.planeacion.nombres:
+        conn.execute(
+            text("""
+                UPDATE verificacion.muestra_negocios
+                SET nombres_elegidos = :nombres, nombres_elegidos_por = :agente
+                WHERE muestra_id = :id AND clee = :clee
+            """),
+            {
+                "nombres": r.planeacion.nombres,
+                "agente": r.agente,
+                "id": r.muestra_id,
+                "clee": r.clee,
+            },
+        )
     ids = [str(uuid.uuid4()) for _ in r.expediente]
     if r.expediente:
         conn.execute(

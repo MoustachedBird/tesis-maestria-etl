@@ -319,6 +319,33 @@ class TestElInsumo:
         for campo in ("cerrado", "cerrado_gold", "meses_sin_aparecer", "huecos"):
             assert not hasattr(n, campo)
 
+    def test_la_muestra_guarda_los_alias_y_lo_que_eligio_el_planificador(self, db, tracker):
+        from src.agents.survival.equipo import Planeacion
+
+        muestra(db, tracker, cuota=10)
+
+        class ConPlan(VerificadorFalso):
+            def verificar(self, negocio):
+                r = super().verificar(negocio)
+                r.planeacion = Planeacion(["Tacos Paco", "Taquería Don Paco"], "el más repetido")
+                return r
+
+        verificar_muestra(db, tracker, ConPlan(), "piloto", solo_clee="AC0")
+        with db.connect() as conn:
+            fila = conn.execute(
+                text(
+                    "SELECT alias, nombres_elegidos, nombres_elegidos_por "
+                    "FROM verificacion.muestra_negocios WHERE clee = 'AC0'"
+                )
+            ).one()
+            veredicto = conn.execute(
+                text("SELECT nombres_buscados FROM verificacion.veredictos WHERE clee = 'AC0'")
+            ).scalar_one()
+        assert set(fila.alias) == {"TACOS PACO", "TAQUERIA DON PACO"}
+        assert fila.nombres_elegidos == ["Tacos Paco", "Taquería Don Paco"]
+        assert fila.nombres_elegidos_por == "falso:1b/v4"
+        assert veredicto["razonamiento"] == "el más repetido"
+
     def test_un_negocio_fuera_de_la_muestra_es_lookup_error(self, db, tracker):
         muestra(db, tracker)
         with db.connect() as conn:

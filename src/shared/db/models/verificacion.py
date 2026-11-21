@@ -219,6 +219,23 @@ class MuestraNegocio(Base):
         nullable=False,
         comment="gold.huecos al muestrear: >0 es un negocio que ya desaparecio y volvio",
     )
+    alias: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text),
+        comment=(
+            "Los nombres distintos con que el DENUE lo publico (nom_estab), del corte mas "
+            "reciente al mas viejo. Se llena al muestrear"
+        ),
+    )
+    nombres_elegidos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text),
+        comment=(
+            "Con que nombres lo busco el planificador la ultima vez que se verifico, el mejor "
+            "primero. El historial por veredicto esta en veredictos.nombres_buscados"
+        ),
+    )
+    nombres_elegidos_por: Mapped[str | None] = mapped_column(
+        String(80), comment="El agente (modelo/version) que eligio nombres_elegidos"
+    )
 
     def __repr__(self) -> str:
         return f"<MuestraNegocio({self.clee}, {self.estrato})>"
