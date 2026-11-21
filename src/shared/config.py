@@ -132,7 +132,50 @@ class Settings(BaseSettings):
     # Version del agente (prompt + protocolo). Sube cuando cambie el prompt o
     # las reglas de decision: dos veredictos con distinta version no son
     # comparables aunque sean del mismo modelo.
-    AGENTE_VERSION: str = "v4"
+    AGENTE_VERSION: str = "v5"
+    # Las fuentes que se consultan, por nombre de `Recolector`, separadas por
+    # coma. El orden importa solo dentro de un especialista; entre grupos
+    # manda el orden fijo de `Especialidad` (los buscadores van antes que
+    # redes, plataformas y archivo, que abren lo que ellos encontraron).
+    # Quitar una fuente cambia el expediente: sube AGENTE_VERSION con ello.
+    AGENTE_FUENTES: str = (
+        "maps,osm,web,bing,duckduckgo,google,brave,redes,plataformas,"
+        "sitio,wayback,common_crawl,dominio,sat"
+    )
+    # Segundos minimos entre dos peticiones al mismo dominio (mas un azar de
+    # hasta la mitad). Es lo que mantiene a Google, Bing y Maps sin CAPTCHA
+    # a volumen de muestra; el tiempo no es la restriccion, el bloqueo si.
+    AGENTE_PAUSA_SEGUNDOS: float = 3.0
+    # Bloqueos SEGUIDOS (CAPTCHA, "trafico inusual") de un motor antes de
+    # apagarlo por el resto de la corrida. Cada consulta saltada queda como
+    # pieza ERROR, asi que el hueco se puede medir.
+    AGENTE_MAX_BLOQUEOS: int = 3
+    # Perfil de Chrome persistente, SIN sesion: guarda solo cookies de
+    # consentimiento, para no toparse con "Antes de ir a Google" en cada
+    # consulta. Vacio = un perfil desechable por corrida.
+    AGENTE_PERFIL_CHROME: str = "data/agente/chrome"
+    # Fichas de plataformas (TripAdvisor, Yelp, Rappi...) que se abren de las
+    # que trajeron los buscadores.
+    AGENTE_MAX_PLATAFORMAS: int = 3
+    # URLs (sitio propio y redes) cuyo historial se busca en el Internet
+    # Archive y en Common Crawl.
+    AGENTE_MAX_ARCHIVO: int = 3
+    # Crawls mas recientes de Common Crawl que se consultan (uno por mes o
+    # dos, aproximadamente). Cada uno es una peticion lenta.
+    AGENTE_CRAWLS_COMMON_CRAWL: int = 3
+    # Radio alrededor de las coordenadas del DENUE en que se buscan objetos
+    # de OpenStreetMap. El GPS del DENUE se desvia decenas de metros.
+    AGENTE_RADIO_METROS: int = 150
+    # Dias que vale la copia local de una lista descargada (la del SAT).
+    AGENTE_CACHE_DIAS: int = 30
+    # Servidor de Overpass (OpenStreetMap). El publico es gratuito con uso
+    # razonable; a volumen de muestra sobra.
+    OVERPASS_URL: str = "https://overpass-api.de/api/interpreter"
+    # Lista de contribuyentes NO LOCALIZADOS del SAT (art. 69 CFF), en CSV.
+    # Si el SAT la mueve, se cambia aqui; `sondear` dice si se pudo bajar.
+    SAT_NO_LOCALIZADOS_URL: str = (
+        "http://omawww.sat.gob.mx/cifras_sat/Documents/No%20localizados.csv"
+    )
     # Buscador web. SearXNG es el servicio de compose (gratis, sin llave, sin
     # cuota); si hay BRAVE_API_KEY se usa la API de Brave en su lugar, que
     # tiene indice propio y no cae en la zona gris de raspar un motor

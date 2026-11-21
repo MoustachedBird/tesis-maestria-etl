@@ -54,18 +54,101 @@ class SenalEvidencia(StrEnum):
 
 
 class Recolector(StrEnum):
-    """Qué paso del recolector produjo una pieza del expediente.
+    """La fuente concreta que produjo una pieza del expediente.
 
-    El expediente se arma siempre con los mismos pasos y en este orden, para
-    que dos negocios se verifiquen con las mismas fuentes y sus veredictos
-    sean comparables. Es el eje para medir qué aporta cada fuente ("¿cuántos
-    veredictos firmes salieron de Maps?").
+    El expediente se arma siempre con las mismas fuentes y en el mismo orden,
+    para que dos negocios se verifiquen igual y sus veredictos sean
+    comparables. Es el eje para medir qué aporta cada fuente ("¿cuántos
+    veredictos firmes citaron a OpenStreetMap?"). Quién LEE cada pieza es
+    otro eje, más grueso: `Especialidad`.
+
+    Los valores de las fases que todavía no tienen código (`psm`, `dof`,
+    `street_view`, `mapillary`, `kartaview`) ya están aquí para que el
+    `CHECK` no pida otra migración cuando lleguen (`plan_fuentes_agente.md`).
     """
 
     MAPS = "maps"
+    """Google Maps en Chrome: la ficha o la lista, y sus reseñas más recientes."""
+    OSM = "osm"
+    """OpenStreetMap por Overpass, alrededor de las coordenadas del DENUE."""
     WEB = "web"
+    """SearXNG del compose (o la API de Brave si hay llave)."""
+    BING = "bing"
+    DUCKDUCKGO = "duckduckgo"
+    GOOGLE = "google"
+    BRAVE = "brave"
+    """La página de Brave Search en Chrome (no su API: esa va en `web`)."""
     REDES = "redes"
+    """Facebook e Instagram en Chrome, sin sesión."""
+    PLATAFORMAS = "plataformas"
+    """Fichas de reseñas y de entrega (TripAdvisor, Yelp, Rappi...) en Chrome."""
     SITIO = "sitio"
+    """Los sitios que publicó el DENUE."""
+    WAYBACK = "wayback"
+    """Capturas del Internet Archive del sitio y de las redes."""
+    COMMON_CRAWL = "common_crawl"
+    """Capturas de Common Crawl del sitio y de las redes."""
+    DOMINIO = "dominio"
+    """Registro (RDAP/WHOIS) y DNS del dominio del sitio o del correo."""
+    SAT = "sat"
+    """Lista de contribuyentes no localizados del SAT (art. 69 CFF)."""
+    PSM = "psm"
+    DOF = "dof"
+    STREET_VIEW = "street_view"
+    MAPILLARY = "mapillary"
+    KARTAVIEW = "kartaview"
+
+
+class Especialidad(StrEnum):
+    """El especialista del equipo que lee un grupo de fuentes.
+
+    Un especialista por fuente serían ~20 llamadas al modelo por negocio; se
+    agrupan las que se leen igual. Los cuatro primeros valores coinciden con
+    los especialistas de v4 (`maps`, `web`, `redes`, `sitio`), así que sus
+    filas en `informes` siguen siendo válidas.
+    """
+
+    MAPS = "maps"
+    """Mapas: Google Maps y OpenStreetMap."""
+    WEB = "web"
+    """Buscadores: SearXNG, Bing, DuckDuckGo, Google, Brave."""
+    REDES = "redes"
+    PLATAFORMAS = "plataformas"
+    SITIO = "sitio"
+    """Huella digital: sitio propio, Internet Archive, Common Crawl, dominio."""
+    REGISTROS = "registros"
+    """Registros oficiales: SAT, PSM, DOF."""
+    FACHADA = "fachada"
+    """Imágenes de la calle leídas por un modelo de visión."""
+
+
+ESPECIALIDAD_DE: dict[str, str] = {
+    Recolector.MAPS: Especialidad.MAPS,
+    Recolector.OSM: Especialidad.MAPS,
+    Recolector.WEB: Especialidad.WEB,
+    Recolector.BING: Especialidad.WEB,
+    Recolector.DUCKDUCKGO: Especialidad.WEB,
+    Recolector.GOOGLE: Especialidad.WEB,
+    Recolector.BRAVE: Especialidad.WEB,
+    Recolector.REDES: Especialidad.REDES,
+    Recolector.PLATAFORMAS: Especialidad.PLATAFORMAS,
+    Recolector.SITIO: Especialidad.SITIO,
+    Recolector.WAYBACK: Especialidad.SITIO,
+    Recolector.COMMON_CRAWL: Especialidad.SITIO,
+    Recolector.DOMINIO: Especialidad.SITIO,
+    Recolector.SAT: Especialidad.REGISTROS,
+    Recolector.PSM: Especialidad.REGISTROS,
+    Recolector.DOF: Especialidad.REGISTROS,
+    Recolector.STREET_VIEW: Especialidad.FACHADA,
+    Recolector.MAPILLARY: Especialidad.FACHADA,
+    Recolector.KARTAVIEW: Especialidad.FACHADA,
+}
+"""Qué especialista lee las piezas de cada fuente. Todo `Recolector` tiene uno."""
+
+BUSCADORES: frozenset[str] = frozenset(
+    {Recolector.WEB, Recolector.BING, Recolector.DUCKDUCKGO, Recolector.GOOGLE, Recolector.BRAVE}
+)
+"""Los recolectores que son buscadores: de sus resultados salen las redes y plataformas a abrir."""
 
 
 class EstadoConsulta(StrEnum):

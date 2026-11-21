@@ -66,6 +66,7 @@ from src.shared.db.base import Base
 from src.shared.enums import (
     Confianza,
     Dictamen,
+    Especialidad,
     EstadoConsulta,
     EstadoVerificado,
     Identificacion,
@@ -335,7 +336,7 @@ class Consulta(Base):
         Integer, nullable=False, comment="El [n] con que el modelo vio y cita la pieza"
     )
     recolector: Mapped[str] = mapped_column(
-        String(10), nullable=False, comment="maps | web | redes | sitio: que paso la trajo"
+        String(20), nullable=False, comment="La fuente concreta que la trajo (enum Recolector)"
     )
     fuente: Mapped[str] = mapped_column(
         String(30),
@@ -367,6 +368,13 @@ class Consulta(Base):
             "es de la recoleccion base, que es igual para todos los negocios"
         ),
     )
+    imagen_ruta: Mapped[str | None] = mapped_column(
+        Text,
+        comment=(
+            "La captura que leyo el modelo de vision, bajo data/agente/capturas/; NULL si la "
+            "pieza es texto. Sin ella una pieza de fachada no se puede auditar"
+        ),
+    )
     capturada_en: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -376,10 +384,11 @@ class Consulta(Base):
 
 
 class Informe(Base):
-    """Lo que el especialista de UNA fuente concluyó de ella.
+    """Lo que el especialista de un grupo de fuentes concluyó de ellas.
 
-    El equipo tiene un especialista por fuente (Maps, buscador, redes, sitio
-    propio): cada uno lee solo lo de su fuente y responde dos preguntas
+    El equipo tiene un especialista por grupo (`Especialidad`: mapas,
+    buscadores, redes, plataformas, huella digital, registros, fachada): cada
+    uno lee solo lo de sus fuentes y responde dos preguntas
     separadas --¿es este negocio? y ¿qué indica?--, con las piezas que lo
     sostienen. El decisor integra estos informes. Guardarlos permite medir
     qué fuente aporta veredictos y en cuáles el especialista no identificó
@@ -389,7 +398,7 @@ class Informe(Base):
     __tablename__ = "informes"
     __table_args__ = (
         UniqueConstraint("veredicto_id", "especialista"),
-        CheckConstraint(f"especialista IN ({_en(Recolector)})", name="especialista"),
+        CheckConstraint(f"especialista IN ({_en(Especialidad)})", name="especialista"),
         CheckConstraint(f"identificado IN ({_en(Identificacion)})", name="identificado"),
         CheckConstraint(f"senal IN ({_en(SenalEvidencia)})", name="senal_informe"),
         {"schema": SCHEMA},
@@ -402,7 +411,7 @@ class Informe(Base):
         nullable=False,
     )
     especialista: Mapped[str] = mapped_column(
-        String(10), nullable=False, comment="La fuente: maps | web | redes | sitio"
+        String(20), nullable=False, comment="El grupo de fuentes que leyo (enum Especialidad)"
     )
     identificado: Mapped[str] = mapped_column(
         String(10), nullable=False, comment="si | no | dudoso: si las piezas son de ESTE negocio"

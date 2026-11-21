@@ -1564,7 +1564,7 @@ etl-core/
 │       ├── seed_tipos_{vialidad,asentamiento,unidad_economica}.parquet
 │       └── seed_sesnsp_delitos.parquet       # 98 (ids append-only)
 │
-├── alembic/versions/              # 12 revisiones, b0000 (baseline) -> b0011
+├── alembic/versions/              # 13 revisiones, b0000 (baseline) -> b0012
 ├── tests/{unit,integration}/      # conftest.py levanta el Postgres de pruebas
 ├── AGENTS.md                      # Esta guia
 ├── ARRANQUE.md                    # Runbook de arranque en limpio
@@ -2217,6 +2217,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0009gold_cohorte_oficial` | Crea `gold.negocios_clee_oficial`: edad y veredicto de cierre de la cohorte con CLEE oficial. **Reescrita en sitio** el 2026-11-11 (tira y recrea: su contenido es derivable); la `b0010gold_sin_snapshots` que la seguía se retiró de la cadena. Una base que aplicó cualquiera de las dos necesita `alembic stamp --purge b0008clee_celda_h3_7` antes de `upgrade head` (`ARRANQUE.md` §10) |
 | `b0010verificacion_agente` | Crea el schema `verificacion` (muestras, muestra_negocios, veredictos, evidencias) para el agente que busca los negocios en línea. **No tira antes de crear**: su contenido no es derivable |
 | `b0011expediente_y_juez` | Agrega `verificacion.consultas` (el expediente), `informes` (un especialista por fuente) y `auditorias` (el juez), y `evidencias.pieza_id`. Solo aditiva, idempotente; tampoco tira nada |
+| `b0012fuentes_y_especialidades` | v5: `consultas.recolector` es la fuente concreta (`Recolector`, ~20 valores) e `informes.especialista` el grupo que la lee (`Especialidad`); recrea ambos `CHECK` y los ensancha a VARCHAR(20). Agrega `consultas.imagen_ruta`. Los valores de v4 siguen siendo válidos |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2347,7 +2348,18 @@ OLLAMA_MODEL=qwen3:32b
 OLLAMA_TIMEOUT_SEGUNDOS=600
 OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
-AGENTE_VERSION=v4
+AGENTE_VERSION=v5
+AGENTE_FUENTES=maps,osm,web,bing,duckduckgo,google,brave,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
+AGENTE_PAUSA_SEGUNDOS=3
+AGENTE_MAX_BLOQUEOS=3
+AGENTE_PERFIL_CHROME=data/agente/chrome
+AGENTE_MAX_PLATAFORMAS=3
+AGENTE_MAX_ARCHIVO=3
+AGENTE_CRAWLS_COMMON_CRAWL=3
+AGENTE_RADIO_METROS=150
+AGENTE_CACHE_DIAS=30
+OVERPASS_URL=https://overpass-api.de/api/interpreter
+SAT_NO_LOCALIZADOS_URL=http://omawww.sat.gob.mx/cifras_sat/Documents/No%20localizados.csv
 SEARXNG_URL=http://searxng:8080
 BRAVE_API_KEY=
 AGENTE_MAX_RESULTADOS=8

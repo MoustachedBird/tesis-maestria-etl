@@ -12,8 +12,11 @@ from src.shared.enums.layer import Layer
 from src.shared.enums.sections import DENUE_ATOMIC, SECTION_GROUPS, Section
 from src.shared.enums.sources import SourceSystem
 from src.shared.enums.verificacion import (
+    BUSCADORES,
+    ESPECIALIDAD_DE,
     Confianza,
     Dictamen,
+    Especialidad,
     EstadoConsulta,
     EstadoVerificado,
     Identificacion,
@@ -22,6 +25,9 @@ from src.shared.enums.verificacion import (
 )
 
 __all__ = [
+    "BUSCADORES",
+    "ESPECIALIDAD_DE",
+    "Especialidad",
     "DENUE_ATOMIC",
     "SECTION_GROUPS",
     "Confianza",

@@ -35,6 +35,7 @@ from src.shared.db.models.verificacion import (
 from src.shared.enums import (
     Confianza,
     Dictamen,
+    Especialidad,
     EstadoConsulta,
     EstadoVerificado,
     Identificacion,
@@ -135,7 +136,7 @@ class TestElEsquemaSinBase:
             ("evidencias", "senal", SenalEvidencia),
             ("consultas", "recolector", Recolector),
             ("consultas", "estado", EstadoConsulta),
-            ("informes", "especialista", Recolector),
+            ("informes", "especialista", Especialidad),
             ("informes", "identificado", Identificacion),
             ("informes", "senal_informe", SenalEvidencia),
             ("auditorias", "estado_ciego", EstadoVerificado),
@@ -443,3 +444,23 @@ class TestElExpedienteYElJuez:
         with verificacion_engine.connect() as conn:
             for tabla in ("veredictos", "consultas", "evidencias", "auditorias"):
                 assert conn.execute(text(f"SELECT count(*) FROM {SCHEMA}.{tabla}")).scalar() == 0
+
+
+@pytest.mark.unit
+class TestRecolectoresYEspecialidades:
+    def test_toda_fuente_tiene_quien_la_lea(self):
+        """Una fuente sin especialidad recolectaria piezas que nadie informa."""
+        from src.shared.enums import ESPECIALIDAD_DE
+
+        assert set(ESPECIALIDAD_DE) == {r.value for r in Recolector}
+        assert set(ESPECIALIDAD_DE.values()) <= {e.value for e in Especialidad}
+
+    def test_los_valores_de_v4_siguen_validos(self):
+        """Las filas que ya hay en `consultas` e `informes` deben pasar el CHECK nuevo."""
+        for v in ("maps", "web", "redes", "sitio"):
+            assert v in {r.value for r in Recolector}
+            assert v in {e.value for e in Especialidad}
+
+    def test_caben_en_la_columna(self):
+        assert max(len(r.value) for r in Recolector) <= 20
+        assert max(len(e.value) for e in Especialidad) <= 20
