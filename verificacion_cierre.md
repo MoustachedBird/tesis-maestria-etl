@@ -499,6 +499,10 @@ GROUP BY mn.estrato ORDER BY mn.estrato;
 5. **Places API** (`docs/apis_externas.md` §2, vía gratuita): integrarla
    como fuente `maps_api` y correr el piloto de 40 con y sin ella. Si baja
    claramente los indeterminados, entra en la muestra final.
+5b. **La calibración del instrumento** (§8): los 40 del piloto etiquetados
+   a mano, identidad verificada en código (v8) y la elección, con esos
+   números, entre decisor, juez y sostenidos. Sin esto el agente no es un
+   instrumento: con v6 el decisor y el juez coinciden en menos de la mitad.
 6. **El código de §4.4**: cuotas por estrato, exclusión de los pilotos,
    tirada sistemática por geografía, la tabla de revisión humana y las
    métricas con intervalo (Wilson, reponderación, Manski, corrección por
@@ -513,3 +517,84 @@ GROUP BY mn.estrato ORDER BY mn.estrato;
     se mueve el umbral de meses o se agregan señales (local reocupado como
     condición, no como estrato) y se verifica otra muestra.
 11. **Solo entonces** la cohorte propagada (§2).
+
+
+---
+
+## 8. Lo que dijo el piloto v6 y la calibración (2026-11-21)
+
+### 8.1 Los números
+
+`v5-piloto`, 40 negocios (10 por estrato), agente `qwen3:32b/v6`: el
+planificador concilia nombre, domicilio y teléfono; once fuentes; juez en
+línea. 2 h 49 min, **3.9 min por negocio** (mediana 3.4, p90 6.4; el juez,
+0.3), ninguno fallido.
+
+| Estrato | Determinados | Cerrado confirmado | Activo encontrado | |
+|---|---|---|---|---|
+| `cerrado\|reocupado` | 7 / 10 | 2 | 5 | precisión 29% |
+| `cerrado\|no_reocupado` | 3 / 10 | 0 | 3 | precisión 0% |
+| `activo\|intermitente` | 6 / 10 | 2 | 4 | 33% de "activos" ya cerrados |
+| `activo\|continuo` | 4 / 10 | 2 | 2 | 50% |
+
+- **Indeterminados: 20 de 40 (50%).**
+- **Juez: sostuvo 12 de 40 (30%); acuerdo a ciegas 19 de 40 (48%).**
+
+### 8.2 Por qué todavía no dicen nada de la regla
+
+Al pie de la letra, la regla fallaría casi siempre (8 de cada 10 "cerrados"
+de gold, activos). No se puede leer así:
+
+1. **Tamaño.** 2 de 7 tiene un IC95% de ~8% a ~64%.
+2. **El instrumento no es confiable.** Si el decisor y el juez coinciden en
+   menos de la mitad de los casos, no se sabe cuál acierta: falta una
+   referencia externa.
+3. **Un sesgo de identidad probable, que apunta en la dirección del
+   resultado.** `cerrado|reocupado` significa que **otro negocio ocupa
+   ahora el local**: si el agente busca por domicilio y encuentra al nuevo
+   ocupante activo, le atribuye su actividad al original. Del lado de los
+   activos, un homónimo con "Cerrado permanentemente" vuelve "cerrado" a un
+   negocio abierto. Los dos errores empujan la precisión hacia abajo.
+
+### 8.3 La calibración, en cuatro pasos
+
+**1. Referencia humana: los 40 del piloto, etiquetados a mano.** Para cada
+negocio, con las URLs de su expediente: estado real (activo, cerrado, no se
+puede saber) y si la evidencia que citó el agente era de ESTE negocio.
+Necesita una tabla `verificacion.revisiones` y un comando que exporte, por
+negocio, nombre, domicilio, veredicto del agente, veredicto del juez y los
+enlaces. Da la exactitud real del decisor y del juez, y es la base de la
+corrección por Se/Sp de §4.4, que de todos modos hace falta.
+
+**2. Identidad verificada en código (v8),** si la revisión confirma el
+sesgo de §8.2. Igual que ya se hace en OSM, el código mide y el modelo
+decide con la medida a la vista:
+
+- **Distancia**: las URLs de las fichas de Maps traen coordenadas
+  (`/@20.124,-98.758`); el código escribe en la pieza la distancia al punto
+  del DENUE ("ficha a 35 m", "a 4.2 km").
+- **Giro**: el especialista compara la actividad de la ficha con la del
+  DENUE ("Pastelería" contra "Dulcería") y lo dice.
+- **Regla de identidad**: `identificado = si` exige al menos dos
+  coincidencias independientes (nombre + domicilio, coordenadas o
+  teléfono), validado en código como las citas.
+- **Para todos los negocios** (no solo los de local reocupado, para no
+  revelar la hipótesis): "si en el domicilio opera un negocio con otro
+  nombre o giro, es OTRO negocio; su actividad no prueba que este siga".
+
+**3. Places API por la vía gratuita** (`docs/apis_externas.md` §2):
+`businessStatus` y coordenadas estructuradas atacan a la vez los
+indeterminados y la identidad (distancia exacta).
+
+**4. Elegir el instrumento con la referencia.** Contra las etiquetas
+humanas se mide la exactitud del decisor solo, del juez solo y de los
+sostenidos. Se elige la mejor, se congela (`AGENTE_VERSION`) y solo
+entonces se corre la muestra de §4.4. Si el juez acierta más, decide el
+juez, o se usa el filtro de sostenidos con su propia tasa de cobertura.
+
+### 8.4 Mientras tanto
+
+v7 (plataformas solo fichas, sin "NINGUNO", cita mal copiada con pista,
+lugar razonado por el planificador, logs completos) corre sobre los mismos
+40: `metricas --agente qwen3:32b/v7` dirá si esos arreglos movieron el
+acuerdo con el juez antes de tocar la identidad.
