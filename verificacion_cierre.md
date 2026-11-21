@@ -270,6 +270,31 @@ Si el piloto da `r` > 0.5 en los cerrados, el estrato se amplía, o se
 integra Places (`docs/apis_externas.md` §2) para bajar `r` antes de ampliar.
 Las cuotas se fijan en función del `r` del piloto, no al revés.
 
+#### ¿Es representativa del país?
+
+**Sí, para θ y la tasa de falsos negativos nacionales; no, para cifras por
+estado.** Lo que hace representativa a una muestra no es su tamaño sino que
+cada negocio de la población tenga una probabilidad conocida y mayor que cero
+de salir. Aquí la tiene: tirada aleatoria dentro de cada estrato, con el
+peso de cada estrato conocido para reponderar. El tamaño solo decide el
+margen: 2,000 dan ±3 puntos en la cifra nacional de θ.
+
+Tres precisiones que van en el capítulo de método:
+
+- **El país del que se habla es la población de §4.1**, no todo el DENUE:
+  negocios de la cohorte con CLEE oficial (2021 en adelante), con nombre,
+  con municipio y sin cluster sospechoso. A los cortes viejos y a la
+  identidad propagada no se extrapola (§2).
+- **Representativa no es lo mismo que verificable.** La inferencia nacional
+  vale para los determinados bajo el supuesto de que faltan al azar dentro
+  del estrato, y por eso van al lado las cotas de Manski.
+- **Por estado solo se describe.** Cada estado aparece en proporción a su
+  tamaño, pero los chicos tendrán decenas de negocios: alcanza para ver si
+  la verificabilidad o la precisión cambian con el territorio, no para dar
+  un intervalo por estado. Una estimación por estado (±10 puntos) pediría
+  ~100–200 determinados por estado y estrato: de 13,000 a 26,000 negocios,
+  entre 4 y 8 semanas de corrida.
+
 #### Representatividad geográfica
 
 No se estima por estado (32 × 4 celdas no caben en ningún presupuesto), pero
@@ -468,8 +493,23 @@ GROUP BY mn.estrato ORDER BY mn.estrato;
 3. **El agente**: `agente verificar --limite 1`, luego `--limite 10`, luego
    los 400 (`ARRANQUE.md` §11). Con los diez se ajusta el prompt de §5.2 y
    sube `AGENTE_VERSION` antes de gastar en los 400.
-4. **Las métricas** de §6 y la decisión: si la precisión de `cerrado` es
-   defendible, la regla pasa al capítulo de método con su intervalo; si no,
-   se mueve el umbral o se agregan señales (local reocupado como condición,
-   no como estrato) y se verifica otra muestra.
-5. **Solo entonces** la cohorte propagada (§2).
+4. **Las métricas** de §6 sobre los pilotos: la tasa de indeterminados por
+   estrato, el tiempo por negocio y el acuerdo con el juez. Fijan las
+   cuotas de §4.4.
+5. **Places API** (`docs/apis_externas.md` §2, vía gratuita): integrarla
+   como fuente `maps_api` y correr el piloto de 40 con y sin ella. Si baja
+   claramente los indeterminados, entra en la muestra final.
+6. **El código de §4.4**: cuotas por estrato, exclusión de los pilotos,
+   tirada sistemática por geografía, la tabla de revisión humana y las
+   métricas con intervalo (Wilson, reponderación, Manski, corrección por
+   Se/Sp).
+7. **Antes de correr**: el umbral de la regla de decisión, fijado con el
+   asesor y escrito aquí; el agente congelado en una `AGENTE_VERSION`.
+8. **La muestra final** (~2,000, §4.4), en una sola corrida, sin tocar el
+   agente a la mitad.
+9. **La revisión a mano** de los 200 de validación y la corrección de θ.
+10. **La decisión**: si el límite inferior del IC95% de θ corregida alcanza
+    el umbral, la regla pasa al capítulo de método con su intervalo; si no,
+    se mueve el umbral de meses o se agregan señales (local reocupado como
+    condición, no como estrato) y se verifica otra muestra.
+11. **Solo entonces** la cohorte propagada (§2).
