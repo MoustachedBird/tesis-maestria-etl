@@ -1208,10 +1208,13 @@ tarda un negocio, para dimensionar la muestra siguiente).
 ### El equipo: un especialista por grupo de fuentes, un decisor, un juez
 
 ```
-planificador (LLM)                       con qué nombre, domicilio y teléfono buscar: el campo
-                                         consistente en todos los cortes se usa tal cual; el que
-                                         varía lo decide el modelo viendo cada variante con sus
-                                         cortes, con más peso a lo reciente; sin inventar palabras
+planificador (LLM)                       con qué nombres, domicilios y teléfono buscar. Nombre y
+                                         teléfono consistentes se usan tal cual; si varían decide
+                                         el modelo, con más peso a lo reciente. El domicilio
+                                         SIEMPRE lo lee el modelo: concilia variantes ("NO.
+                                         VEINTE" = "20") y lo escribe como Google Maps, con
+                                         vialidad, colonia, CP y entre calles; sin inventar calles
+                                         ni números
 por cada grupo, en el orden de `Especialidad` (mapas -> buscadores -> redes ->
 plataformas -> huella digital -> registros -> fachada):
     recolección base, en código          mismas consultas para todos, fuente por fuente
@@ -2276,7 +2279,7 @@ que siguen son los cambios reales de esquema desde entonces:
 | `b0012fuentes_y_especialidades` | v5: `consultas.recolector` es la fuente concreta (`Recolector`, ~20 valores) e `informes.especialista` el grupo que la lee (`Especialidad`); recrea ambos `CHECK` y los ensancha a VARCHAR(20). Agrega `consultas.imagen_ruta`. Los valores de v4 siguen siendo válidos |
 | `b0013nombres_buscados` | v6: `veredictos.nombres_buscados` (JSONB): con qué nombres buscó el planificador y por qué. Solo aditiva |
 | `b0014alias_en_la_muestra` | `muestra_negocios.alias` (los `nom_estab` distintos, el más reciente primero), `nombres_elegidos` y `nombres_elegidos_por` (lo último que eligió el planificador). Rellena las muestras existentes donde está NULL |
-| `b0015alias_de_cada_campo` | `muestra_negocios.alias_domicilios`, `alias_telefonos`, `alias_razones_sociales`, `alias_sitios`, `alias_correos` (el más reciente primero) y `domicilio_elegido`, `telefono_elegido`. Rellena donde está NULL |
+| `b0015alias_de_cada_campo` | `muestra_negocios.alias_domicilios`, `alias_telefonos`, `alias_razones_sociales`, `alias_sitios`, `alias_correos` (el más reciente primero) y `domicilios_elegidos`, `telefono_elegido`. Rellena donde está NULL |
 
 El DDL se genera desde el metadata del ORM (`src.shared.db.models`), no con
 `op.create_table` a mano, así que **la migración no puede desincronizarse
@@ -2409,6 +2412,7 @@ OLLAMA_CONTEXTO_TOKENS=32768
 OLLAMA_PENSAR=false
 AGENTE_VERSION=v6
 AGENTE_MAX_NOMBRES=3
+AGENTE_MAX_DOMICILIOS=2
 AGENTE_FUENTES=maps,osm,web,bing,redes,plataformas,sitio,wayback,common_crawl,dominio,sat
 AGENTE_PAUSA_SEGUNDOS=3
 AGENTE_MAX_BLOQUEOS=3

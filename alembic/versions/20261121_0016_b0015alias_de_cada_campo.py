@@ -7,10 +7,11 @@ domicilio y el teléfono con que el planificador (v6) buscó al negocio:
 
     alias_domicilios        alias_telefonos        alias_razones_sociales
     alias_sitios            alias_correos          (el más reciente primero)
-    domicilio_elegido       telefono_elegido       (lo último del planificador)
+    domicilios_elegidos     telefono_elegido       (lo último del planificador)
 
 Los alias se rellenan para las muestras que ya existen desde
-`silver.establecimientos` por `clee` (indexado); los elegidos, desde el
+`silver.establecimientos` por `clee` (indexado), con el domicilio completo
+(tipo de vialidad y de asentamiento incluidos); los elegidos, desde el
 veredicto más reciente con `nombres_buscados`. Solo escribe donde la columna
 está en NULL: idempotente, no cambia nada que ya hubiera.
 
@@ -29,11 +30,16 @@ down_revision: str | Sequence[str] | None = "b0014alias_en_la_muestra"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_HECHOS = """silver.establecimientos e
+                      LEFT JOIN silver.denue_tipos_vialidad tv ON tv.id = e.tipo_vial_id
+                      LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id"""
+"""Copia congelada de `insumo.FROM_HECHOS`: una migración no cambia si cambia el código."""
+
 _DOMICILIO = (
-    "concat_ws(' ', NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
-    "NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
+    "concat_ws(' ', NULLIF(tv.tipo_vial, ''), NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
+    "NULLIF(ta.tipo_asent, ''), NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
 )
-"""Copia congelada de `insumo._DOMICILIO`: una migración no cambia si cambia el código."""
+"""Copia congelada de `insumo._DOMICILIO`."""
 
 _ALIAS = {
     "alias_domicilios": _DOMICILIO,
@@ -50,22 +56,25 @@ def upgrade() -> None:
     s = "verificacion"
     for columna in _ALIAS:
         op.execute(f"ALTER TABLE {s}.muestra_negocios ADD COLUMN IF NOT EXISTS {columna} TEXT[]")
-    for columna in ("domicilio_elegido", "telefono_elegido"):
-        op.execute(f"ALTER TABLE {s}.muestra_negocios ADD COLUMN IF NOT EXISTS {columna} TEXT")
+    op.execute(
+        f"ALTER TABLE {s}.muestra_negocios ADD COLUMN IF NOT EXISTS domicilios_elegidos TEXT[]"
+    )
+    op.execute(f"ALTER TABLE {s}.muestra_negocios ADD COLUMN IF NOT EXISTS telefono_elegido TEXT")
     for columna, expr in _ALIAS.items():
         op.execute(f"""
             UPDATE {s}.muestra_negocios mn
             SET {columna} = (
                 SELECT array_agg(x.v ORDER BY x.ultimo DESC, x.v)
                 FROM (SELECT {expr} AS v, max(e.period) AS ultimo
-                      FROM silver.establecimientos e
+                      FROM {_HECHOS}
                       WHERE e.clee = mn.clee AND {expr} <> ''
                       GROUP BY 1) x)
             WHERE mn.{columna} IS NULL
         """)
     op.execute(f"""
         UPDATE {s}.muestra_negocios mn
-        SET domicilio_elegido = v.nombres_buscados ->> 'domicilio',
+        SET domicilios_elegidos = ARRAY(
+                SELECT jsonb_array_elements_text(v.nombres_buscados -> 'domicilios')),
             telefono_elegido = v.nombres_buscados ->> 'telefono'
         FROM (
             SELECT DISTINCT ON (muestra_id, clee) muestra_id, clee, nombres_buscados
@@ -74,11 +83,11 @@ def upgrade() -> None:
             ORDER BY muestra_id, clee, verificado_en DESC
         ) v
         WHERE mn.muestra_id = v.muestra_id AND mn.clee = v.clee
-          AND mn.domicilio_elegido IS NULL AND mn.telefono_elegido IS NULL
+          AND mn.domicilios_elegidos IS NULL AND mn.telefono_elegido IS NULL
     """)
     op.execute(
         f"COMMENT ON COLUMN {s}.veredictos.nombres_buscados IS "
-        "'{nombres, domicilio, telefono, consistentes, razonamiento, automatica}: con que datos se "
+        "'{nombres, domicilios, telefono, consistentes, razonamiento, automatica}: con que datos se "
         "busco al negocio y por que, segun el planificador (v6+). NULL en veredictos anteriores'"
     )
     print(f"   {s}.muestra_negocios: alias de domicilio, telefono, razon social, sitio y correo")
@@ -86,5 +95,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Quita las columnas."""
-    for columna in (*_ALIAS, "domicilio_elegido", "telefono_elegido"):
+    for columna in (*_ALIAS, "domicilios_elegidos", "telefono_elegido"):
         op.execute(f"ALTER TABLE verificacion.muestra_negocios DROP COLUMN IF EXISTS {columna}")

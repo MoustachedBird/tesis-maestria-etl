@@ -306,7 +306,9 @@ class TestElInsumo:
             and n.correos == ["paco@x.mx"]
             and n.sitios == ["tacospaco.mx"]
         )
-        assert n.domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+        # El domicilio completo: con el tipo de vialidad y de asentamiento si el DENUE los trae.
+        assert len(n.domicilios) == 1 and "VALLARTA 1234" in n.domicilios[0]
+        assert "AMERICANA 44160" in n.domicilios[0]
         # Cada variante con los cortes en que aparecio, en el mismo orden que la lista.
         assert [v for v, _ in n.variantes["nombre"]] == n.nombres
         assert [v for v, _ in n.variantes["domicilio"]] == n.domicilios
@@ -332,7 +334,7 @@ class TestElInsumo:
                 r.planeacion = Planeacion(
                     ["Tacos Paco", "Taquería Don Paco"],
                     "el más repetido",
-                    domicilio="AV VALLARTA 1234 AMERICANA 44160",
+                    domicilios=["Avenida Vallarta 1234, Americana, 44160"],
                 )
                 return r
 
@@ -341,7 +343,7 @@ class TestElInsumo:
             fila = conn.execute(
                 text(
                     "SELECT alias, alias_domicilios, alias_telefonos, nombres_elegidos, "
-                    "domicilio_elegido, nombres_elegidos_por "
+                    "domicilios_elegidos, nombres_elegidos_por "
                     "FROM verificacion.muestra_negocios WHERE clee = 'AC0'"
                 )
             ).one()
@@ -349,10 +351,10 @@ class TestElInsumo:
                 text("SELECT nombres_buscados FROM verificacion.veredictos WHERE clee = 'AC0'")
             ).scalar_one()
         assert set(fila.alias) == {"TACOS PACO", "TAQUERIA DON PACO"}
-        assert fila.alias_domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+        assert len(fila.alias_domicilios) == 1 and "VALLARTA 1234" in fila.alias_domicilios[0]
         assert fila.alias_telefonos == ["3312345678"]
         assert fila.nombres_elegidos == ["Tacos Paco", "Taquería Don Paco"]
-        assert fila.domicilio_elegido == "AV VALLARTA 1234 AMERICANA 44160"
+        assert fila.domicilios_elegidos == ["Avenida Vallarta 1234, Americana, 44160"]
         assert fila.nombres_elegidos_por == "falso:1b/v4"
         assert veredicto["razonamiento"] == "el más repetido"
 

@@ -236,8 +236,12 @@ class MuestraNegocio(Base):
     alias_domicilios: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), comment="Los domicilios distintos del DENUE, el mas reciente primero"
     )
-    domicilio_elegido: Mapped[str | None] = mapped_column(
-        Text, comment="El domicilio con que lo busco el planificador la ultima vez"
+    domicilios_elegidos: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text),
+        comment=(
+            "Los domicilios con que lo busco el planificador la ultima vez: escritos para "
+            "encontrarlo en linea (numeros en digitos, sin abreviaturas), el mejor primero"
+        ),
     )
     alias_telefonos: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), comment="Los telefonos distintos del DENUE, el mas reciente primero"
@@ -340,7 +344,7 @@ class Veredicto(Base):
     nombres_buscados: Mapped[dict | None] = mapped_column(
         JSONB,
         comment=(
-            "{nombres, domicilio, telefono, consistentes, razonamiento, automatica}: con que "
+            "{nombres, domicilios, telefono, consistentes, razonamiento, automatica}: con que "
             "datos se busco al negocio y por que, segun el planificador (v6+). NULL antes"
         ),
     )

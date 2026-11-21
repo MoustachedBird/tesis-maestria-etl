@@ -597,7 +597,9 @@ def test_el_equipo_recolecta_informa_por_fuente_y_decide():
         FuenteFija("sitio", []),  # nada que leer: informe automatico, sin modelo
     ]
     cliente = ClienteFalso(
-        respuesta(elegir(["TACOS PACO", "DON PACO"])),
+        respuesta(
+            elegir(["TACOS PACO", "DON PACO"], domicilios=["Av Vallarta 1234 Americana 44160"])
+        ),
         respuesta(informar()),
         respuesta(
             informar(
@@ -640,6 +642,8 @@ def elegir(
 
 @pytest.mark.unit
 class TestElPlanificador:
+    DOM = ["Av Vallarta 1234, Americana, 44160"]
+
     def _negocio(self, **extra):
         campos = dict(
             nombre="EL POLLO FELIZ",
@@ -656,19 +660,23 @@ class TestElPlanificador:
         campos.update(extra)
         return negocio(**campos)
 
-    def test_el_modelo_decide_lo_que_varia_y_ve_cada_variante_con_sus_cortes(self):
-        cliente = ClienteFalso(respuesta(elegir(["Pollo Feliz", "Rosticería Pollo Feliz"])))
+    def test_decide_lo_que_varia_y_siempre_el_domicilio(self):
+        cliente = ClienteFalso(
+            respuesta(elegir(["Pollo Feliz", "Rosticería Pollo Feliz"], domicilios=self.DOM))
+        )
         p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(self._negocio())
         assert p.nombres == ["Pollo Feliz", "Rosticería Pollo Feliz"] and not p.automatica
-        # Domicilio y teléfono fueron consistentes: no los decidió el modelo.
-        assert p.consistentes == ["domicilio", "telefono"]
-        assert p.domicilio == "AV VALLARTA 1234 AMERICANA 44160" and p.telefono == "3312345678"
+        assert p.domicilios == self.DOM
+        # Solo el teléfono fue consistente; el domicilio lo lee el modelo aunque no varíe.
+        assert p.consistentes == ["telefono"] and p.telefono == "3312345678"
         visto = cliente.conversaciones[0][1]["content"]
-        assert "«POLLO FELIZ» (2024-11, 2025-05)" in visto and "DECIDE: nombres." in visto
+        assert (
+            "«POLLO FELIZ» (2024-11, 2025-05)" in visto and "DECIDE: nombres, domicilios." in visto
+        )
 
-    def test_todo_consistente_no_llama_al_modelo(self):
+    def test_todo_consistente_y_sin_domicilio_no_llama_al_modelo(self):
         cliente = ClienteFalso()
-        n = negocio(nombre="TACOS PACO", nombres=["TACOS PACO", "Tacos  Paco"])
+        n = negocio(nombre="TACOS PACO", nombres=["TACOS PACO", "Tacos  Paco"], domicilios=[])
         p = Planificador(cliente, max_nombres=3, max_intentos=2).elegir(n)
         assert p.automatica and cliente.conversaciones == []
         assert p.nombres == ["TACOS PACO"] and set(p.consistentes) == {
@@ -677,16 +685,17 @@ class TestElPlanificador:
             "telefono",
         }
 
-    def test_no_puede_inventar_palabras(self):
+    def test_no_puede_inventar_palabras_en_el_nombre(self):
         cliente = ClienteFalso(
-            respuesta(elegir(["Pollos Felices del Centro"])), respuesta(elegir(["Pollo Feliz"]))
+            respuesta(elegir(["Pollos Felices del Centro"], domicilios=self.DOM)),
+            respuesta(elegir(["Pollo Feliz"], domicilios=self.DOM)),
         )
         p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(self._negocio())
         assert p.nombres == ["Pollo Feliz"]
         assert any("palabras que el DENUE no publicó" in t for t in cliente.tools())
 
     def test_puede_usar_palabras_de_la_razon_social(self):
-        cliente = ClienteFalso(respuesta(elegir(["Rosticerías Felices"])))
+        cliente = ClienteFalso(respuesta(elegir(["Rosticerías Felices"], domicilios=self.DOM)))
         p = Planificador(cliente, max_nombres=3, max_intentos=1).elegir(self._negocio())
         assert p.nombres == ["Rosticerías Felices"]
 
@@ -695,42 +704,68 @@ class TestElPlanificador:
             # "POLLO FELIZ" y "Feliz Pollo" son el mismo que "Pollo Feliz": quedan 3 distintos.
             respuesta(
                 elegir(
-                    ["Pollo Feliz", "POLLO FELIZ", "Feliz Pollo", "El Pollo Feliz", "Rosticeria"]
+                    ["Pollo Feliz", "POLLO FELIZ", "Feliz Pollo", "El Pollo Feliz", "Rosticeria"],
+                    domicilios=self.DOM,
                 )
             ),
-            respuesta(elegir(["Pollo Feliz", "El Pollo Feliz"])),
+            respuesta(elegir(["Pollo Feliz", "El Pollo Feliz"], domicilios=self.DOM)),
         )
         p = Planificador(cliente, max_nombres=2, max_intentos=3).elegir(self._negocio())
         assert p.nombres == ["Pollo Feliz", "El Pollo Feliz"]
         assert any("el máximo es 2" in t for t in cliente.tools())
 
-    def test_un_domicilio_que_vario_lo_decide_el_modelo_sin_inventar(self):
-        n = self._negocio(
-            nombre="TACOS PACO",
-            nombres=["TACOS PACO"],
-            domicilios=["AV MEXICO 55 LADRON DE GUEVARA 44600", "AV VALLARTA 1234 AMERICANA 44160"],
-            variantes={},
+    def _con_domicilios(self, domicilios, **extra):
+        campos = dict(
+            nombre="TACOS PACO", nombres=["TACOS PACO"], domicilios=domicilios, variantes={}
         )
-        malo = elegir(domicilio="AV MEXICO 55 COLONIA NUEVA")
-        bueno = elegir(
-            domicilio="AV MEXICO 55 LADRON DE GUEVARA 44600",
-            razonamiento="Se mudó: el más reciente es el de Av México.",
+        campos.update(extra)
+        return self._negocio(**campos)
+
+    def test_concilia_un_numero_escrito_con_letra(self):
+        n = self._con_domicilios(
+            ["CALLE FRANCISCO NUMERO 20 COLONIA CENTRO 37630", "CALLE FRANCISCO NO. VEINTE CENTRO"]
         )
-        cliente = ClienteFalso(respuesta(malo), respuesta(bueno))
+        cliente = ClienteFalso(
+            respuesta(elegir(domicilios=["Calle Francisco 20, Colonia Centro, 37630"]))
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=1).elegir(n)
+        assert p.domicilios == ["Calle Francisco 20, Colonia Centro, 37630"]
+
+    def test_puede_pasar_a_digitos_un_numero_que_solo_esta_con_letra(self):
+        n = self._con_domicilios(["C. FRANCISCO NO. CIENTO VEINTE Y DOS COL. CENTRO"])
+        cliente = ClienteFalso(
+            respuesta(elegir(domicilios=["Calle Francisco 122, Colonia Centro"]))
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=1).elegir(n)
+        assert p.domicilios == ["Calle Francisco 122, Colonia Centro"]
+
+    def test_no_puede_inventar_calle_ni_numero(self):
+        n = self._con_domicilios(["CALLE FRANCISCO NO. VEINTE CENTRO"])
+        cliente = ClienteFalso(
+            respuesta(elegir(domicilios=["Calle Hidalgo 21, Centro"])),
+            respuesta(elegir(domicilios=["Calle Francisco 20, Centro"])),
+        )
         p = Planificador(cliente, max_nombres=3, max_intentos=3).elegir(n)
-        assert p.domicilio == "AV MEXICO 55 LADRON DE GUEVARA 44600"
-        assert p.nombres == ["TACOS PACO"] and "nombre" in p.consistentes
-        assert any(
-            "el domicilio usa palabras que el DENUE no publicó" in t for t in cliente.tools()
+        assert p.domicilios == ["Calle Francisco 20, Centro"]
+        rechazo = next(t for t in cliente.tools() if "no están en los domicilios" in t)
+        assert "HIDALGO" in rechazo and "21" in rechazo
+
+    def test_la_esquina_puede_salir_de_las_entre_calles(self):
+        n = self._con_domicilios(
+            ["CALLE FRANCISCO 20 CENTRO"],
+            variantes={"entre_calles": [("CALLE HIDALGO Y CALLE JUAREZ", ["2025-05"])]},
         )
+        cliente = ClienteFalso(
+            respuesta(
+                elegir(domicilios=["Calle Francisco 20, Centro", "Calle Francisco esquina Hidalgo"])
+            )
+        )
+        p = Planificador(cliente, max_nombres=3, max_intentos=1).elegir(n)
+        assert p.domicilios[1] == "Calle Francisco esquina Hidalgo"
+        assert "Entre calles" in cliente.conversaciones[0][1]["content"]
 
     def test_el_telefono_tiene_que_ser_uno_publicado(self):
-        n = self._negocio(
-            nombre="TACOS PACO",
-            nombres=["TACOS PACO"],
-            telefonos=["33 1234 5678", "3398765432"],
-            variantes={},
-        )
+        n = self._con_domicilios([], telefonos=["33 1234 5678", "3398765432"])
         cliente = ClienteFalso(
             respuesta(elegir(telefono="5555555555")), respuesta(elegir(telefono="(33) 1234-5678"))
         )
@@ -741,6 +776,17 @@ class TestElPlanificador:
     def test_si_no_elige_se_busca_con_lo_mas_reciente(self):
         p = Planificador(ClienteFalso(), max_nombres=3, max_intentos=2).elegir(self._negocio())
         assert p.automatica and p.nombres == ["EL POLLO FELIZ"]
+        assert p.domicilios == ["AV VALLARTA 1234 AMERICANA 44160"]
+
+
+@pytest.mark.unit
+def test_los_numeros_escritos_con_letra():
+    from src.agents.survival.equipo import _numeros
+
+    assert "20" in _numeros("CALLE FRANCISCO NO. VEINTE")
+    assert "122" in _numeros("NUMERO CIENTO VEINTE Y DOS")
+    assert "2020" in _numeros("DOS MIL VEINTE")
+    assert "20" in _numeros("CALLE 020")
 
 
 # ----- juez -----

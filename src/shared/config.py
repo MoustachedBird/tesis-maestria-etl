@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     # va a las consultas especificas (domicilio, telefono), los demas se buscan
     # ademas en Maps y en los buscadores. El criterio lo decide el modelo.
     AGENTE_MAX_NOMBRES: int = 3
+    # Cuantos domicilios de busqueda puede escribir el planificador: el actual
+    # escrito como en Google Maps (numeros en digitos, sin abreviaturas) y, si
+    # se mudo o la calle es poco buscable, otra forma o el anterior.
+    AGENTE_MAX_DOMICILIOS: int = 2
     # Las fuentes que se consultan, por nombre de `Recolector`, separadas por
     # coma. El orden importa solo dentro de un especialista; entre grupos
     # manda el orden fijo de `Especialidad` (los buscadores van antes que

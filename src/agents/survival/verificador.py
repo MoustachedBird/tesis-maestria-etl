@@ -106,6 +106,7 @@ class Equipo:
         max_intentos: int,
         presupuesto: int | None = None,
         max_nombres: int = 3,
+        max_domicilios: int = 2,
     ):
         """
         Args:
@@ -117,6 +118,7 @@ class Equipo:
             presupuesto: caracteres de piezas que caben en el contexto de un
                 especialista (`recoleccion.presupuesto_de`); None = sin tope.
             max_nombres: cuántos nombres de búsqueda puede elegir el planificador.
+            max_domicilios: cuántos domicilios de búsqueda puede escribir.
         """
         self.fuentes = fuentes
         self.grupos = agrupar(fuentes)
@@ -129,7 +131,10 @@ class Equipo:
         )
         self.decisor = Decisor(cliente, max_intentos=max_intentos)
         self.planificador = Planificador(
-            cliente, max_nombres=max_nombres, max_intentos=max_intentos
+            cliente,
+            max_nombres=max_nombres,
+            max_intentos=max_intentos,
+            max_domicilios=max_domicilios,
         )
 
     def verificar(self, n: insumo.Negocio) -> Resultado:
@@ -138,12 +143,12 @@ class Equipo:
         logger.info("   ── 0 🏷  planificador: con qué nombre, domicilio y teléfono buscar")
         planeacion = self.planificador.elegir(n)
         n.nombres_busqueda = planeacion.nombres
-        n.domicilio_busqueda = planeacion.domicilio
+        n.domicilios_busqueda = planeacion.domicilios
         n.telefono_busqueda = planeacion.telefono
         marca = " (automático)" if planeacion.automatica else ""
         logger.info(
             f"      🏷  nombres: {' | '.join(planeacion.nombres) or '—'} · domicilio: "
-            f"{planeacion.domicilio or '—'} · teléfono: {planeacion.telefono or '—'}{marca}"
+            f"{' | '.join(planeacion.domicilios) or '—'} · teléfono: {planeacion.telefono or '—'}{marca}"
         )
         logger.info(
             f"      🏷  consistentes: {', '.join(planeacion.consistentes) or 'ninguno'} · "
@@ -219,13 +224,13 @@ def guardar(conn: Connection, r: Resultado) -> str:
         conn.execute(
             text("""
                 UPDATE verificacion.muestra_negocios
-                SET nombres_elegidos = :nombres, domicilio_elegido = :domicilio,
+                SET nombres_elegidos = :nombres, domicilios_elegidos = :domicilios,
                     telefono_elegido = :telefono, nombres_elegidos_por = :agente
                 WHERE muestra_id = :id AND clee = :clee
             """),
             {
                 "nombres": r.planeacion.nombres,
-                "domicilio": r.planeacion.domicilio,
+                "domicilios": r.planeacion.domicilios,
                 "telefono": r.planeacion.telefono,
                 "agente": r.agente,
                 "id": r.muestra_id,

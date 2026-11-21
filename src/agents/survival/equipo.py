@@ -63,7 +63,12 @@ MIN_TEXTO = 20
 # ----- planificador: con qué datos buscar -----
 
 CAMPOS_DE_BUSQUEDA = ("nombre", "domicilio", "telefono")
-"""Los campos que entran a las consultas y que el planificador concilia si varían entre cortes.
+"""Los campos que entran a las consultas y que el planificador concilia.
+
+El nombre y el teléfono solo si varían entre cortes. El domicilio SIEMPRE que
+haya uno: aunque todos los cortes digan lo mismo, puede estar abreviado o con
+el número escrito con letra, y escribirlo como en Google Maps es lo que hace
+que se encuentre.
 
 Razón social, sitio y correo también varían, pero se usan TODOS (el SAT,
 la lectura de los sitios, el registro de los dominios), del más reciente al
@@ -77,7 +82,7 @@ class Planeacion:
 
     nombres: list[str]
     razonamiento: str
-    domicilio: str | None = None
+    domicilios: list[str] = field(default_factory=list)
     telefono: str | None = None
     consistentes: list[str] = field(default_factory=list)
     """Los campos que dijeron lo mismo en todos los cortes: esos no los decidió el modelo."""
@@ -88,7 +93,7 @@ class Planeacion:
         """Para `veredictos.nombres_buscados`."""
         return {
             "nombres": self.nombres,
-            "domicilio": self.domicilio,
+            "domicilios": self.domicilios,
             "telefono": self.telefono,
             "consistentes": self.consistentes,
             "razonamiento": self.razonamiento,
@@ -111,23 +116,28 @@ class Planificador:
       estar en alguna variante del DENUE, y el teléfono ser uno publicado.
     """
 
-    def __init__(self, cliente: Any, *, max_nombres: int, max_intentos: int):
+    def __init__(
+        self, cliente: Any, *, max_nombres: int, max_intentos: int, max_domicilios: int = 2
+    ):
         """
         Args:
             cliente: `OllamaCliente` o cualquier objeto con `.chat(mensajes, herramientas)`.
             max_nombres: cuántos nombres puede elegir (`AGENTE_MAX_NOMBRES`).
             max_intentos: vueltas para producir una elección válida.
+            max_domicilios: cuántos domicilios de búsqueda puede escribir
+                (`AGENTE_MAX_DOMICILIOS`).
         """
         self.cliente = cliente
         self.max_nombres = max_nombres
         self.max_intentos = max_intentos
+        self.max_domicilios = max_domicilios
 
     def elegir(self, n: Negocio) -> Planeacion:
         """Los datos de búsqueda; lo que el modelo no resuelva queda en el valor más reciente."""
         inicio = time.monotonic()
         recientes = {
             "nombre": nombre_de(n),
-            "domicilio": n.domicilios[0] if n.domicilios else None,
+            "domicilio": n.domicilios[:1],
             "telefono": n.telefonos[0] if n.telefonos else None,
         }
         valores = {
@@ -136,13 +146,17 @@ class Planificador:
             "telefono": n.telefonos,
             "razon_social": n.razones_sociales,
         }
-        consistentes = [c for c in CAMPOS_DE_BUSQUEDA if len(_distintos(c, valores[c])) <= 1]
+        consistentes = [
+            c
+            for c in CAMPOS_DE_BUSQUEDA
+            if len(_distintos(c, valores[c])) <= 1 and not (c == "domicilio" and n.domicilios)
+        ]
         a_decidir = [c for c in CAMPOS_DE_BUSQUEDA if c not in consistentes]
 
         def plan_base(razon: str, automatica: bool) -> Planeacion:
             return Planeacion(
                 nombres=[recientes["nombre"]] if recientes["nombre"] else [],
-                domicilio=recientes["domicilio"],
+                domicilios=recientes["domicilio"],
                 telefono=recientes["telefono"],
                 consistentes=consistentes,
                 razonamiento=razon,
@@ -155,12 +169,23 @@ class Planificador:
                 "Nombre, domicilio y teléfono fueron consistentes en todos los cortes.", True
             )
 
+        contexto = " ".join(
+            [
+                *n.domicilios,
+                *(v for v, _ in n.variantes.get("entre_calles", [])),
+                n.municipio or "",
+                n.entidad or "",
+            ]
+        )
         pedido = ", ".join(
-            {"nombre": "nombres", "domicilio": "domicilio", "telefono": "telefono"}[c]
+            {"nombre": "nombres", "domicilio": "domicilios", "telefono": "telefono"}[c]
             for c in a_decidir
         )
         mensajes = [
-            {"role": "system", "content": SISTEMA_PLANIFICADOR.format(k=self.max_nombres)},
+            {
+                "role": "system",
+                "content": SISTEMA_PLANIFICADOR.format(k=self.max_nombres, d=self.max_domicilios),
+            },
             {
                 "role": "user",
                 "content": f"{formatear_insumo(n)}\n\nDECIDE: {pedido}. "
@@ -169,13 +194,16 @@ class Planificador:
         ]
 
         def validar(_nombre: str, args: dict) -> tuple[Planeacion, list[str]]:
-            plan, errores = _validar_datos(args, a_decidir, valores, self.max_nombres)
+            plan, errores = _validar_datos(
+                args, a_decidir, valores, contexto, self.max_nombres, self.max_domicilios
+            )
             plan.consistentes = consistentes
-            for c in consistentes:
-                if c == "nombre":
-                    plan.nombres = [recientes["nombre"]] if recientes["nombre"] else []
-                else:
-                    setattr(plan, c, recientes[c])
+            if "nombre" in consistentes:
+                plan.nombres = [recientes["nombre"]] if recientes["nombre"] else []
+            if "domicilio" in consistentes:
+                plan.domicilios = recientes["domicilio"]
+            if "telefono" in consistentes:
+                plan.telefono = recientes["telefono"]
             return plan, errores
 
         salida = pedir(
@@ -199,19 +227,23 @@ class Planificador:
 
 
 def _validar_datos(
-    args: dict, a_decidir: list[str], valores: dict[str, list[str]], maximo: int
+    args: dict,
+    a_decidir: list[str],
+    valores: dict[str, list[str]],
+    contexto_domicilio: str,
+    max_nombres: int,
+    max_domicilios: int,
 ) -> tuple[Planeacion, list[str]]:
-    """Los campos pedidos, sin palabras ni teléfonos que el DENUE no publicó."""
+    """Los campos pedidos, sin nombres, calles, números ni teléfonos que el DENUE no publicó."""
     errores: list[str] = []
     nombres: list[str] = []
-    domicilio = telefono = None
+    domicilios: list[str] = []
+    telefono = None
     if "nombre" in a_decidir:
         # Un nombre puede tomar palabras de la razon social ("Rosticerias Felices").
         vocabulario = _palabras(" ".join([*valores["nombre"], *valores.get("razon_social", [])]))
-        crudos = args.get("nombres") if isinstance(args.get("nombres"), list) else []
-        for x in crudos:
-            nombre = " ".join(str(x).split())
-            if len(nombre) < 3 or _palabras_llave(nombre) in {_palabras_llave(y) for y in nombres}:
+        for nombre in _lista(args.get("nombres")):
+            if _palabras_llave(nombre) in {_palabras_llave(y) for y in nombres}:
                 continue
             nuevas = sorted(_palabras(nombre) - vocabulario)
             if nuevas:
@@ -222,19 +254,30 @@ def _validar_datos(
             nombres.append(nombre)
         if not nombres:
             errores.append("da al menos un nombre")
-        if len(nombres) > maximo:
-            errores.append(f"son {len(nombres)} nombres; el máximo es {maximo}")
+        if len(nombres) > max_nombres:
+            errores.append(f"son {len(nombres)} nombres; el máximo es {max_nombres}")
     if "domicilio" in a_decidir:
-        domicilio = " ".join(str(args.get("domicilio") or "").split()) or None
-        if not domicilio:
-            errores.append("falta el domicilio con que se buscará")
-        else:
-            nuevas = sorted(_palabras(domicilio) - _palabras(" ".join(valores["domicilio"])))
-            if nuevas:
+        vocabulario = _palabras(contexto_domicilio) | _PALABRAS_DE_DOMICILIO
+        numeros = _numeros(contexto_domicilio)
+        for domicilio in _lista(args.get("domicilios")):
+            if _palabras_llave(domicilio) in {_palabras_llave(y) for y in domicilios}:
+                continue
+            ajenas = sorted(
+                p
+                for p in _palabras(domicilio)
+                if p not in vocabulario and not (p.isdigit() and (p.lstrip("0") or "0") in numeros)
+            )
+            if ajenas:
                 errores.append(
-                    f"el domicilio usa palabras que el DENUE no publicó: {nuevas}. Usa solo "
-                    "palabras de los domicilios publicados"
+                    f"«{domicilio}» trae {ajenas}, que no están en los domicilios publicados ni "
+                    "en su contexto. Puedes escribir números con dígitos y desarrollar "
+                    "abreviaturas, pero no inventar calles, números ni colonias"
                 )
+            domicilios.append(domicilio)
+        if not domicilios:
+            errores.append("da al menos un domicilio con que buscarlo")
+        if len(domicilios) > max_domicilios:
+            errores.append(f"son {len(domicilios)} domicilios; el máximo es {max_domicilios}")
     if "telefono" in a_decidir:
         crudo = str(args.get("telefono") or "")
         publicados = {_digitos(t): t for t in valores["telefono"]}
@@ -247,7 +290,91 @@ def _validar_datos(
     razonamiento = str(args.get("razonamiento", "")).strip()
     if len(razonamiento) < MIN_TEXTO:
         errores.append("razonamiento vacío o demasiado corto: di por qué esos datos")
-    return Planeacion(nombres, razonamiento, domicilio=domicilio, telefono=telefono), errores
+    return Planeacion(nombres, razonamiento, domicilios=domicilios, telefono=telefono), errores
+
+
+def _lista(valor: Any) -> list[str]:
+    """Una lista de textos del modelo, con los espacios colapsados y sin vacíos ni cortos."""
+    if isinstance(valor, str):
+        valor = [valor]
+    if not isinstance(valor, list):
+        return []
+    return [t for t in (" ".join(str(x).split()) for x in valor) if len(t) >= 3]
+
+
+_PALABRAS_DE_DOMICILIO = frozenset(
+    """CALLE AVENIDA AV AVE BOULEVARD BLVD BULEVAR CALZADA CALZ CARRETERA CARR CAMINO PRIVADA
+    PRIV CERRADA CDA ANDADOR CALLEJON PROLONGACION PROL CIRCUITO PERIFERICO RETORNO PASEO
+    VIADUCTO EJE NUMERO NUM NO EXTERIOR EXT INTERIOR INT LOCAL LOTE LT MANZANA MZ MZA SN SIN
+    KM KILOMETRO COLONIA COL FRACCIONAMIENTO FRACC BARRIO UNIDAD HABITACIONAL CONJUNTO
+    CODIGO POSTAL CP ESQUINA ESQ ENTRE Y E DE DEL LA LAS LOS EL A""".split()
+)
+"""Palabras de la forma de un domicilio (tipos de vialidad y de asentamiento, abreviaturas,
+conectores): el planificador las puede agregar o desarrollar sin que cuente como inventar."""
+
+_NUMEROS_ESCRITOS: dict[str, int] = {
+    **{
+        w: i
+        for i, w in enumerate(
+            "CERO UNO DOS TRES CUATRO CINCO SEIS SIETE OCHO NUEVE DIEZ ONCE DOCE TRECE CATORCE "
+            "QUINCE DIECISEIS DIECISIETE DIECIOCHO DIECINUEVE VEINTE VEINTIUNO VEINTIDOS "
+            "VEINTITRES VEINTICUATRO VEINTICINCO VEINTISEIS VEINTISIETE VEINTIOCHO "
+            "VEINTINUEVE".split()
+        )
+    },
+    "UN": 1,
+    "UNA": 1,
+    "VEINTIUN": 21,
+    "TREINTA": 30,
+    "CUARENTA": 40,
+    "CINCUENTA": 50,
+    "SESENTA": 60,
+    "SETENTA": 70,
+    "OCHENTA": 80,
+    "NOVENTA": 90,
+    "CIEN": 100,
+    "CIENTO": 100,
+    "DOSCIENTOS": 200,
+    "TRESCIENTOS": 300,
+    "CUATROCIENTOS": 400,
+    "QUINIENTOS": 500,
+    "SEISCIENTOS": 600,
+    "SETECIENTOS": 700,
+    "OCHOCIENTOS": 800,
+    "NOVECIENTOS": 900,
+}
+"""Números escritos con letra, como los anota un encuestador ("NO. VEINTE")."""
+
+
+def _numeros(texto: str) -> set[str]:
+    """Los números de un texto, en dígitos: los que ya lo están y los escritos con letra.
+
+    "CALLE FRANCISCO NO. CIENTO VEINTE Y DOS MIL" -> {"122", ...}: cada tramo
+    seguido de palabras numéricas se suma (con "Y" como conector y "MIL"
+    como multiplicador), y cada palabra suelta también cuenta.
+    """
+    plano = unicodedata.normalize("NFKD", texto.upper()).encode("ascii", "ignore").decode()
+    tokens = re.findall(r"[A-Z0-9]+", plano)
+    numeros = {t.lstrip("0") or "0" for t in tokens if t.isdigit()}
+    total = actual = 0
+    en_tramo = False
+    for t in [*tokens, ""]:
+        if t in _NUMEROS_ESCRITOS:
+            actual += _NUMEROS_ESCRITOS[t]
+            numeros.add(str(_NUMEROS_ESCRITOS[t]))
+            en_tramo = True
+        elif t == "MIL":
+            total += (actual or 1) * 1000
+            actual = 0
+            en_tramo = True
+        elif t == "Y" and en_tramo:
+            continue
+        else:
+            if en_tramo:
+                numeros.add(str(total + actual))
+            total = actual = 0
+            en_tramo = False
+    return numeros
 
 
 def _distintos(campo: str, valores: list[str]) -> set:

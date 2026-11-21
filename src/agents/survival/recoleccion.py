@@ -260,6 +260,10 @@ class FuenteMaps:
         if domicilio_de(n):
             consultas.append(f"{nombre_de(n)} {domicilio_de(n)} {n.municipio or ''}".strip())
         consultas += [f"{otro} {lugar_de(n)}" for otro in nombres_de_busqueda(n)[1:]]
+        consultas += [
+            f"{nombre_de(n)} {otro} {n.municipio or ''}".strip()
+            for otro in domicilios_de_busqueda(n)[1:]
+        ]
         piezas: list[Pieza] = []
         for c in consultas:
             piezas += self._buscar(c, expediente + piezas)
@@ -346,6 +350,10 @@ class FuenteWeb:
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
         consultas += [f'"{otro}" {lugar_de(n)}' for otro in nombres_de_busqueda(n)[1:]]
+        consultas += [
+            f"{nombre_de(n)} {otro} {n.municipio or ''}".strip()
+            for otro in domicilios_de_busqueda(n)[1:]
+        ]
         piezas: list[Pieza] = []
         for consulta in consultas:
             piezas += self._buscar(consulta, expediente + piezas)
@@ -659,9 +667,15 @@ def nombre_de(n: Negocio) -> str:
     return n.nombre or (n.nombres[0] if n.nombres else "")
 
 
+def domicilios_de_busqueda(n: Negocio) -> list[str]:
+    """Los domicilios con que se busca: los del planificador, o el más reciente del DENUE."""
+    return list(n.domicilios_busqueda) or n.domicilios[:1]
+
+
 def domicilio_de(n: Negocio) -> str | None:
-    """El domicilio con que se busca: el del planificador, o el más reciente del DENUE."""
-    return n.domicilio_busqueda or (n.domicilios[0] if n.domicilios else None)
+    """El domicilio principal de búsqueda (el primero de `domicilios_de_busqueda`)."""
+    domicilios = domicilios_de_busqueda(n)
+    return domicilios[0] if domicilios else None
 
 
 def telefono_de(n: Negocio) -> str | None:

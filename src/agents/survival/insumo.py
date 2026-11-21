@@ -62,8 +62,9 @@ class Negocio:
     Vacío hasta que el planificador decide; las fuentes usan entonces el de
     gold (`recoleccion.nombres_de_busqueda`).
     """
-    domicilio_busqueda: str | None = None
-    """El domicilio con que se busca (planificador); None = el más reciente del DENUE."""
+    domicilios_busqueda: list[str] = field(default_factory=list)
+    """Los domicilios con que se busca, escritos por el planificador para encontrarlo en línea
+    (números en dígitos, sin abreviaturas); vacío = el más reciente del DENUE."""
     telefono_busqueda: str | None = None
     """El teléfono con que se busca (planificador); None = el más reciente del DENUE."""
 
@@ -108,15 +109,28 @@ def pendientes(conn: Connection, muestra_id: str, agente: str) -> list[tuple[int
     ]
 
 
+FROM_HECHOS = """silver.establecimientos e
+                  LEFT JOIN silver.denue_tipos_vialidad tv ON tv.id = e.tipo_vial_id
+                  LEFT JOIN silver.denue_tipos_asentamiento ta ON ta.id = e.tipo_asent_id"""
+"""Los hechos con las etiquetas de vialidad y asentamiento: para escribir el domicilio completo."""
+
 _DOMICILIO = (
-    "concat_ws(' ', NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
-    "NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
+    "concat_ws(' ', NULLIF(tv.tipo_vial, ''), NULLIF(e.nom_vial, ''), NULLIF(e.numero_ext, ''), "
+    "NULLIF(ta.tipo_asent, ''), NULLIF(e.nomb_asent, ''), NULLIF(e.cod_postal, ''))"
 )
-"""El domicilio de una observación como una línea: vialidad, número, asentamiento, CP."""
+"""El domicilio de una observación como una línea: tipo y nombre de vialidad, número,
+tipo y nombre de asentamiento, CP ("CALLE FRANCISCO 20 COLONIA CENTRO 37630")."""
+
+_ENTRE_CALLES = (
+    "concat_ws(' Y ', NULLIF(concat_ws(' ', NULLIF(e.tipo_v_e_1, ''), NULLIF(e.nom_v_e_1, '')), ''), "
+    "NULLIF(concat_ws(' ', NULLIF(e.tipo_v_e_2, ''), NULLIF(e.nom_v_e_2, '')), ''))"
+)
+"""Entre qué calles está: contexto para que el planificador escriba un domicilio buscable."""
 
 CAMPOS_VARIABLES: dict[str, str] = {
     "nombre": "e.nom_estab",
     "domicilio": _DOMICILIO,
+    "entre_calles": _ENTRE_CALLES,
     "telefono": "e.telefono",
     "razon_social": "e.raz_social",
     "sitio": "e.www",
@@ -138,7 +152,7 @@ def sql_variantes(expresion: str, clee: str = "mn.clee") -> str:
           FROM (SELECT {expresion} AS v,
                        array_agg(to_char(e.period, 'YYYY-MM') ORDER BY e.period) AS cortes,
                        max(e.period) AS ultimo
-                  FROM silver.establecimientos e
+                  FROM {FROM_HECHOS}
                  WHERE e.clee = {clee} AND {expresion} <> ''
                  GROUP BY 1) x)"""
 

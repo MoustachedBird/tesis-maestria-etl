@@ -28,7 +28,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from src.agents.survival.insumo import CAMPOS_VARIABLES
+from src.agents.survival.insumo import CAMPOS_VARIABLES, FROM_HECHOS
 from src.meta.tracker import MetadataTracker
 from src.shared.enums import JobStatus, TaskStatus, TriggerType
 from src.shared.logging import get_stage_logger
@@ -74,7 +74,7 @@ def _sql_alias() -> str:
         asignaciones.append(f"""{columna} = (
             SELECT array_agg(x.v ORDER BY x.ultimo DESC, x.v)
             FROM (SELECT {expr} AS v, max(e.period) AS ultimo
-                  FROM silver.establecimientos e
+                  FROM {FROM_HECHOS}
                   WHERE e.clee = mn.clee AND {expr} <> ''
                   GROUP BY 1) x)""")
     return (

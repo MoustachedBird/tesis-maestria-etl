@@ -105,8 +105,8 @@ def formatear_insumo(n: Negocio) -> str:
     buscado = []
     if n.nombres_busqueda:
         buscado.append("Nombres: " + " | ".join(n.nombres_busqueda))
-    if n.domicilio_busqueda:
-        buscado.append(f"Domicilio: {n.domicilio_busqueda}")
+    if n.domicilios_busqueda:
+        buscado.append("Domicilios: " + " | ".join(n.domicilios_busqueda))
     if n.telefono_busqueda:
         buscado.append(f"Teléfono: {n.telefono_busqueda}")
     return "\n".join(
@@ -119,6 +119,11 @@ def formatear_insumo(n: Negocio) -> str:
             f"Tamaño (último corte): {n.tamano_final or 'desconocido'}",
             f"Municipio: {n.municipio or '?'}, {n.entidad or '?'}",
             campo("Domicilios publicados", "domicilio", n.domicilios),
+            *(
+                [campo("Entre calles", "entre_calles", [])]
+                if n.variantes.get("entre_calles")
+                else []
+            ),
             f"Coordenadas: {coordenadas}",
             campo("Teléfonos", "telefono", n.telefonos),
             campo("Sitios web", "sitio", n.sitios),
@@ -135,29 +140,33 @@ def formatear_insumo(n: Negocio) -> str:
 
 # ----- planificador -----
 
-SISTEMA_PLANIFICADOR = """Eres quien decide CON QUÉ DATOS se busca en línea a un negocio de México, antes de que el equipo lo busque en Google Maps, en buscadores web, en redes sociales y en otras fuentes. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) lo registró en varios cortes, y como son datos de encuesta, lo que anotó el encuestador cambia de un corte a otro: el nombre (con y sin artículo, en otro orden, abreviado, con errores de captura, con el giro pegado, o porque el negocio cambió de nombre), el domicilio (otra forma de escribir la calle, número o colonia; o porque se mudó) y el teléfono.
+SISTEMA_PLANIFICADOR = """Eres quien decide CON QUÉ DATOS se busca en línea a un negocio de México, antes de que el equipo lo busque en Google Maps, en buscadores web, en redes sociales y en otras fuentes. El Directorio Estadístico Nacional de Unidades Económicas (DENUE, del INEGI) lo registró en varios cortes, y como son datos de encuesta, lo que anotó el encuestador cambia de un corte a otro y a veces está mal escrito: el nombre (con y sin artículo, en otro orden, abreviado, con errores de captura, con el giro pegado, o porque el negocio cambió de nombre), el domicilio (el número con letra o con dígitos, abreviaturas, la calle escrita de otra forma, o porque se mudó) y el teléfono.
 
-Recibes cada variante con los cortes en que apareció, la más reciente primero. Solo tienes que decidir los campos que se te piden (los demás fueron consistentes en todos los cortes). Razona cómo lo buscaría una persona que quiere encontrarlo HOY: tú decides el criterio (cuántas veces aparece cada variante, combinar partes de varias, quitar lo que estorba como "SA DE CV" o el giro genérico, reordenar), pero DA MÁS PESO A LO MÁS RECIENTE: si el negocio se mudó o cambió de teléfono, el dato viejo ya no sirve para encontrarlo. Si hubo un cambio de nombre real, conviene buscar los dos nombres.
+Recibes cada variante con los cortes en que apareció, la más reciente primero. Decide solo los campos que se te piden. Tu objetivo es que el equipo tenga LA MAYOR PROBABILIDAD DE ENCONTRARLO en internet hoy. Tú decides el criterio (cuántas veces aparece cada variante, combinar partes de varias, quitar lo que estorba), y lo más reciente pesa más: si el negocio se mudó o cambió de teléfono, el dato viejo ya no sirve para encontrarlo.
 
-La única restricción: usa solo palabras que aparezcan en las variantes que publicó el DENUE. Puedes quitar, reordenar y combinar palabras, pero no agregar ninguna nueva ni corregir la ortografía. El teléfono tiene que ser uno de los publicados.
+NOMBRES. Cómo es probable que aparezca en Google Maps o en Facebook. Puedes quitar "SA DE CV" o el giro genérico, reordenar y combinar; si hubo un cambio de nombre real, conviene buscar los dos. Solo con palabras que aparezcan en las variantes o en la razón social: no agregues ni corrijas palabras.
+
+DOMICILIOS. No copies el más reciente: LÉELO. Usa todas las variantes y el contexto (tipo de vialidad, colonia o asentamiento, código postal, entre qué calles, municipio) para entender cuál es el domicilio real y escríbelo como lo escribiría Google Maps: tipo y nombre de la vialidad, número en dígitos, colonia, código postal. Por ejemplo, si un corte dice "CALLE FRANCISCO NUMERO 20" y otro "CALLE FRANCISCO NO. VEINTE", son el mismo domicilio: "Calle Francisco 20". Corrige el formato (números escritos con letra a dígitos, abreviaturas como C., AV., COL., NO. desarrolladas o quitadas, "SN" como "sin número"), pero NO inventes una calle, un número ni una colonia que no estén en las variantes. Si se mudó, da primero el domicilio actual y, si sirve para encontrar rastros del negocio, el anterior. Si la vialidad tiene nombre poco buscable, puedes dar una segunda forma con la esquina ("Calle Francisco esquina Hidalgo").
+
+TELÉFONO. Uno de los publicados, el que más probablemente siga vigente.
 
 AL TERMINAR (herramienta elegir_datos, obligatoria)
-- nombres: de 1 a {k}, el MEJOR primero. El primero se usa en las consultas más específicas; los demás se buscan además en Maps y en los buscadores. Solo si se te pide.
-- domicilio: el que se usará para buscarlo. Solo si se te pide.
-- telefono: el que se usará para buscarlo. Solo si se te pide.
-- razonamiento: por qué, en una a tres frases."""
-"""Prompt de sistema del planificador; `{k}` es AGENTE_MAX_NOMBRES."""
+- nombres: de 1 a {k}, el MEJOR primero. Solo si se te pide.
+- domicilios: de 1 a {d}, el MEJOR primero, escritos para buscarse. Solo si se te pide.
+- telefono: el que se usará. Solo si se te pide.
+- razonamiento: por qué, en una a tres frases (si corregiste un domicilio, di qué corregiste)."""
+"""Prompt de sistema del planificador; `{k}` es AGENTE_MAX_NOMBRES y `{d}` AGENTE_MAX_DOMICILIOS."""
 
 HERRAMIENTA_ELEGIR_DATOS = {
     "type": "function",
     "function": {
         "name": "elegir_datos",
-        "description": "Con qué nombres, domicilio y teléfono se buscará al negocio. Obligatoria.",
+        "description": "Con qué nombres, domicilios y teléfono se buscará al negocio. Obligatoria.",
         "parameters": {
             "type": "object",
             "properties": {
                 "nombres": {"type": "array", "items": {"type": "string"}},
-                "domicilio": {"type": ["string", "null"]},
+                "domicilios": {"type": "array", "items": {"type": "string"}},
                 "telefono": {"type": ["string", "null"]},
                 "razonamiento": {"type": "string"},
             },
