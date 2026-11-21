@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
+from pathlib import Path
 from typing import Any, Protocol
 
 from src.agents.survival.insumo import Negocio
@@ -38,6 +39,9 @@ from src.shared.enums import (
     EstadoConsulta,
     Recolector,
 )
+from src.shared.logging import get_stage_logger
+
+logger = get_stage_logger(__name__, Path("./data/agente.log"))
 
 
 @dataclass(frozen=True)
@@ -284,6 +288,9 @@ class FuenteWeb:
         """Los resultados como piezas, sin los que ya están en `previas`."""
         try:
             resultados = self.buscador.buscar(consulta, n=self.max_resultados)
+            sin_respuesta = getattr(self.buscador, "sin_respuesta", None)
+            if sin_respuesta:
+                logger.info(f"         {self.buscador.nombre}: no contestaron {sin_respuesta}")
         except Exception as e:  # noqa: BLE001  (un buscador caido es una pieza ERROR, no una caida)
             return [
                 Pieza(

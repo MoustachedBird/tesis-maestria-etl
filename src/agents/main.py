@@ -1,11 +1,12 @@
 """CLI de los agentes: `python -m src.agents.main <comando>`.
 
-Cuatro subcomandos y no un comando global con `--no-*` como el ETL, porque
+Cinco subcomandos y no un comando global con `--no-*` como el ETL, porque
 no son un pipeline que se rehaga completo: `muestrear` se corre una vez por
 muestra, `verificar` y `auditar` se reanudan las veces que haga falta y
 `metricas` solo lee. Cada uno dice en su `--help` qué toca.
 
     muestrear   gold -> verificacion.muestras + muestra_negocios
+    sondear     sin modelo ni escritura: qué trae cada fuente para un negocio
     verificar   muestra -> veredictos + consultas + informes + evidencias
                 (el equipo) y, por default, auditorias (el juez)
     auditar     veredictos sin auditoría de este juez -> auditorias
@@ -77,6 +78,56 @@ def _cliente(modelo: str) -> Any:
     return cliente
 
 
+def _fuentes() -> tuple[Any, list[Any]]:
+    """El navegador de la corrida y las fuentes de `AGENTE_FUENTES`, comprobados; o sale con el error.
+
+    Comprueba lo que se puede comprobar antes de gastar una hora de modelo:
+    que la lista sea válida, que Chrome arranque y que el SearXNG del compose
+    conteste (si `web` está en la lista).
+    """
+    from src.agents.survival.armado import Armado, nombres_de_fuentes
+    from src.agents.survival.sources.cortesia import Pausador
+    from src.agents.survival.sources.navegador import Navegador
+
+    ajustes = get_settings()
+    try:
+        nombres = nombres_de_fuentes(ajustes.AGENTE_FUENTES)
+    except ValueError as e:
+        console.print(f"[red]   ✖ {e}[/red]")
+        raise typer.Exit(code=1) from e
+    pausador = Pausador(ajustes.AGENTE_PAUSA_SEGUNDOS)
+    navegador = Navegador(
+        timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
+        espera=ajustes.AGENTE_NAVEGADOR_ESPERA_SEGUNDOS,
+        perfil=ajustes.AGENTE_PERFIL_CHROME or None,
+        pausador=pausador,
+    )
+    try:
+        navegador.comprobar()
+    except Exception as e:  # noqa: BLE001  (se reporta y se sale: sin Chrome no hay Maps ni redes)
+        console.print(
+            f"[red]   ✖ Chrome no arranca ({e.__class__.__name__}: {e}). La imagen `agente` "
+            "lo trae: `docker compose build agente`.[/red]"
+        )
+        raise typer.Exit(code=1) from e
+    armado = Armado(ajustes, navegador, pausador)
+    if "web" in nombres:
+        buscador = armado.buscador_web()
+        try:
+            buscador.buscar("INEGI DENUE", n=1)
+        except Exception as e:  # noqa: BLE001  (se reporta y se sale: el buscador base no responde)
+            navegador.cerrar()
+            console.print(f"[red]   ✖ el buscador {buscador.nombre} no responde: {e}[/red]")
+            raise typer.Exit(code=1) from e
+    try:
+        fuentes = armado.fuentes(nombres)
+    except ValueError as e:
+        navegador.cerrar()
+        console.print(f"[red]   ✖ {e}[/red]")
+        raise typer.Exit(code=1) from e
+    return navegador, fuentes
+
+
 def _juez(modelo: str | None) -> Any:
     """El juez, con `--modelo-juez`, `JUEZ_MODEL` o el modelo del equipo, en ese orden."""
     from src.agents.survival.juez import Juez
@@ -104,10 +155,6 @@ def verificar(
     ),
 ) -> None:
     """El equipo verifica en línea cada negocio pendiente y el juez audita su veredicto."""
-    from src.agents.survival.recoleccion import FuenteMaps, FuenteRedes, FuenteSitio, FuenteWeb
-    from src.agents.survival.sources.busqueda import BuscadorBrave, BuscadorSearxng
-    from src.agents.survival.sources.cortesia import Pausador
-    from src.agents.survival.sources.navegador import Navegador, leer_con_respaldo
     from src.agents.survival.verificador import Equipo, resumen_muestra, verificar_muestra
     from src.meta.tracker import MetadataTracker
     from src.shared.db.session import get_engine
@@ -115,50 +162,7 @@ def verificar(
     ajustes = get_settings()
     cliente = _cliente(modelo or ajustes.OLLAMA_MODEL)
     juez = _juez(modelo_juez) if con_juez else None
-
-    if ajustes.BRAVE_API_KEY:
-        buscador = BuscadorBrave(
-            ajustes.BRAVE_API_KEY, timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS
-        )
-    else:
-        buscador = BuscadorSearxng(
-            ajustes.SEARXNG_URL, timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS
-        )
-    try:
-        buscador.buscar("INEGI DENUE", n=1)
-    except Exception as e:  # noqa: BLE001  (se reporta y se sale: sin buscador no hay agente)
-        console.print(f"[red]   ✖ el buscador {buscador.nombre} no responde: {e}[/red]")
-        raise typer.Exit(code=1) from e
-
-    pausador = Pausador(ajustes.AGENTE_PAUSA_SEGUNDOS)
-    navegador = Navegador(
-        timeout=ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS,
-        espera=ajustes.AGENTE_NAVEGADOR_ESPERA_SEGUNDOS,
-        perfil=ajustes.AGENTE_PERFIL_CHROME or None,
-        pausador=pausador,
-    )
-    try:
-        navegador.comprobar()
-    except Exception as e:  # noqa: BLE001  (se reporta y se sale: sin Chrome no hay Maps ni redes)
-        console.print(
-            f"[red]   ✖ Chrome no arranca ({e.__class__.__name__}). La imagen `agente` lo trae: "
-            "`docker compose build agente`.[/red]"
-        )
-        raise typer.Exit(code=1) from e
-
-    caracteres = ajustes.AGENTE_MAX_CARACTERES_PAGINA
-    minimo = ajustes.AGENTE_MIN_CARACTERES_PAGINA
-    fuentes = [
-        FuenteMaps(navegador, caracteres, minimo),
-        FuenteWeb(buscador, ajustes.AGENTE_MAX_RESULTADOS),
-        FuenteRedes(navegador, ajustes.AGENTE_MAX_REDES, caracteres, minimo),
-        FuenteSitio(
-            lambda url: leer_con_respaldo(
-                url, navegador, caracteres, ajustes.AGENTE_TIMEOUT_HTTP_SEGUNDOS, minimo
-            ),
-            ajustes.AGENTE_MAX_SITIOS,
-        ),
-    ]
+    navegador, fuentes = _fuentes()
     equipo = Equipo(
         cliente,
         fuentes,
@@ -171,13 +175,14 @@ def verificar(
         try:
             resumen = resumen_muestra(conn, muestra, equipo.agente)
         except ValueError as e:
+            navegador.cerrar()
             console.print(f"[red]   ✖ {e}[/red]")
             raise typer.Exit(code=1) from e
     console.print(
         f"[bold magenta]   {equipo.agente} · juez {juez.juez if juez else 'apagado'} · "
-        f"buscador {buscador.nombre} · muestra {muestra!r}: "
-        f"{resumen['pendientes']}/{resumen['total']} pendientes[/bold magenta]"
+        f"muestra {muestra!r}: {resumen['pendientes']}/{resumen['total']} pendientes[/bold magenta]"
     )
+    console.print(f"   fuentes: {', '.join(f.recolector for f in fuentes)}")
     try:
         conteos = verificar_muestra(
             engine,
@@ -193,6 +198,113 @@ def verificar(
     console.print(f"   {conteos}")
     if conteos["fallidos"]:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def sondear(
+    muestra: str = typer.Option(..., "--muestra", help="Muestra de donde sale el negocio."),
+    clee: str | None = typer.Option(
+        None, "--clee", help="El negocio a sondear; default el primero de la muestra."
+    ),
+    consulta: str | None = typer.Option(
+        None, "--consulta", help="En vez de un negocio: esta búsqueda en cada buscador."
+    ),
+) -> None:
+    """Sin modelo ni escritura: corre la recolección base y dice qué trajo cada fuente.
+
+    Es para revisar las fuentes antes de una corrida (un buscador que cambió
+    su HTML, un CAPTCHA, una lista del SAT que se movió). El expediente
+    completo queda en `data/agente/sondeo_<clee>.txt`.
+    """
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from src.agents.survival import insumo
+    from src.agents.survival.recoleccion import FuenteWeb, agrupar, formatear_expediente
+
+    navegador, fuentes = _fuentes()
+    try:
+        if consulta:
+            tabla = Table(title=f"buscadores · {consulta!r}")
+            for col in ("buscador", "resultados", "primero"):
+                tabla.add_column(col)
+            for f in fuentes:
+                if not isinstance(f, FuenteWeb):
+                    continue
+                try:
+                    rs = f.buscador.buscar(consulta, n=get_settings().AGENTE_MAX_RESULTADOS)
+                    tabla.add_row(f.recolector, str(len(rs)), rs[0].url if rs else "—")
+                except Exception as e:  # noqa: BLE001  (el sondeo reporta, no se cae)
+                    tabla.add_row(f.recolector, "ERROR", f"{e.__class__.__name__}: {e}"[:120])
+            console.print(tabla)
+            return
+
+        from src.shared.db.session import get_engine
+
+        with get_engine().connect() as conn:
+            try:
+                muestra_id, _ = insumo.muestra_por_nombre(conn, muestra)
+            except ValueError as e:
+                console.print(f"[red]   ✖ {e}[/red]")
+                raise typer.Exit(code=1) from e
+            if clee is None:
+                clee = conn.execute(
+                    text(
+                        "SELECT clee FROM verificacion.muestra_negocios "
+                        "WHERE muestra_id = :id ORDER BY orden LIMIT 1"
+                    ),
+                    {"id": muestra_id},
+                ).scalar_one()
+            negocio = insumo.cargar(conn, muestra_id, clee)
+        console.print(
+            f"[bold magenta]   {clee} · {negocio.nombre!r} · {negocio.municipio}[/bold magenta]"
+        )
+
+        import time
+
+        expediente: list = []
+        tabla = Table(title="recolección base")
+        for col in (
+            "especialista",
+            "fuente",
+            "piezas",
+            "ok",
+            "sin res.",
+            "error",
+            "segundos",
+            "nota",
+        ):
+            tabla.add_column(col)
+        for grupo in agrupar(fuentes):
+            for f in grupo.fuentes:
+                t0 = time.monotonic()
+                nuevas = f.recolectar(negocio, expediente)
+                segundos = time.monotonic() - t0
+                expediente.extend(nuevas)
+                errores = [p for p in nuevas if p.estado == "error"]
+                nota = (
+                    errores[0].contenido[:90]
+                    if errores
+                    else (nuevas[0].url or "" if nuevas else "")
+                )
+                tabla.add_row(
+                    grupo.especialidad,
+                    f.recolector,
+                    str(len(nuevas)),
+                    str(sum(p.estado == "ok" for p in nuevas)),
+                    str(sum(p.estado == "sin_resultados" for p in nuevas)),
+                    str(len(errores)),
+                    f"{segundos:.0f}",
+                    nota,
+                )
+        console.print(tabla)
+        destino = Path("data/agente") / f"sondeo_{clee}.txt"
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_text(formatear_expediente(expediente), encoding="utf-8")
+        console.print(f"   expediente completo ({len(expediente)} piezas): {destino}")
+    finally:
+        navegador.cerrar()
 
 
 @app.command()

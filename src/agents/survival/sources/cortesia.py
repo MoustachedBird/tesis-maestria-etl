@@ -31,6 +31,7 @@ _SENALES_DE_BLOQUEO: tuple[tuple[str, str], ...] = (
     ("verificación humana", r"verify you are (a )?human|are you a robot|no soy un robot"),
     ("verificación humana", r"verifica que eres (un )?humano|confirma que eres humano"),
     ("desafío anti-bot", r"checking your browser|just a moment\.\.\.|attention required"),
+    ("desafío anti-bot", r"bots use duckduckgo too|anomaly-modal"),
     ("acceso denegado", r"access denied|acceso denegado|request blocked|too many requests"),
 )
 """Frases de una página de bloqueo, en inglés y español, con el motivo que se reporta."""

@@ -14,3 +14,24 @@ search:
     - json
   default_lang: "es-MX"
   safe_search: 0
+
+# Motores generales encendidos a proposito (agente v5). Con use_default_settings
+# cada entrada se fusiona por nombre con la de los defaults, asi que solo se
+# cambia `disabled`. Startpage entrega resultados de Google sin pedirselos a
+# Google; mojeek y qwant tienen indice propio. Que motores no contestaron en
+# cada consulta queda en data/agente.log ("no contestaron ...").
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: qwant
+    disabled: false

@@ -78,6 +78,13 @@ class BuscadorSearxng:
     def __init__(self, url: str, timeout: int = 20):
         self.url = url.rstrip("/")
         self.timeout = timeout
+        self.sin_respuesta: list[str] = []
+        """Los motores internos de SearXNG que no contestaron la última consulta, con el motivo.
+
+        Es lo único que dice si Google o DuckDuckGo están bloqueando a
+        SearXNG en silencio: sin esto, "sin resultados" y "motor caído" se
+        ven igual.
+        """
 
     def buscar(self, consulta: str, n: int = 8) -> list[Resultado]:
         respuesta = requests.get(
@@ -87,6 +94,11 @@ class BuscadorSearxng:
             timeout=self.timeout,
         )
         respuesta.raise_for_status()
+        datos = respuesta.json()
+        self.sin_respuesta = [
+            " ".join(str(x) for x in motor if x) if isinstance(motor, list) else str(motor)
+            for motor in datos.get("unresponsive_engines", [])
+        ]
         return [
             Resultado(
                 titulo=(r.get("title") or "").strip(),
@@ -94,7 +106,7 @@ class BuscadorSearxng:
                 extracto=(r.get("content") or "").strip(),
                 fecha=_fecha_iso(r.get("publishedDate")),
             )
-            for r in respuesta.json().get("results", [])[:n]
+            for r in datos.get("results", [])[:n]
             if r.get("url")
         ]
 
