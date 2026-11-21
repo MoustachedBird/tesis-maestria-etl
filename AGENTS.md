@@ -1184,21 +1184,25 @@ Ollama, y un **juez** audita cada veredicto. La arquitectura es la de
 
 ```bash
 docker compose run --rm agente muestrear --nombre piloto-2026-11             # gold -> muestras
+docker compose run --rm agente sondear   --muestra piloto-2026-11             # sin modelo: qué trae cada fuente
 docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1  # 1 negocio (+ juez)
 docker compose run --rm agente verificar --muestra piloto-2026-11             # los pendientes
 docker compose run --rm agente auditar   --muestra piloto-2026-11             # juez sobre lo no auditado
 docker compose run --rm agente metricas  --muestra piloto-2026-11             # el cruce y el juez
 ```
 
-Cuatro subcomandos y no un comando global con `--no-*`: `muestrear` se corre
-una vez por muestra, `verificar` y `auditar` se reanudan, `metricas` solo lee.
+Cinco subcomandos y no un comando global con `--no-*`: `muestrear` se corre
+una vez por muestra, `sondear` prueba las fuentes sin modelo ni escritura,
+`verificar` y `auditar` se reanudan, `metricas` solo lee (y dice cuánto
+tarda un negocio, para dimensionar la muestra siguiente).
 
-### El equipo: un especialista por fuente, un decisor, un juez
+### El equipo: un especialista por grupo de fuentes, un decisor, un juez
 
 ```
-por cada fuente, en orden (Maps -> buscador -> redes -> sitio propio):
-    recolección base, en código          misma consulta para todos los negocios
-    especialista de la fuente (LLM)      ¿es este negocio? ¿qué indica? + citas
+por cada grupo, en el orden de `Especialidad` (mapas -> buscadores -> redes ->
+plataformas -> huella digital -> registros -> fachada):
+    recolección base, en código          mismas consultas para todos, fuente por fuente
+    especialista del grupo (LLM)         ¿es este negocio? ¿qué indica? + citas
                                          puede pedir AGENTE_MAX_AMPLIACIONES consultas extra
 decisor (LLM)                            integra los informes; solo cita lo que citaron
 juez (LLM, fuera del equipo)             paso 1 a ciegas sobre el expediente crudo,
@@ -1207,8 +1211,10 @@ juez (LLM, fuera del equipo)             paso 1 a ciegas sobre el expediente cru
 
 | Módulo | Qué |
 |---|---|
-| `recoleccion.py` | Las fuentes (`FuenteMaps`, `FuenteWeb`, `FuenteRedes`, `FuenteSitio`): recolección base y ampliación. Una fuente nueva es una clase más |
-| `equipo.py` | `Especialista` (uno sirve para todas: cambia el prompt) y `Decisor` |
+| `recoleccion.py` | `Pieza`, `Grupo`/`agrupar` y las fuentes de Maps, buscadores, redes, plataformas y sitio: recolección base y ampliación. Una fuente nueva es una clase más |
+| `fuentes_abiertas.py` | Las fuentes de datos abiertos: OSM, Internet Archive, Common Crawl, dominio, SAT |
+| `armado.py` | De `AGENTE_FUENTES` a las fuentes, con el navegador, las pausas y el cortacircuitos de la corrida; lo usan `verificar` y `sondear` |
+| `equipo.py` | `Especialista` (uno sirve para todos los grupos: cambia el prompt) y `Decisor` |
 | `juez.py` | `Juez`, `auditar_muestra` y los cargadores de lo guardado |
 | `citas.py` | Lo que hace válida una cita (pieza, extracto textual, fecha escrita) |
 | `llamada.py` | El bucle "conversa hasta una herramienta terminal válida", compartido por los tres roles |
@@ -1228,10 +1234,17 @@ expediente, el número de confiabilidad que la tesis puede reportar. El
 dictamen (`sostenido` / `no_sostenido`) dice si las citas alcanzan;
 `metricas --solo-sostenidos` cuenta solo esos.
 
-**Costo.** Hasta 4 especialistas + decisor + 2 pasos del juez por negocio,
-en serie sobre una GPU: del orden de un minuto por negocio, una noche para
-400. Un especialista sin nada que leer no llama al modelo, ni el decisor si
-nadie citó nada.
+**Costo.** Hasta 7 especialistas + decisor + 2 pasos del juez por negocio,
+en serie sobre una GPU, más la recolección (Chrome con pausas por dominio).
+No se estima: se mide. `metricas` da el promedio por negocio y proyecta
+cuánto tardarían los que faltan, 400 y 1000. Un especialista sin nada que
+leer no llama al modelo, ni el decisor si nadie citó nada.
+
+**El expediente se acota al contexto.** Con veinte fuentes el expediente
+del juez puede pasar de `OLLAMA_CONTEXTO_TOKENS`, y Ollama descarta en
+silencio lo que no cabe. `formatear_expediente` recorta parejo las piezas
+más largas a lo que cabe (`presupuesto_de`) y lo marca; parejo, para no
+revelarle al juez qué se citó.
 
 ### Ollama es un servicio de compose, con la GPU
 
@@ -1309,14 +1322,39 @@ muestra es correr `verificar` dos veces con distinto `OLLAMA_MODEL`**, y
 - **`fuente` la clasifica el código** por dominio (`clasificar_fuente`), no
   el modelo: es el eje de los `GROUP BY` del análisis.
 
-### Fuentes
+### Fuentes (v5)
 
-| | Qué | Recolección base |
-|---|---|---|
-| **Maps** | Google Maps en Chrome headless (`sources/navegador.py`): la ficha o la lista de resultados | nombre + lugar; nombre + domicilio |
-| **Web** | SearXNG del compose (o Brave con `BRAVE_API_KEY`): título, URL, extracto, fecha | nombre + lugar; nombre + domicilio; teléfono; nombre + municipio + facebook |
-| **Redes** | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajo el buscador |
-| **Sitio** | `requests` + BeautifulSoup, con Chrome de respaldo si llega vacío | los primeros `AGENTE_MAX_SITIOS` que publicó el DENUE |
+Cada fuente es un `Recolector`; la lee el especialista de su `Especialidad`
+(`ESPECIALIDAD_DE`). Las que se consultan las elige `AGENTE_FUENTES`; el
+diseño y lo que falta (PSM, DOF, fachada con visión) está en
+`plan_fuentes_agente.md`.
+
+| Especialista | Recolector | Cómo | Recolección base |
+|---|---|---|---|
+| mapas | `maps` | Google Maps en Chrome | nombre + lugar; nombre + domicilio; de cada ficha, las reseñas ordenadas por "Más recientes" |
+| | `osm` | Overpass (gratis) | negocios mapeados a `AGENTE_RADIO_METROS` del punto, con distancia, parecido del nombre, etiquetas `disused:`/`was:` y `check_date` |
+| buscadores | `web` | SearXNG del compose (o la API de Brave con `BRAVE_API_KEY`) | nombre + lugar; + domicilio; teléfono; + facebook; + opiniones |
+| | `bing`, `duckduckgo` | su página de resultados por `requests` | las mismas cinco |
+| | `google`, `brave` | su página de resultados en Chrome | las mismas cinco |
+| redes | `redes` | Facebook / Instagram en Chrome, sin sesión | las primeras `AGENTE_MAX_REDES` que trajeron los buscadores |
+| plataformas | `plataformas` | TripAdvisor, Yelp, Rappi, Uber Eats... en Chrome | las primeras `AGENTE_MAX_PLATAFORMAS` que trajeron los buscadores |
+| huella digital | `sitio` | `requests`, Chrome de respaldo | los primeros `AGENTE_MAX_SITIOS` del DENUE |
+| | `wayback` | índice CDX del Internet Archive | primera y últimas capturas del sitio y las redes; lectura de la última buena |
+| | `common_crawl` | índice de los `AGENTE_CRAWLS_COMMON_CRAWL` crawls recientes | presencia del sitio y las redes en cada uno |
+| | `dominio` | WHOIS de `.mx`, RDAP del resto, DNS | registro y vencimiento del dominio propio del sitio o del correo |
+| registros | `sat` | lista de no localizados del SAT (CSV, en caché `AGENTE_CACHE_DIAS`) | razón social exacta |
+
+Los buscadores se deduplican entre sí: un resultado que trajo uno no se
+repite en el siguiente. Que motores internos de SearXNG no contestaron
+queda en `data/agente.log`.
+
+**Bloqueos.** Entre dos peticiones al mismo dominio se espera
+`AGENTE_PAUSA_SEGUNDOS` (más azar). Una página de CAPTCHA o "tráfico
+inusual" es `ERROR`, nunca lectura (`sources/cortesia.py`), y un motor que
+bloquea `AGENTE_MAX_BLOQUEOS` veces seguidas se apaga por el resto de la
+corrida; sus consultas quedan como `ERROR` en `consultas`, así que el hueco
+se mide. Chrome usa un perfil persistente sin sesión
+(`AGENTE_PERFIL_CHROME`) solo para conservar el consentimiento de cookies.
 
 **El navegador no inicia sesión en ningún lado**: lee lo que la página
 muestra a un visitante anónimo, y una redirección al login es `ERROR`. Es un
@@ -1494,11 +1532,13 @@ etl-core/
 │   └── enums/                     # jobs, sections, clee, layer, sources, verificacion
 │
 ├── src/agents/                    # Agentes LLM; importa solo shared y meta (crear_agentes.md §9)
-│   ├── main.py                    # CLI: muestrear | verificar | auditar | metricas
+│   ├── main.py                    # CLI: muestrear | sondear | verificar | auditar | metricas
 │   └── survival/                  # El verificador de supervivencia (N7)
 │       ├── muestreo.py            # gold -> verificacion.muestras / muestra_negocios
 │       ├── insumo.py              # Lo que el equipo recibe de un negocio (sin la hipotesis)
-│       ├── recoleccion.py         # Las fuentes: recoleccion base fija + ampliacion
+│       ├── recoleccion.py         # Pieza, Grupo/agrupar; Maps, buscadores, redes, plataformas, sitio
+│       ├── fuentes_abiertas.py    # OSM, Internet Archive, Common Crawl, dominio, SAT
+│       ├── armado.py              # AGENTE_FUENTES -> fuentes (verificar y sondear)
 │       ├── equipo.py              # Especialista por fuente + decisor
 │       ├── juez.py                # El auditor: a ciegas + dictamen; `auditar`
 │       ├── citas.py               # Que hace valida una cita (pieza, extracto, fecha)
@@ -1506,7 +1546,9 @@ etl-core/
 │       ├── prompts.py             # Prompts de los tres roles + herramientas terminales
 │       ├── verificador.py         # Equipo + persistencia + verificar_muestra
 │       ├── metricas.py            # Veredicto vs cerrado_gold por estrato; el juez
-│       └── sources/               # busqueda.py (SearXNG / Brave), paginas.py, navegador.py (Chrome: Maps y redes)
+│       └── sources/               # busqueda (SearXNG/Brave API), buscadores (Bing, DDG, Google, Brave),
+│                                  # navegador (Chrome), cortesia (pausas, bloqueos), paginas, osm,
+│                                  # archivo (Wayback, Common Crawl), dominio (WHOIS/RDAP), sat
 │
 ├── src/etl/
 │   ├── main.py                    # CLI (Typer): extract, sync-bronze, transform, pipeline
@@ -1652,8 +1694,9 @@ son incrementales).
 | Comando | Qué hace |
 |---|---|
 | `docker compose run --rm agente muestrear --nombre <n>` | Saca la muestra estratificada de gold (`--semilla`, `--cuota` opcionales) |
+| `docker compose run --rm agente sondear --muestra <n>` | Sin modelo ni escritura: qué trae cada fuente para un negocio (`--clee X`), o una búsqueda en cada buscador (`--consulta "..."`) |
 | `docker compose run --rm agente verificar --muestra <n>` | Verifica los pendientes del agente vigente (`--limite N`, `--clee X`, `--modelo tag`) |
-| `docker compose run --rm agente metricas --muestra <n>` | Tabla de confusión por estrato (`--agente modelo/version`) |
+| `docker compose run --rm agente metricas --muestra <n>` | Tabla de confusión por estrato, el juez y el tiempo por negocio con proyección (`--agente modelo/version`) |
 | `docker compose up -d searxng` | Solo el buscador, para probarlo: `curl 'http://localhost:8080/search?q=x&format=json'` no está expuesto; usa `docker compose exec` |
 
 ### Evaluación Fase 7

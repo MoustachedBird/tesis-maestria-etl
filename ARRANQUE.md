@@ -525,7 +525,24 @@ Esperado: cuatro estratos con 100 cada uno (o menos, con aviso, si la
 población de alguno no alcanza) y la muestra en `verificacion.muestras`. Es
 reproducible: `--semilla` default `MUESTRA_SEMILLA`.
 
-### 11.3 Uno, diez, todos
+### 11.3 Sondear las fuentes, sin modelo
+
+Antes de gastar horas de GPU, ver qué trae cada fuente para un negocio. No
+llama al modelo ni escribe en la base; el expediente completo queda en
+`data/agente/sondeo_<clee>.txt`:
+
+```bash
+docker compose run --rm agente sondear --muestra piloto-2026-11
+docker compose run --rm agente sondear --muestra piloto-2026-11 --consulta "farmacia guadalajara"
+```
+
+Lo que hay que mirar: un buscador con 0 resultados en todas sus consultas
+cambió su HTML o está bloqueando (la nota dice cuál); `sat` con `ERROR` es
+que la URL de la lista cambió (`SAT_NO_LOCALIZADOS_URL`); `osm` o `wayback`
+con `ERROR` suelen ser saturación pasajera del servicio. Una fuente que no
+sirve se quita de `AGENTE_FUENTES` en el `.env`.
+
+### 11.4 Uno, diez, todos
 
 ```bash
 docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 1
@@ -537,14 +554,19 @@ negocio muestra cada fuente con el informe de su especialista, el veredicto
 y el dictamen del juez:
 
 ```
-   [1/400] #1 14TAC0001 · 'TACOS PACO' · Guadalajara
-      🗺  maps: 2 piezas útiles · si/cerrado · 1 citas
-      🔎 web: 14 piezas útiles · si/neutral · 1 citas
-      👥 redes: 1 piezas útiles · dudoso/neutral · 0 citas
-      🌐 sitio: 0 piezas útiles · no/neutral · 0 citas (automático)
-      ✔ cerrado/alta · 1 evidencias · 18 piezas · 0.9 min
-      ⚖  sostenido · a ciegas cerrado/alta (= cerrado) · objetadas — · 0.3 min
+   [1/40] #1 14TAC0001 · 'TACOS PACO' · Guadalajara
+      🗺  maps [maps 3/3, osm 1/1] · si/cerrado · 2 citas · recolección 41s, modelo 18s
+      🔎 web [web 9/9, bing 6/6, duckduckgo 4/4, google 0/5, brave 3/3] · si/neutral · 1 citas · ...
+      👥 redes [redes 1/2] · dudoso/neutral · 0 citas · ...
+      ⭐ plataformas [plataformas 1/1] · si/cerrado · 1 citas · ...
+      🌐 sitio [sitio 0/1, wayback 2/2, common_crawl 1/1, dominio 1/1] · si/cerrado · 2 citas · ...
+      🏛  registros [sat 0/1] · no/neutral · 0 citas (automático) · ...
+      ✔ cerrado/alta · 3 evidencias · 41 piezas · 6.2 min
+      ⚖  sostenido · a ciegas cerrado/alta (= cerrado) · objetadas — · 0.8 min
 ```
+
+`[fuente útiles/total]`: `google 0/5` es Google bloqueando (sus piezas son
+`ERROR`); tras `AGENTE_MAX_BLOQUEOS` seguidos se apaga en la corrida.
 
 Mira ese primer negocio completo antes de seguir: los informes, las
 evidencias y lo que dijo el juez.
@@ -567,18 +589,23 @@ docker compose exec postgres psql -U etl_rw -d mipymes -c \
 
 Si un especialista identifica a un homónimo, o el juez objeta algo que sí
 estaba bien, se ajusta el prompt (`src/agents/survival/prompts.py`) y sube
-`AGENTE_VERSION`: los veredictos viejos quedan con la versión vieja. Luego
-diez, y los 400 en segundo plano:
+`AGENTE_VERSION`: los veredictos viejos quedan con la versión vieja.
+
+**El tamaño de la muestra se decide con lo medido.** Primero una muestra
+chica (10 por estrato = 40 negocios), en segundo plano; `metricas` dice el
+tiempo promedio por negocio y cuánto tardarían 400 o 1000. Si el
+experimento funciona, se saca una muestra mayor con otro nombre:
 
 ```bash
-docker compose run --rm agente verificar --muestra piloto-2026-11 --limite 10
-nohup docker compose run --rm agente verificar --muestra piloto-2026-11 > agente.log 2>&1 &
+docker compose run --rm agente muestrear --nombre v5-piloto --cuota 10
+nohup docker compose run --rm agente verificar --muestra v5-piloto > agente-v5.log 2>&1 &
 sleep 10
-tail -f agente.log
+tail -f agente-v5.log
+docker compose run --rm agente metricas --muestra v5-piloto     # tiempos y proyección
 ```
 
 Se reanuda solo: los pendientes son los que ESTE equipo (`modelo/version`)
-no ha verificado. Del orden de un minuto por negocio: una noche para 400.
+no ha verificado.
 
 Si el juez falló en algunos negocios, o se quiere otro modelo como juez:
 
@@ -587,7 +614,7 @@ docker compose run --rm agente auditar --muestra piloto-2026-11
 docker compose run --rm agente auditar --muestra piloto-2026-11 --modelo gpt-oss:20b
 ```
 
-### 11.4 Las métricas
+### 11.5 Las métricas
 
 ```bash
 docker compose run --rm agente metricas --muestra piloto-2026-11
@@ -600,8 +627,10 @@ cada estrato en gold: la **precisión de `cerrado`** en la población, y la
 fracción de `activos` del DENUE que ya cerraron. Debajo, el juez por
 estrato: cuántos veredictos sostuvo y en cuántos llegó a ciegas al mismo
 estado. `--solo-sostenidos` recalcula la tabla con los veredictos que el
-juez sostuvo. Con `--agente qwen3:32b/v4` se filtra un modelo; para comparar
-dos, se corre `verificar` dos veces con distinto `OLLAMA_MODEL`.
+juez sostuvo. Al final, el tiempo por negocio (promedio, mediana, p90), el
+del juez y el de cada especialista, con la proyección para lo que falta, 400
+y 1000 negocios. Con `--agente qwen3:32b/v5` se filtra un modelo; para
+comparar dos, se corre `verificar` dos veces con distinto `OLLAMA_MODEL`.
 
 ## Comandos sueltos
 

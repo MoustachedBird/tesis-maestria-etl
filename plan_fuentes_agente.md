@@ -1,7 +1,26 @@
 # Plan: más fuentes para el agente de supervivencia (v5)
 
-Estado: **propuesta**, nada implementado. Parte de la v4 (`AGENTS.md` N7):
-recolección base fija por fuente → especialista por fuente → decisor → juez.
+Estado (2026-11-20): **F0–F4 implementadas** (v5), sin probar todavía en
+indominus; F5 (PSM, DOF) y F6 (fachada con visión) pendientes, después de la
+corrida chica que mide el tiempo por negocio. Parte de la v4 (`AGENTS.md`
+N7): recolección base fija por fuente → especialista por fuente → decisor →
+juez.
+
+| Fase | Estado |
+|---|---|
+| F0 infraestructura (`b0012`, `Especialidad`, `AGENTE_FUENTES`, pausas, bloqueos, perfil de Chrome, `sondear`, recorte al contexto) | hecha |
+| F1 buscadores (SearXNG con motores explícitos, Bing, DuckDuckGo, Google, Brave) | hecha |
+| F2 Maps con reseñas recientes, OSM | hecha |
+| F3 Internet Archive, Common Crawl, dominio, SAT | hecha |
+| F4 plataformas (TripAdvisor, Yelp, Rappi...) | hecha; falta revisar qué directorios copian al DENUE |
+| F5 PSM, DOF | pendiente: sondear primero si sus buscadores piden CAPTCHA |
+| F6 fachada (Street View, Mapillary, KartaView + visión) | pendiente: decidir el modelo midiendo VRAM |
+| F7 evaluación v4 vs v5, aporte por fuente, tiempos | `metricas` ya da los tiempos |
+
+Lo que se cambió respecto al plan: la "ventana de relevancia" de §1.4 no se
+hizo; en su lugar el expediente se recorta parejo para caber en el contexto
+(`formatear_expediente(presupuesto=...)`). El paralelismo recolección/modelo
+tampoco: el tiempo no es restricción y en serie es más simple de auditar.
 
 Dos reglas de la petición:
 
