@@ -437,6 +437,24 @@ class TestVerificarYGuardar:
             assert insumo.pendientes(conn, muestra_id, "falso:1b/v4") == [(1, caido)]
         assert corrida == JobStatus.PARTIAL.value
 
+    def test_un_negocio_que_no_se_puede_guardar_no_tumba_la_muestra(self, db, tracker):
+        muestra(db, tracker)
+        malo = negocios_de(db, "piloto")[0].clee
+
+        class ConNul(VerificadorFalso):
+            def verificar(self, negocio):
+                r = super().verificar(negocio)
+                if negocio.clee == malo:
+                    r.razonamiento = "texto con \x00 que Postgres rechaza"
+                return r
+
+        conteos = verificar_muestra(db, tracker, ConNul(), "piloto")
+        assert conteos == {**conteos, "verificados": CUOTA * 4 - 1, "fallidos": 1}
+        with db.connect() as conn:
+            muestra_id, _ = insumo.muestra_por_nombre(conn, "piloto")
+            # Nada a medias: el negocio que fallo sigue pendiente.
+            assert insumo.pendientes(conn, muestra_id, "falso:1b/v4") == [(1, malo)]
+
     def test_guardar_respeta_el_vocabulario_de_la_base(self, db, tracker):
         """La ultima red: si el bucle dejara pasar un estado invalido, la base lo rechaza."""
         from sqlalchemy.exc import IntegrityError

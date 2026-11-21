@@ -334,8 +334,15 @@ def verificar_muestra(
                 conteos["fallidos"] += 1
                 logger.error(f"      ✖ {clee}: {e.__class__.__name__}: {e}")
                 continue
-            with engine.begin() as conn:
-                veredicto_id = guardar(conn, resultado)
+            try:
+                with engine.begin() as conn:
+                    veredicto_id = guardar(conn, resultado)
+            except Exception as e:  # noqa: BLE001  (un negocio que no se pudo guardar no tumba la muestra)
+                conteos["fallidos"] += 1
+                logger.error(
+                    f"      ✖ {clee}: no se pudo guardar: {e.__class__.__name__}: {str(e)[:300]}"
+                )
+                continue
             conteos["verificados"] += 1
             conteos[resultado.estado] += 1
             logger.info(

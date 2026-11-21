@@ -61,6 +61,19 @@ class Pieza:
     ampliada: bool = False
     """True si la pidió el especialista; False si es de la recolección base."""
 
+    def __post_init__(self) -> None:
+        """Quita los caracteres que PostgreSQL no admite en un TEXT (el NUL, `\x00`).
+
+        Hay páginas que los traen (sondeo del 2026-11-21: una tumbó el
+        guardado de la muestra). Se limpian aquí, al nacer la pieza, y no al
+        guardar, para que el texto que ve el modelo, el que valida las citas
+        y el que queda en `consultas` sean el mismo.
+        """
+        for campo in ("contenido", "consulta", "url", "titulo"):
+            valor = getattr(self, campo)
+            if isinstance(valor, str) and "\x00" in valor:
+                object.__setattr__(self, campo, sin_nul(valor))
+
     @property
     def fuente(self) -> str:
         """El tipo de fuente por dominio; `ninguna` si la pieza no tiene URL."""
@@ -91,6 +104,11 @@ class Pieza:
             lineas.append(f"fecha de publicación (buscador): {self.fecha.isoformat()}")
         lineas.append(self.contenido)
         return "\n".join(lineas)
+
+
+def sin_nul(texto: str) -> str:
+    """El texto sin caracteres NUL, que PostgreSQL rechaza en columnas de texto."""
+    return texto.replace("\x00", "")
 
 
 class Navegable(Protocol):

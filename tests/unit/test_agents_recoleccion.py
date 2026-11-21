@@ -265,3 +265,11 @@ def test_el_archivo_busca_paginas_de_redes_no_publicaciones():
     grupo = "https://www.facebook.com/groups/1803558436594459/posts/4691821994434741/"
     pagina = "https://www.facebook.com/p/Dulceria-El-Kiosco-100083341502594/"
     assert urls_para_archivo(negocio(sitios=[]), _web(post, grupo, pagina), 3) == [pagina]
+
+
+@pytest.mark.unit
+def test_una_pieza_nace_sin_nul():
+    """PostgreSQL rechaza el NUL en TEXT; una página que lo traía tumbó la muestra."""
+    p = Pieza("web", "Tienda\x00 Fabys", "ok", titulo="T\x00", url="https://a.mx/\x00")
+    assert "\x00" not in p.contenido + p.titulo + p.url
+    assert p.contenido == "Tienda Fabys"
