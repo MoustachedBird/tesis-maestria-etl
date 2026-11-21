@@ -299,3 +299,24 @@ class TestSat:
         lista = sat.ListaSat("http://no-debe-bajarse", Path("/nonexistent"))
         (p,) = FuenteSat(lista, "http://sat").recolectar(negocio(razones_sociales=[]), [])
         assert not p.citable and lista.descargada is None
+
+
+@pytest.mark.unit
+def test_rdap_rechazado_va_directo_al_servidor_del_tld(monkeypatch):
+    pedidas: list[str] = []
+    datos = {"events": [{"eventAction": "expiration", "eventDate": "2030-01-01T00:00:00Z"}]}
+
+    def get(url, timeout=None, headers=None):
+        pedidas.append(url)
+        assert "User-Agent" in headers
+        if "rdap.org" in url:
+            return _Resp(status=403)
+        if url.endswith("dns.json"):
+            return _Resp({"services": [[["com", "net"], ["https://rdap.verisign.com/com/v1/"]]]})
+        return _Resp(datos)
+
+    monkeypatch.setattr(dominio, "_servidores_rdap", None)
+    monkeypatch.setattr(dominio.requests, "get", get)
+    r = dominio.consultar_registro("tacospaco.com", hoy=date(2026, 11, 20))
+    assert r.vence == date(2030, 1, 1)
+    assert pedidas[-1] == "https://rdap.verisign.com/com/v1/domain/tacospaco.com"

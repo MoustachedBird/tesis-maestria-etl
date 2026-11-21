@@ -26,7 +26,16 @@ from urllib.parse import urlparse
 import requests
 
 _RDAP = "https://rdap.org/domain/{dominio}"
-"""Bootstrap de RDAP: redirige al servidor del registro del TLD."""
+"""Intermediario de RDAP: redirige al servidor del registro del TLD."""
+
+_BOOTSTRAP_IANA = "https://data.iana.org/rdap/dns.json"
+"""La tabla oficial de IANA de qué servidor RDAP atiende cada TLD (respaldo de `_RDAP`)."""
+
+_UA = "tesis-etl-agente/1.0 (verificacion academica de negocios)"
+"""User-Agent: sin él rdap.org responde 403 (sondeo del 2026-11-21)."""
+
+_servidores_rdap: dict[str, str] | None = None
+"""La tabla de IANA ya descargada, TLD -> URL base; se baja una vez por proceso."""
 
 _WHOIS_MX = ("whois.mx", 43)
 """El WHOIS de NIC México."""
@@ -200,9 +209,15 @@ def _whois_mx(dominio: str, timeout: int) -> Registro:
 
 
 def _rdap(dominio: str, timeout: int) -> Registro:
-    """RDAP por el bootstrap de rdap.org."""
+    """RDAP por rdap.org; si no lo atiende, directo al servidor del TLD según IANA."""
+    cabeceras = {"Accept": "application/rdap+json", "User-Agent": _UA}
     url = _RDAP.format(dominio=dominio)
-    r = requests.get(url, timeout=timeout, headers={"Accept": "application/rdap+json"})
+    r = requests.get(url, timeout=timeout, headers=cabeceras)
+    if r.status_code in (403, 429) or r.status_code >= 500:
+        base = _servidor_rdap(dominio.rsplit(".", 1)[-1], timeout)
+        if base:
+            url = f"{base.rstrip('/')}/domain/{dominio}"
+            r = requests.get(url, timeout=timeout, headers=cabeceras)
     if r.status_code == 404:
         return Registro(dominio, url, False, [f"{dominio}: el registro (RDAP) no lo encuentra"])
     r.raise_for_status()
@@ -224,6 +239,18 @@ def _rdap(dominio: str, timeout: int) -> Registro:
     if datos.get("status"):
         lineas.append("estado: " + ", ".join(datos["status"]))
     return Registro(dominio, url, True, lineas, vence)
+
+
+def _servidor_rdap(tld: str, timeout: int) -> str | None:
+    """La URL base del servidor RDAP de un TLD, según la tabla de IANA."""
+    global _servidores_rdap
+    if _servidores_rdap is None:
+        r = requests.get(_BOOTSTRAP_IANA, timeout=timeout, headers={"User-Agent": _UA})
+        r.raise_for_status()
+        _servidores_rdap = {
+            t.lower(): urls[0] for tlds, urls in r.json().get("services", []) if urls for t in tlds
+        }
+    return _servidores_rdap.get(tld.lower())
 
 
 def _fecha(texto: str) -> date | None:
