@@ -47,6 +47,9 @@ class Negocio:
     correos: list[str] = field(default_factory=list)
     sitios: list[str] = field(default_factory=list)
     domicilios: list[str] = field(default_factory=list)
+    localidad: str | None = None
+    """El nombre de la localidad del último corte (`cve_geo_final`). En zonas rurales es lo que
+    ubica al negocio: un municipio tiene decenas de localidades y Maps busca por localidad."""
     variantes: dict[str, list[tuple[str, list[str]]]] = field(default_factory=dict)
     """Por campo de `CAMPOS_VARIABLES`: cada valor distinto con los cortes (AAAA-MM) en que apareció,
     del más reciente al más viejo.
@@ -181,6 +184,10 @@ SELECT mn.muestra_id, mn.clee, mn.orden, mn.estrato,
          WHERE en.cve_ent = LEFT(g.cve_geo_final, 2)) AS entidad,
        (SELECT mu.municipio FROM silver.denue_municipios mu
          WHERE mu.cve_ent = LEFT(g.cve_geo_final, 2) AND mu.cve_mun = SUBSTR(g.cve_geo_final, 3, 3)) AS municipio,
+       (SELECT lo.localidad FROM silver.denue_localidades lo
+         WHERE length(g.cve_geo_final) >= 9
+           AND lo.cve_ent = LEFT(g.cve_geo_final, 2) AND lo.cve_mun = SUBSTR(g.cve_geo_final, 3, 3)
+           AND lo.cve_loc = SUBSTR(g.cve_geo_final, 6, 4)) AS localidad,
        {", ".join(f"{sql_variantes(expr)} AS v_{campo}" for campo, expr in CAMPOS_VARIABLES.items())}
 FROM verificacion.muestra_negocios mn
 JOIN verificacion.muestras m USING (muestra_id)
@@ -222,6 +229,7 @@ def cargar(conn: Connection, muestra_id: str, clee: str) -> Negocio:
         cve_geo_final=fila["cve_geo_final"],
         entidad=fila["entidad"],
         municipio=fila["municipio"],
+        localidad=fila["localidad"],
         lat=fila["lat_final"],
         lon=fila["lon_final"],
         primer_periodo=fila["primer_periodo"],

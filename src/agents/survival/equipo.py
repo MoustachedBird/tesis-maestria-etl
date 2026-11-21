@@ -173,6 +173,7 @@ class Planificador:
             [
                 *n.domicilios,
                 *(v for v, _ in n.variantes.get("entre_calles", [])),
+                n.localidad or "",
                 n.municipio or "",
                 n.entidad or "",
             ]

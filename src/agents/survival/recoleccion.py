@@ -258,10 +258,10 @@ class FuenteMaps:
         """
         consultas = [f"{nombre_de(n)} {lugar_de(n)}"]
         if domicilio_de(n):
-            consultas.append(f"{nombre_de(n)} {domicilio_de(n)} {n.municipio or ''}".strip())
+            consultas.append(f"{nombre_de(n)} {domicilio_de(n)}, {lugar_de(n)}".strip(" ,"))
         consultas += [f"{otro} {lugar_de(n)}" for otro in nombres_de_busqueda(n)[1:]]
         consultas += [
-            f"{nombre_de(n)} {otro} {n.municipio or ''}".strip()
+            f"{nombre_de(n)} {otro}, {lugar_de(n)}".strip(" ,")
             for otro in domicilios_de_busqueda(n)[1:]
         ]
         piezas: list[Pieza] = []
@@ -351,14 +351,14 @@ class FuenteWeb:
         """Nombre + lugar, nombre + domicilio, teléfono, y dos dirigidas: redes y reseñas."""
         consultas = [f'"{nombre_de(n)}" {lugar_de(n)}']
         if domicilio_de(n):
-            consultas.append(f"{nombre_de(n)} {domicilio_de(n)} {n.municipio or ''}".strip())
+            consultas.append(f"{nombre_de(n)} {domicilio_de(n)}, {lugar_de(n)}".strip(" ,"))
         if telefono_de(n):
             consultas.append(telefono_de(n))
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} facebook".strip())
         consultas.append(f"{nombre_de(n)} {n.municipio or ''} opiniones".strip())
         consultas += [f'"{otro}" {lugar_de(n)}' for otro in nombres_de_busqueda(n)[1:]]
         consultas += [
-            f"{nombre_de(n)} {otro} {n.municipio or ''}".strip()
+            f"{nombre_de(n)} {otro}, {lugar_de(n)}".strip(" ,")
             for otro in domicilios_de_busqueda(n)[1:]
         ]
         piezas: list[Pieza] = []
@@ -696,8 +696,26 @@ def nombres_de_busqueda(n: Negocio) -> list[str]:
 
 
 def lugar_de(n: Negocio) -> str:
-    """`municipio, entidad`, con lo que haya."""
-    return ", ".join(x for x in (n.municipio, n.entidad) if x)
+    """`localidad, municipio, estado`, sin repetir: "Xalapa, Veracruz" si la localidad es el municipio.
+
+    La localidad ubica al negocio en zonas rurales (un municipio tiene
+    decenas) y el estado desambigua municipios homónimos (hay un Ocampo en
+    seis estados). Si localidad y municipio se llaman igual, se escribe una
+    vez y el estado es lo que agrega información.
+    """
+    partes: list[str] = []
+    for x in (n.localidad, n.municipio, n.entidad):
+        if x and _llave_lugar(x) not in {_llave_lugar(p) for p in partes}:
+            partes.append(x)
+    return ", ".join(partes)
+
+
+def _llave_lugar(texto: str) -> str:
+    """Un nombre de lugar comparable: sin acentos, mayúsculas ni puntuación ("Xalapa" = "XALAPA")."""
+    import unicodedata
+
+    plano = unicodedata.normalize("NFKD", texto.upper()).encode("ascii", "ignore").decode()
+    return " ".join("".join(c if c.isalnum() else " " for c in plano).split())
 
 
 def clave_url(url: str | None) -> str:

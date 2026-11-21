@@ -64,7 +64,7 @@ class TestMaps:
         piezas = FuenteMaps(nav, 6000, 200).recolectar(negocio(), [])
         assert nav.maps == [
             "TACOS PACO Guadalajara, Jalisco",
-            "TACOS PACO AV VALLARTA 1234 AMERICANA 44160 Guadalajara",
+            "TACOS PACO AV VALLARTA 1234 AMERICANA 44160, Guadalajara, Jalisco",
         ]
         assert all(p.recolector == "maps" and p.citable and not p.ampliada for p in piezas)
 
@@ -92,7 +92,7 @@ class TestWeb:
         FuenteWeb(buscador, 8).recolectar(negocio(), [])
         assert buscador.consultas == [
             '"TACOS PACO" Guadalajara, Jalisco',
-            "TACOS PACO AV VALLARTA 1234 AMERICANA 44160 Guadalajara",
+            "TACOS PACO AV VALLARTA 1234 AMERICANA 44160, Guadalajara, Jalisco",
             "3312345678",
             "TACOS PACO Guadalajara facebook",
             "TACOS PACO Guadalajara opiniones",
@@ -330,3 +330,28 @@ def test_maps_en_vista_limitada_no_busca_resenas():
 
     piezas = FuenteMaps(NavLimitado(), 6000, 200).recolectar(negocio(), [])
     assert all(p.consulta != "reseñas más recientes de la ficha" for p in piezas)
+
+
+@pytest.mark.unit
+class TestElLugar:
+    def test_localidad_municipio_y_estado(self):
+        from src.agents.survival.recoleccion import lugar_de
+
+        n = negocio(localidad="SAN ISIDRO", municipio="ACATEPEC", entidad="GUERRERO")
+        assert lugar_de(n) == "SAN ISIDRO, ACATEPEC, GUERRERO"
+
+    def test_si_localidad_y_municipio_se_llaman_igual_va_una_vez(self):
+        from src.agents.survival.recoleccion import lugar_de
+
+        n = negocio(localidad="XALAPA-ENRÍQUEZ", municipio="Xalapa", entidad="Veracruz")
+        assert lugar_de(n) == "XALAPA-ENRÍQUEZ, Xalapa, Veracruz"
+        n = negocio(
+            localidad="XALAPA", municipio="Xalapa", entidad="Veracruz de Ignacio de la Llave"
+        )
+        assert lugar_de(n) == "XALAPA, Veracruz de Ignacio de la Llave"
+
+    def test_la_consulta_de_domicilio_lleva_el_lugar_completo(self):
+        nav = NavegadorFalso()
+        n = negocio(localidad="XALAPA", municipio="Xalapa", entidad="Veracruz")
+        FuenteMaps(nav, 6000, 200).recolectar(n, [])
+        assert nav.maps[1] == "TACOS PACO AV VALLARTA 1234 AMERICANA 44160, XALAPA, Veracruz"
