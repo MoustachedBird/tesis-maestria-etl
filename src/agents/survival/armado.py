@@ -9,9 +9,16 @@ entre especialistas.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from src.agents.survival.fuentes_abiertas import FuenteOsm
+from src.agents.survival.fuentes_abiertas import (
+    FuenteCommonCrawl,
+    FuenteDominio,
+    FuenteOsm,
+    FuenteSat,
+    FuenteWayback,
+)
 from src.agents.survival.recoleccion import (
     Fuente,
     FuenteMaps,
@@ -29,7 +36,12 @@ from src.agents.survival.sources.buscadores import (
 from src.agents.survival.sources.busqueda import BuscadorBrave, BuscadorSearxng
 from src.agents.survival.sources.cortesia import Cortacircuitos, Pausador
 from src.agents.survival.sources.navegador import Navegador, leer_con_respaldo
+from src.agents.survival.sources.paginas import leer_pagina
+from src.agents.survival.sources.sat import ListaSat
 from src.shared.enums import Recolector
+
+DATOS_AGENTE = "data/agente"
+"""Carpeta de lo que el agente guarda en disco (perfil de Chrome, listas, sondeos); no se versiona."""
 
 
 def nombres_de_fuentes(valor: str) -> list[str]:
@@ -108,6 +120,27 @@ class Armado:
             Recolector.SITIO.value: lambda: FuenteSitio(
                 lambda url: leer_con_respaldo(url, self.navegador, caracteres, timeout, minimo),
                 a.AGENTE_MAX_SITIOS,
+            ),
+            Recolector.WAYBACK.value: lambda: FuenteWayback(
+                lambda url: leer_pagina(url, caracteres, max(timeout, 30), minimo),
+                max_urls=a.AGENTE_MAX_ARCHIVO,
+                timeout=max(timeout, 30),
+                pausador=self.pausador,
+            ),
+            Recolector.COMMON_CRAWL.value: lambda: FuenteCommonCrawl(
+                max_urls=a.AGENTE_MAX_ARCHIVO,
+                crawls=a.AGENTE_CRAWLS_COMMON_CRAWL,
+                timeout=max(timeout, 60),
+                pausador=self.pausador,
+            ),
+            Recolector.DOMINIO.value: lambda: FuenteDominio(timeout=timeout),
+            Recolector.SAT.value: lambda: FuenteSat(
+                ListaSat(
+                    a.SAT_NO_LOCALIZADOS_URL,
+                    Path(DATOS_AGENTE) / "sat",
+                    dias_validez=a.AGENTE_CACHE_DIAS,
+                ),
+                a.SAT_NO_LOCALIZADOS_URL,
             ),
         }
 

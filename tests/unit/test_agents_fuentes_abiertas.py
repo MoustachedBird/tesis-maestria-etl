@@ -6,11 +6,21 @@ para poder citarla, que un servicio caído sea una pieza ERROR y no una
 caída--, no que los servicios respondan hoy igual (eso lo dice `sondear`).
 """
 
+from datetime import date
+from pathlib import Path
+
 import pytest
 
-from src.agents.survival.fuentes_abiertas import FuenteOsm
-from src.agents.survival.recoleccion import FuenteMaps
-from src.agents.survival.sources import osm
+from src.agents.survival.fuentes_abiertas import (
+    FuenteCommonCrawl,
+    FuenteDominio,
+    FuenteOsm,
+    FuenteSat,
+    FuenteWayback,
+    urls_para_archivo,
+)
+from src.agents.survival.recoleccion import FuenteMaps, Pieza
+from src.agents.survival.sources import archivo, dominio, osm, sat
 from tests.unit.test_agents_recoleccion import NavegadorFalso
 from tests.unit.test_agents_verificador import negocio
 
@@ -132,3 +142,160 @@ def test_maps_lee_las_resenas_recientes_una_vez_por_ficha():
     # Dos búsquedas que caen en la misma ficha: dos piezas de búsqueda, una de reseñas.
     assert len(piezas) == 3 and nav.resenas == 1
     assert piezas[1].consulta.startswith("reseñas más recientes") and piezas[1].url == nav.FICHA
+
+
+# ----- archivo web -----
+
+WAYBACK_PRIMERA = (
+    '[["timestamp","statuscode","original"],["20150302101010","200","http://tacospaco.mx/"]]'
+)
+WAYBACK_RECIENTES = (
+    '[["timestamp","statuscode","original"],'
+    '["20221105000000","200","http://tacospaco.mx/"],'
+    '["20230612000000","404","http://tacospaco.mx/"]]'
+)
+
+
+class _Texto(_Resp):
+    def __init__(self, texto, status=200):
+        super().__init__(status=status, texto=texto)
+
+
+@pytest.mark.unit
+class TestWayback:
+    def test_indice_y_lectura_de_la_ultima_buena(self, monkeypatch):
+        def get(url, params=None, headers=None, timeout=None):
+            return _Texto(WAYBACK_PRIMERA if params.get("limit") == "1" else WAYBACK_RECIENTES)
+
+        monkeypatch.setattr(archivo.requests, "get", get)
+        leidas: list[str] = []
+
+        def leer(url):
+            leidas.append(url)
+            return "TITULO: Tacos Paco\nMenú y horarios. " * 20
+
+        piezas = FuenteWayback(leer, max_urls=3).recolectar(negocio(sitios=["tacospaco.mx"]), [])
+        indice, captura = piezas
+        assert "primera captura: 2015-03-02" in indice.contenido
+        assert "2022-11-05 (HTTP 200), 2023-06-12 (HTTP 404)" in indice.contenido
+        assert indice.fuente == "wayback" and indice.citable
+        # Se lee la más reciente que respondió 200, cruda (id_), y la fecha queda escrita.
+        assert leidas == ["https://web.archive.org/web/20221105000000id_/http://tacospaco.mx/"]
+        assert captura.contenido.startswith("Captura del Internet Archive del 2022-11-05")
+
+    def test_sin_capturas(self, monkeypatch):
+        monkeypatch.setattr(archivo.requests, "get", lambda *a, **k: _Texto("[]"))
+        (p,) = FuenteWayback(lambda u: "", max_urls=3).recolectar(
+            negocio(sitios=["tacospaco.mx"]), []
+        )
+        assert p.estado == "sin_resultados"
+
+    def test_tambien_busca_las_redes_halladas(self):
+        exp = [Pieza("bing", "x", "ok", url="https://www.facebook.com/tacospaco")]
+        urls = urls_para_archivo(negocio(sitios=["tacospaco.mx"]), exp, 3)
+        assert urls == ["https://tacospaco.mx", "https://www.facebook.com/tacospaco"]
+
+
+@pytest.mark.unit
+def test_common_crawl_dice_en_que_crawl_aparecio(monkeypatch):
+    crawls = [
+        {"id": "CC-MAIN-2026-40", "name": "October 2026 Index", "cdx-api": "https://cc/40"},
+        {"id": "CC-MAIN-2026-33", "name": "August 2026 Index", "cdx-api": "https://cc/33"},
+    ]
+
+    def get(url, params=None, headers=None, timeout=None):
+        if url.endswith("collinfo.json"):
+            r = _Resp(crawls)
+            return r
+        if url.endswith("/40"):
+            return _Texto(
+                '{"timestamp": "20261003120000", "status": "200", "url": "https://tacospaco.mx/"}'
+            )
+        return _Texto("", status=404)
+
+    monkeypatch.setattr(archivo.requests, "get", get)
+    (p,) = FuenteCommonCrawl(max_urls=3, crawls=2).recolectar(negocio(sitios=["tacospaco.mx"]), [])
+    assert p.citable
+    assert "CC-MAIN-2026-40 (October 2026 Index): capturada el 2026-10-03 (HTTP 200)" in p.contenido
+    assert "CC-MAIN-2026-33 (August 2026 Index): sin capturas" in p.contenido
+
+
+# ----- dominio -----
+
+
+@pytest.mark.unit
+class TestDominio:
+    def test_dominios_propios_sin_plataformas_ni_correo_gratuito(self):
+        ds = dominio.dominios_del_negocio(
+            ["www.tacospaco.com.mx", "tacospaco.wixsite.com/menu", "facebook.com/tacospaco"],
+            ["ventas@tacospaco.com.mx", "paco@gmail.com", "contacto@netflix.com"],
+        )
+        assert ds == [("tacospaco.com.mx", "sitio"), ("netflix.com", "correo")]
+
+    def test_registrable(self):
+        assert dominio.registrable("tienda.tacospaco.com.mx") == "tacospaco.com.mx"
+        assert dominio.registrable("www.tacospaco.mx") == "tacospaco.mx"
+        assert dominio.registrable("blog.tacospaco.com") == "tacospaco.com"
+
+    def test_rdap_vencido_lo_dice_con_fechas(self, monkeypatch):
+        datos = {
+            "events": [
+                {"eventAction": "registration", "eventDate": "2012-03-01T00:00:00Z"},
+                {"eventAction": "expiration", "eventDate": "2025-03-01T00:00:00Z"},
+            ],
+            "status": ["client hold"],
+        }
+        monkeypatch.setattr(dominio.requests, "get", lambda *a, **k: _Resp(datos))
+        r = dominio.consultar_registro("tacospaco.com", hoy=date(2026, 11, 20))
+        assert r.registrado and r.vence == date(2025, 3, 1)
+        assert "registrado: 2012-03-01" in r.lineas
+        assert r.lineas[-1] == "el registro vence el 2025-03-01; hoy es 2026-11-20: VENCIDO"
+
+    def test_rdap_404_es_no_registrado(self, monkeypatch):
+        monkeypatch.setattr(dominio.requests, "get", lambda *a, **k: _Resp(status=404))
+        assert dominio.consultar_registro("tacospaco.com").registrado is False
+
+    def test_sin_dominio_propio_no_consulta(self):
+        (p,) = FuenteDominio().recolectar(negocio(sitios=[], correos=["x@hotmail.com"]), [])
+        assert not p.citable
+
+
+# ----- SAT -----
+
+CSV_SAT = (
+    "Listado de contribuyentes no localizados\n"
+    "RFC,RAZÓN SOCIAL,TIPO PERSONA,SUPUESTO,FECHAS DE PRIMERA PUBLICACION\n"
+    'TPA120301AB1,"TACOS PACO, S.A. DE C.V.",Moral,NO LOCALIZADOS,15/03/2022\n'
+    "XAXX010101000,OTRA EMPRESA SA,Moral,NO LOCALIZADOS,01/01/2020\n"
+).encode("latin-1")
+
+
+@pytest.mark.unit
+class TestSat:
+    def test_indexa_con_titulo_antes_de_la_cabecera_y_en_latin1(self):
+        indice, n = sat.indexar(CSV_SAT)
+        assert n == 2
+        (c,) = indice[sat.llave("Tacos Paco SA de CV")]
+        assert "FECHAS DE PRIMERA PUBLICACION: 15/03/2022" in c.fila
+
+    def test_la_pieza_cita_la_fila_y_advierte_del_homonimo(self, tmp_path):
+        archivo_csv = tmp_path / "no_localizados.csv"
+        archivo_csv.write_bytes(CSV_SAT)
+        lista = sat.ListaSat("http://sat", tmp_path, dias_validez=30)
+        (p,) = FuenteSat(lista, "http://sat").recolectar(
+            negocio(razones_sociales=["TACOS PACO SA DE CV"]), []
+        )
+        assert p.citable and "15/03/2022" in p.contenido and "homónimo" in p.contenido
+
+    def test_sin_coincidencia_no_es_citable(self, tmp_path):
+        (tmp_path / "no_localizados.csv").write_bytes(CSV_SAT)
+        lista = sat.ListaSat("http://sat", tmp_path, dias_validez=30)
+        (p,) = FuenteSat(lista, "http://sat").recolectar(
+            negocio(razones_sociales=["TACOS PACO DOS SA"]), []
+        )
+        assert p.estado == "sin_resultados"
+
+    def test_sin_razon_social_no_descarga(self):
+        lista = sat.ListaSat("http://no-debe-bajarse", Path("/nonexistent"))
+        (p,) = FuenteSat(lista, "http://sat").recolectar(negocio(razones_sociales=[]), [])
+        assert not p.citable and lista.descargada is None
